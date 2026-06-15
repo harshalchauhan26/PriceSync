@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>{% block title %}PriceSync{% endblock %}</title>
 <style>
   :root{
@@ -97,6 +98,12 @@
   #msg{margin-top:12px;font-size:12px;color:var(--dim);min-height:16px}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(63,185,80,.5)}
     70%{box-shadow:0 0 0 6px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
+  #toast{position:fixed;right:18px;bottom:18px;z-index:50;display:flex;flex-direction:column;gap:8px}
+  .tmsg{background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--purple);
+    border-radius:8px;padding:10px 14px;font-size:12.5px;max-width:380px;box-shadow:0 6px 24px rgba(0,0,0,.4);
+    animation:slidein .2s ease}
+  .tmsg.ok{border-left-color:var(--green)} .tmsg.err{border-left-color:var(--red)}
+  @keyframes slidein{from{transform:translateY(8px);opacity:0}to{transform:translateY(0);opacity:1}}
   {% block style %}{% endblock %}
 </style>
 </head>
@@ -116,8 +123,18 @@
     </div>
     <div class="page">{% block content %}{% endblock %}</div>
   </div>
+  <div id="toast"></div>
 <script>
 const $ = id => document.getElementById(id);
+function showToast(text, kind){
+  const t=document.getElementById("toast");
+  const d=document.createElement("div");
+  d.className="tmsg "+(kind||"");
+  d.textContent=text;
+  t.appendChild(d);
+  setTimeout(()=>{ d.style.transition="opacity .3s"; d.style.opacity="0";
+    setTimeout(()=>d.remove(),300); }, kind==="err"?6000:3500);
+}
 const fmt = n => (n===null||n===undefined||n==="") ? "—"
   : Number(n).toLocaleString(undefined,{maximumFractionDigits:2});
 function badge(p){p=(p||"?").toLowerCase();return `<span class="badge ${p}">${p}</span>`}

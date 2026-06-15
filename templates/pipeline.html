@@ -52,12 +52,9 @@
     <div class="toggle-row"><div><div class="t-label">Safe-Retry Window</div>
       <div class="t-sub">Gently re-fetch errors after the run (no 429)</div></div>
       <label class="switch"><input type="checkbox" id="safeRetry" checked><span class="slider"></span></label></div>
-    <div class="toggle-row"><div><div class="t-label">Retry Fetch Errors</div>
-      <div class="t-sub">Include past errors in this run</div></div>
-      <label class="switch"><input type="checkbox" id="retryErrors"><span class="slider"></span></label></div>
-    <div class="toggle-row"><div><div class="t-label">Fresh Start</div>
-      <div class="t-sub">Reprocess every row from 0</div></div>
-      <label class="switch"><input type="checkbox" id="freshStart"><span class="slider"></span></label></div>
+    <div class="hint" style="margin-top:12px;line-height:1.6">
+      <b style="color:var(--text)">▶ Run from start</b> re-checks every product (default).<br>
+      <b style="color:var(--text)">↻ Check updates</b> only does rows not done yet + retries errors.</div>
 
     <details class="adv"><summary>ADVANCED</summary>
       <div class="toggle-row"><div><div class="t-label">Simulation Mode</div>
@@ -70,7 +67,8 @@
 
   <div id="runcol">
     <div class="toolbar">
-      <button class="btn primary" id="startBtn">▶ Start</button>
+      <button class="btn primary" id="startBtn">▶ Run from start</button>
+      <button class="btn" id="updateBtn" title="Only process rows not done yet + retry errors">↻ Check updates</button>
       <button class="btn red" id="abortBtn" disabled>● Abort</button>
       <button class="btn go" id="dlBtn">↓ Export xlsx</button>
       <button class="btn" id="clearBtn">🗑 Clear Log</button>
@@ -100,11 +98,12 @@ let cursor=0, running=false;
 const fmtEl=s=>String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0");
 function readCfg(){return{concurrency:+$("concurrency").value,timeout_ms:+$("timeoutMs").value,
   batch_size:+$("batchSize").value,rest_between:+$("restBetween").value,
-  safe_retry:$("safeRetry").checked,retry_errors:$("retryErrors").checked,
-  fresh_start:$("freshStart").checked,simulation:$("simMode").checked}}
-async function applyCfg(){await fetch("/api/pipe/config",{method:"POST",
-  headers:{"Content-Type":"application/json"},body:JSON.stringify(readCfg())});
-  $("applyBtn").textContent="✓ Applied";setTimeout(()=>$("applyBtn").textContent="Apply Config",1200)}
+  safe_retry:$("safeRetry").checked,simulation:$("simMode").checked}}
+async function sendCfg(extra){await fetch("/api/pipe/config",{method:"POST",
+  headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign(readCfg(),extra||{}))})}
+async function applyCfg(){await sendCfg({});
+  $("applyBtn").textContent="✓ Applied";showToast("Configuration applied","ok");
+  setTimeout(()=>$("applyBtn").textContent="Apply Config",1200)}
 $("applyBtn").onclick=applyCfg;
 
 async function importFile(file){
@@ -121,11 +120,18 @@ dz.ondragover=e=>{e.preventDefault();dz.classList.add("drag")};
 dz.ondragleave=()=>dz.classList.remove("drag");
 dz.ondrop=e=>{e.preventDefault();dz.classList.remove("drag");e.dataTransfer.files[0]&&importFile(e.dataTransfer.files[0])};
 
-$("startBtn").onclick=async()=>{await applyCfg();
-  const d=await(await fetch("/api/pipe/start",{method:"POST"})).json();if(d.error)$("msg").textContent=d.error};
-$("abortBtn").onclick=()=>fetch("/api/pipe/abort",{method:"POST"});
+async function run(mode){
+  // fresh = re-check every product; update = only pending rows + retry errors
+  await sendCfg({fresh_start: mode==="fresh", retry_errors: mode==="update"});
+  const d=await(await fetch("/api/pipe/start",{method:"POST"})).json();
+  if(d.error){ showToast(d.error,"err"); }
+  else { showToast(mode==="fresh"?"Full run started — re-checking every product":"Checking for updates…","ok"); }
+}
+$("startBtn").onclick=()=>run("fresh");
+$("updateBtn").onclick=()=>run("update");
+$("abortBtn").onclick=()=>{fetch("/api/pipe/abort",{method:"POST"});showToast("Aborting…");};
 $("dlBtn").onclick=()=>window.location="/api/export?kind=all&fmt=xlsx";
-$("clearBtn").onclick=async()=>{await fetch("/api/pipe/clear_log",{method:"POST"});$("logbody").innerHTML="";cursor=0};
+$("clearBtn").onclick=async()=>{await fetch("/api/pipe/clear_log",{method:"POST"});$("logbody").innerHTML="";cursor=0;showToast("Log cleared")};
 
 const PH={main:["Main Pass","fetching live prices"],safe_retry:["Safe-Retry Window","gently re-fetching errors · no 429s"],done:["Complete","saved to database"]};
 function phase(d){const b=$("phaseBanner"),i=PH[d.phase];

@@ -87,10 +87,16 @@ async function loadBrands(){const d=await(await fetch("/api/review/brands?kind="
     d.brands.map(b=>`<option value="${b.brand}">${b.shopify?"● ":""}${b.brand} (${b.count})</option>`).join("");
   sel.value=cur}
 const editing=()=>{const a=document.activeElement;return a&&a.classList&&a.classList.contains("mini")};
+// Don't rebuild the table out from under the user: pause auto-rebuilds for 5s
+// after any click/typing so a button press is never lost to a refresh.
+let lastInteract=0;
+document.addEventListener("click",()=>lastInteract=Date.now(),true);
+document.addEventListener("input",()=>lastInteract=Date.now(),true);
+const busy=()=>editing()||(Date.now()-lastInteract<5000);
 
 async function render(force){
-  if(!force&&editing()){const c=(await(await fetch("/api/meta")).json()).counts;setC(c);return}
-  await loadBrands();
+  if(!force&&busy()){const c=(await(await fetch("/api/meta")).json()).counts;setC(c);return}
+  if(force) await loadBrands();   // only rebuild the brand dropdown on demand
   const q="/api/review/items?kind="+kind+(brandFilter?"&brand="+encodeURIComponent(brandFilter):"");
   const d=await(await fetch(q)).json();setC(d.counts);
   $("errTools").style.display=kind==="error"?"flex":"none";
@@ -110,12 +116,13 @@ function wire(){document.querySelectorAll("tr[data-row]").forEach(tr=>{const row
 async function decide(tr,row,decision){const b={row,decision};
   if(decision==="approved"){b.ref=tr.querySelector(".ref").value;b.markup_pct=tr.querySelector(".markup").value;b.custom_price=tr.querySelector(".custom").value}
   const d=await(await fetch("/api/review/decide",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)})).json();
-  if(!d.ok){$("msg").textContent="Error: "+d.error;return}
-  $("msg").textContent=decision==="approved"?`Approved row #${row} → final ₹${fmt(d.final_price)} (click ⤴ Push to send to Shopify)`:`Rejected row #${row}`;
+  if(!d.ok){showToast("Error: "+d.error,"err");return}
+  if(decision==="approved"){showToast(`Approved #${row} → ₹${fmt(d.final_price)}. Click ⤴ Push to send to Shopify.`,"ok");}
+  else{showToast(`Rejected #${row}`);}
   render(true);refreshNav()}
 async function push(row,btn){btn.disabled=true;btn.textContent="Pushing…";
   const d=await(await fetch("/api/review/push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({row})})).json();
-  $("msg").textContent=(d.ok?"✓ Shopify: ":"✗ Shopify: ")+(d.status||d.error);render(true)}
+  showToast((d.ok?"✓ Shopify: ":"✗ Shopify: ")+(d.status||d.error), d.ok?"ok":"err");render(true)}
 async function rerun(rows){const d=await(await fetch("/api/review/rerun",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(rows?{rows}:{})})).json();
   if(!d.ok){$("msg").textContent="Re-run: "+d.error;return}pollRerun()}
 let rt=null;
@@ -124,10 +131,10 @@ async function pollRerun(){const d=await(await fetch("/api/review/rerun_status")
     $("rrTotal").textContent=d.total;$("rrRec").textContent=d.recovered;$("rrBar").style.width=(d.total?d.done/d.total*100:0)+"%"}
   if(d.running){clearTimeout(rt);rt=setTimeout(pollRerun,1000)}else{render(true);if(d.total)setTimeout(()=>bar.style.display="none",4000)}}
 
-$("verifyBtn").onclick=async()=>{if(!brandFilter){$("msg").textContent="Pick a brand, then Verify.";return}
-  $("msg").textContent="Verifying "+brandFilter+"…";
+$("verifyBtn").onclick=async()=>{if(!brandFilter){showToast("Pick a brand in the filter first, then Verify.","err");return}
+  showToast("Verifying "+brandFilter+"…");
   const d=await(await fetch("/api/integrations/verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({brand:brandFilter})})).json();
-  $("msg").textContent=(d.ok?"✓ ":"✗ ")+brandFilter+": "+d.status};
+  showToast(brandFilter+": "+d.status, d.ok?"ok":"err")};
 $("pushAllBtn").onclick=async()=>{const scope=brandFilter?("brand “"+brandFilter+"”"):"ALL brands";
   if(!confirm("Push every APPROVED price for "+scope+"?\n(dry_run brands won't change live prices.)"))return;
   const d=await(await fetch("/api/review/push_all",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(brandFilter?{brand:brandFilter}:{})})).json();
