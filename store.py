@@ -113,12 +113,15 @@ def get_meta(k, default=None):
 # One-time / on-demand import of a tracker sheet into the DB
 # ---------------------------------------------------------------------------
 
-def import_sheet(path):
-    """Upsert every row of an .xlsx/.csv into `products`.
+def import_sheet(path, replace=True):
+    """Sync `products` to the sheet so the DB equals exactly what you upload.
 
-    Preserves prior live results AND admin decisions: sheet facts are
-    refreshed, but decision/markup/shopify columns are left untouched on
-    rows that already exist (matched by `key`).
+    - Rows in the sheet are inserted/updated (keyed by `key`).
+    - Your approval decision + Shopify status are preserved for rows that stay.
+    - Live results/Status are only overwritten when the sheet actually carries
+      those columns (a URL-only sheet keeps existing results).
+    - replace=True (default): products NOT in the sheet are DELETED, so the DB
+      mirrors the sheet — the app only works on what you sent.
     """
     if path.lower().endswith(".csv"):
         df = pd.read_csv(path)
@@ -130,10 +133,27 @@ def import_sheet(path):
 
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     has_live = "Live Price" in df.columns
-    has_cur = "Detected Currency" in df.columns
     has_status = "Status" in df.columns
+
+    # Only refresh result columns the sheet actually provides.
+    set_parts = ["mbo_url=excluded.mbo_url", "url=excluded.url",
+                 "platform=excluded.platform", "custom_regex=excluded.custom_regex",
+                 "brand=excluded.brand", "base_price=excluded.base_price",
+                 "updated_at=excluded.updated_at"]
+    if has_live:
+        set_parts += ["live_price=excluded.live_price",
+                      "currency=excluded.currency", "delta=excluded.delta"]
+    if has_status:
+        set_parts += ["status=excluded.status", "state=excluded.state"]
+    upsert = ("""INSERT INTO products
+                   (key, mbo_url, url, platform, custom_regex, brand,
+                    base_price, live_price, currency, status, state, delta,
+                    updated_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(key) DO UPDATE SET """ + ", ".join(set_parts))
+
     con = connect()
-    n = 0
+    keys = []
     try:
         for _, r in df.iterrows():
             url = str(r.get("Designer Product URL") or "").strip()
@@ -145,34 +165,33 @@ def import_sheet(path):
             regex = "" if pd.isna(regex) else str(regex).strip()
             base = pt.sanitize_price(r.get("Studio East Price"))
             live = pt.sanitize_price(r.get("Live Price")) if has_live else None
-            cur = str(r.get("Detected Currency") or "").strip() if has_cur else ""
+            cur = str(r.get("Detected Currency") or "").strip() if has_live else ""
             status = str(r.get("Status") or "").strip() if has_status else ""
             state = state_of(status)
             delta = (live - base) if (live is not None and base is not None) else None
-            con.execute("""
-                INSERT INTO products
-                    (key, mbo_url, url, platform, custom_regex, brand,
-                     base_price, live_price, currency, status, state, delta,
-                     updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(key) DO UPDATE SET
-                    mbo_url=excluded.mbo_url, url=excluded.url,
-                    platform=excluded.platform, custom_regex=excluded.custom_regex,
-                    brand=excluded.brand, base_price=excluded.base_price,
-                    live_price=excluded.live_price, currency=excluded.currency,
-                    status=excluded.status, state=excluded.state,
-                    delta=excluded.delta, updated_at=excluded.updated_at
-                """,
+            con.execute(upsert,
                 (key, mbo, url, str(r.get("Platform Type") or "").strip(), regex,
                  brand_of(url), base, live, cur, status, state, delta, now))
-            n += 1
+            keys.append(key)
+
+        deleted = 0
+        if replace:
+            con.execute("CREATE TEMP TABLE _keep(key TEXT PRIMARY KEY)")
+            con.executemany("INSERT OR IGNORE INTO _keep VALUES(?)",
+                            [(k,) for k in keys])
+            deleted = con.execute(
+                "DELETE FROM products WHERE key NOT IN (SELECT key FROM _keep)"
+                ).rowcount
+            con.execute("DROP TABLE _keep")
+
         set_meta(con, "last_import", now)
         set_meta(con, "last_import_file", os.path.basename(path))
-        set_meta(con, "last_import_rows", n)
+        set_meta(con, "last_import_rows", len(keys))
         con.commit()
     finally:
         con.close()
-    return {"rows": n, "at": now, "file": os.path.basename(path)}
+    return {"rows": len(keys), "removed": deleted, "at": now,
+            "file": os.path.basename(path)}
 
 
 def counts():

@@ -36,9 +36,11 @@
 <div class="pipewrap">
   <div id="cfg">
     <label class="fld">PRODUCT DATA (xlsx / csv)</label>
-    <div id="dropzone">📁 Drop a sheet to import into the database</div>
+    <div id="dropzone">📁 Drop a sheet — it <b>replaces</b> the database</div>
     <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none">
+    <div class="hint" style="margin-top:6px">Importing makes the DB equal exactly that sheet (the app only works on those products).</div>
     <div class="hint" id="importInfo" style="margin-top:8px"></div>
+    <button class="btn red sm" id="clearDbBtn" style="margin-top:8px">🗑 Clear database</button>
 
     <div class="grid2" style="margin-top:6px">
       <div><label class="fld">Concurrency (1-25)</label><input type="number" id="concurrency" value="5" min="1" max="25"></div>
@@ -110,9 +112,18 @@ async function importFile(file){
   const fd=new FormData();fd.append("file",file);
   $("importInfo").textContent="Importing "+file.name+" ...";
   const d=await(await fetch("/api/import",{method:"POST",body:fd})).json();
-  $("importInfo").textContent=d.ok?`Imported ${d.rows} rows · ${d.counts.total} products in DB`:"Import failed: "+d.error;
+  if(d.ok){
+    $("importInfo").textContent=`DB now = ${d.counts.total} products (${d.rows} in sheet, ${d.removed} removed)`;
+    showToast(`Imported ${d.rows} products — DB now has exactly ${d.counts.total}`,"ok");
+  } else { $("importInfo").textContent="Import failed: "+d.error; showToast("Import failed: "+d.error,"err"); }
   refreshNav();
 }
+$("clearDbBtn").onclick=async()=>{
+  if(!confirm("Delete ALL products from the database? (Shopify tokens are kept.)"))return;
+  const d=await(await fetch("/api/clear_db",{method:"POST"})).json();
+  if(d.ok){ $("importInfo").textContent="Database cleared — 0 products"; showToast("Database cleared","ok"); refreshNav(); }
+  else showToast(d.error,"err");
+};
 const dz=$("dropzone");
 dz.onclick=()=>$("fileInput").click();
 $("fileInput").onchange=e=>e.target.files[0]&&importFile(e.target.files[0]);

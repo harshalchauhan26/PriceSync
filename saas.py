@@ -361,11 +361,24 @@ def api_import():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     path = os.path.join(UPLOAD_DIR, secure_filename(f.filename))
     f.save(path)
+    # replace=True -> the DB becomes exactly this sheet (rows not in it are removed)
+    replace = (request.args.get("mode", "replace") != "add")
     try:
-        res = store.import_sheet(path)
+        res = store.import_sheet(path, replace=replace)
     except Exception as exc:
         return jsonify(ok=False, error=str(exc)), 400
     return jsonify(ok=True, **res, counts=store.counts())
+
+
+@app.route("/api/clear_db", methods=["POST"])
+def api_clear_db():
+    if STATE["running"]:
+        return jsonify(ok=False, error="stop the running pipeline first"), 409
+    con = store.connect()
+    con.execute("DELETE FROM products")
+    con.commit()
+    con.close()
+    return jsonify(ok=True, counts=store.counts())
 
 
 @app.route("/api/pipe/config", methods=["POST"])
@@ -754,12 +767,7 @@ def api_int_delete():
 # ---------------------------------------------------------------------------
 
 def serve():
-    store.init()
-    if store.get_meta("last_import") is None and os.path.exists("MBO_Scraped_Result.xlsx"):
-        try:
-            print("[seed]", store.import_sheet("MBO_Scraped_Result.xlsx"))
-        except Exception as exc:
-            print(f"[seed] skipped: {exc}")
+    store.init()  # start empty; the app only works on sheets you import
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8080"))
     try:
