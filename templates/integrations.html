@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Integrations · PriceSync{% endblock %}
+{% block heading %}SHOPIFY INTEGRATIONS{% endblock %}
+{% block subheading %}Add a token per brand — pushes go live instantly{% endblock %}
+{% block style %}
+  .ihelp{background:rgba(124,92,255,.07);border:1px solid rgba(124,92,255,.3);border-radius:9px;
+    padding:12px 14px;font-size:12px;line-height:1.7;color:var(--dim);margin-bottom:16px}
+  .ihelp b{color:var(--text)}
+  .bcard{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px}
+  .bhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .bname{font-weight:700;font-size:14px}
+  .bmeta{font-size:11px;color:var(--dim)}
+  .statepill{font-size:10px;font-weight:700;padding:2px 9px;border-radius:20px;letter-spacing:.5px}
+  .statepill.live{background:rgba(63,185,80,.14);color:var(--green)}
+  .statepill.dry{background:rgba(210,153,34,.14);color:var(--orange)}
+  .statepill.none{background:var(--panel2);color:var(--dim);border:1px solid var(--border)}
+  .frow{display:grid;grid-template-columns:1.3fr 1.6fr .8fr auto auto auto;gap:9px;align-items:end}
+  .frow .fld{margin:0 0 4px}
+  .vstat{font-size:11.5px;margin-top:8px;min-height:14px}
+  @media(max-width:1100px){.frow{grid-template-columns:1fr 1fr}}
+{% endblock %}
+{% block content %}
+<div class="ihelp">
+  🔑 <b>How to connect a brand's Shopify store:</b><br>
+  1. In Shopify admin → <b>Settings → Apps → Develop apps → Create an app</b>, give it the
+  <b>write_products</b> Admin API scope, then <b>Install</b> and copy the <b>Admin API access token</b> (starts with <code>shpat_</code>).<br>
+  2. Paste the <b>store host</b> (<code>your-store.myshopify.com</code>) and the <b>token</b> below, click <b>Save</b>, then <b>Verify</b>.<br>
+  3. Leave <b>Dry run</b> on to test safely; turn it off when you're ready to write real prices. Approved prices are pushed from the <b>Review</b> page.
+</div>
+<div id="brands"></div>
+<div id="msg"></div>
+{% endblock %}
+{% block script %}
+<script>
+function card(b){
+  const state = !b.has_token ? `<span class="statepill none">no token</span>`
+    : b.dry_run ? `<span class="statepill dry">DRY-RUN</span>` : `<span class="statepill live">LIVE</span>`;
+  return `<div class="bcard" data-brand="${b.brand}">
+    <div class="bhead"><div><span class="bname">${b.brand}</span>
+      <span class="bmeta">· ${b.products} products · ${b.mismatches} mismatches</span></div>${state}</div>
+    <div class="frow">
+      <div><label class="fld">Store host (.myshopify.com)</label><input type="text" class="f_shop" value="${b.shop_domain||""}" placeholder="your-store.myshopify.com"></div>
+      <div><label class="fld">Admin API token</label><input type="password" class="f_token" placeholder="${b.has_token?'•••••• (saved — leave blank to keep)':'shpat_…'}"></div>
+      <div><label class="fld">API ver</label><input type="text" class="f_ver" value="${b.api_version||'2024-10'}"></div>
+      <div><label class="fld">Dry run</label><input type="checkbox" class="f_dry" ${b.dry_run?'checked':''} style="width:auto"></div>
+      <div><button class="btn primary f_save">Save</button></div>
+      <div><button class="btn f_verify">Verify</button></div>
+    </div>
+    <div class="vstat hint"></div>
+  </div>`;
+}
+async function load(){
+  const d=await(await fetch("/api/integrations")).json();
+  $("brands").innerHTML=d.brands.map(card).join("")||`<div class="empty">No brands yet — import a sheet on the Pipeline page.</div>`;
+  document.querySelectorAll(".bcard").forEach(c=>{
+    const brand=c.dataset.brand;
+    c.querySelector(".f_save").onclick=async()=>{
+      const body={brand,shop_domain:c.querySelector(".f_shop").value.trim(),
+        access_token:c.querySelector(".f_token").value.trim(),
+        api_version:c.querySelector(".f_ver").value.trim(),dry_run:c.querySelector(".f_dry").checked};
+      const r=await(await fetch("/api/integrations/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
+      c.querySelector(".vstat").textContent=r.ok?"✓ saved":("save failed: "+r.error);
+      if(r.ok)load();
+    };
+    c.querySelector(".f_verify").onclick=async()=>{
+      const v=c.querySelector(".vstat");v.textContent="verifying…";
+      const r=await(await fetch("/api/integrations/verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({brand})})).json();
+      v.textContent=(r.ok?"✓ ":"✗ ")+r.status;v.style.color=r.ok?"var(--green)":"var(--red)";
+    };
+  });
+}
+load();
+</script>
+{% endblock %}

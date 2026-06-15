@@ -1,0 +1,22 @@
+# --- data / business content (never publish) ---
+*.db
+*.db-wal
+*.db-shm
+*.xlsx
+*.xls
+*.csv
+uploads/
+
+# --- secrets ---
+shopify_brands.json
+.env
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- local tooling ---
+.claude/
