@@ -14,9 +14,11 @@ read once, on import. Run:  python saas.py  ->  http://127.0.0.1:8080
 import io
 import os
 import random
+import smtplib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from email.message import EmailMessage
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -347,6 +349,12 @@ def verify_shopify(brand):
 
 @app.route("/")
 def home():
+    # Served raw (not via Jinja) — the React/JSX file is full of {{ }} braces.
+    return send_file(os.path.join(app.root_path, "templates", "dashboard.html"))
+
+
+@app.route("/classic")
+def home_classic():
     return render_template("pipeline.html", active="pipeline")
 
 
@@ -579,15 +587,82 @@ def _write_colored_xlsx(bio, df):
         leg["A2"].fill = red
 
 
+# ---- Email the mismatch report ----
+
+def _mismatch_xlsx():
+    cols = ["id", "brand", "platform", "url", "base_price", "live_price",
+            "currency", "status", "state", "delta", "decision", "final_price"]
+    con = store.connect()
+    rows = con.execute(
+        f"SELECT {', '.join(cols)} FROM products WHERE state='mismatch' "
+        "ORDER BY ABS(COALESCE(delta,0)) DESC").fetchall()
+    con.close()
+    df = pd.DataFrame([dict(r) for r in rows], columns=cols)
+    bio = io.BytesIO()
+    _write_colored_xlsx(bio, df)
+    bio.seek(0)
+    return bio.read(), len(df)
+
+
+def send_mismatch_report(to=None):
+    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ.get("SMTP_USER", "").strip()
+    pwd = os.environ.get("SMTP_PASS", "").strip()
+    frm = (os.environ.get("SMTP_FROM", "") or user).strip()
+    to = (to or os.environ.get("ALERT_TO", "")).strip()
+    if not user or not pwd:
+        return {"ok": False, "error": "email not configured — set SMTP_USER and "
+                "SMTP_PASS (Gmail App Password) in .env"}
+    if not to:
+        return {"ok": False, "error": "no recipient — set ALERT_TO in .env or pass 'to'"}
+    data, n = _mismatch_xlsx()
+    today = time.strftime("%Y-%m-%d")
+    msg = EmailMessage()
+    msg["Subject"] = f"PriceSync Alert — {n} price mismatches ({today})"
+    msg["From"] = frm
+    msg["To"] = to
+    msg.set_content(
+        f"PriceSync detected {n} price mismatch(es) awaiting review.\n\n"
+        "The attached sheet lists every mismatch (yellow rows). These are "
+        "PENDING APPROVAL — no price change has been pushed to any store.\n"
+        "Review and approve each change in the console before anything goes live.\n\n"
+        "— PriceSync (beta)")
+    msg.add_attachment(
+        data, maintype="application",
+        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"price_mismatches_{today}.xlsx")
+    with smtplib.SMTP(host, port, timeout=30) as s:
+        s.ehlo()
+        s.starttls()
+        s.login(user, pwd)
+        s.send_message(msg)
+    return {"ok": True, "count": n, "to": to}
+
+
+@app.route("/api/alerts/email_mismatch", methods=["POST"])
+def api_email_mismatch():
+    to = ((request.get_json(silent=True) or {}).get("to") or "").strip() or None
+    try:
+        res = send_mismatch_report(to)
+    except Exception as exc:
+        return jsonify(ok=False, error=f"send failed: {exc}"), 500
+    return jsonify(**res), (200 if res.get("ok") else 400)
+
+
 # ---- Review API ----
 
 @app.route("/api/review/items")
 def api_items():
     kind = request.args.get("kind", "mismatch")
     brand = request.args.get("brand", "").strip()
+    brands = [b for b in request.args.get("brands", "").split(",") if b.strip()]
     state = {"mismatch": "mismatch", "error": "error", "resolved": "matched"}.get(kind, "mismatch")
     where, params = "state=%s", [state]
-    if brand:
+    if brands:  # Excel-style multi-vendor filter
+        where += " AND brand IN (" + ",".join(["%s"] * len(brands)) + ")"
+        params += brands
+    elif brand:
         where += " AND brand=%s"
         params.append(brand)
     con = store.connect()
@@ -614,6 +689,23 @@ def api_brands():
     con.close()
     return jsonify(brands=[{"brand": r["brand"], "count": r["c"],
                             "shopify": r["brand"] in configured} for r in rows])
+
+
+@app.route("/api/vendors")
+def api_vendors():
+    """Every distinct vendor (derived from the product links) with a count —
+    powers the Excel-style filter. Optional ?kind= limits to a feed."""
+    kind = request.args.get("kind", "").strip()
+    state = {"mismatch": "mismatch", "error": "error", "resolved": "matched"}.get(kind)
+    con = store.connect()
+    if state:
+        rows = con.execute("SELECT brand, COUNT(*) c FROM products WHERE brand<>'' "
+                           "AND state=%s GROUP BY brand ORDER BY brand", (state,)).fetchall()
+    else:
+        rows = con.execute("SELECT brand, COUNT(*) c FROM products WHERE brand<>'' "
+                           "GROUP BY brand ORDER BY brand").fetchall()
+    con.close()
+    return jsonify(vendors=[{"vendor": r["brand"], "count": r["c"]} for r in rows])
 
 
 @app.route("/api/review/decide", methods=["POST"])

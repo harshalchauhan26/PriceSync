@@ -182,12 +182,14 @@ def _read_df(path):
     return df
 
 
-def _row_to_product(r, has_live, has_status):
+def _row_to_product(r, idx, has_live, has_status):
     url = str(r.get("Designer Product URL") or "").strip()
     mbo = str(r.get("MBO Product URL") or "").strip()
-    key = url or mbo
-    if not key:
+    if not (url or mbo):
         return None
+    # Key per ROW (idx prefix) so every sheet row is a tracked product — no
+    # collapsing of duplicate Designer URLs. The URL tail keeps it readable.
+    key = f"{idx:05d}|{(url or mbo)[:280]}"
     regex = r.get("Custom Regex")
     regex = "" if pd.isna(regex) else str(regex).strip()
     base = pt.sanitize_price(r.get("Studio East Price"))
@@ -217,23 +219,18 @@ def _matches(prod, contains, domains):
 
 
 def sheet_products(path, contains=None, domains=None):
-    """Parse a sheet into a list of product dicts, applying the Designer-URL
-    filter (contains substring + domain whitelist). This is what the pipeline
-    iterates — links always come from here, never from the DB."""
+    """Parse a sheet into a list of product dicts (one per ROW), applying the
+    Designer-URL filter (contains substring + domain whitelist)."""
     df = _read_df(path)
     has_live = "Live Price" in df.columns
     has_status = "Status" in df.columns
     contains = (contains or "").strip().lower() or None
     domains = set(domains) if domains else None
     out = []
-    seen = set()
-    for _, r in df.iterrows():
-        p = _row_to_product(r, has_live, has_status)
+    for idx, rd in enumerate(df.to_dict("records"), start=1):
+        p = _row_to_product(rd, idx, has_live, has_status)
         if not p or not _matches(p, contains, domains):
             continue
-        if p["key"] in seen:        # one decision per Designer URL
-            continue
-        seen.add(p["key"])
         out.append(p)
     return out
 
@@ -246,12 +243,10 @@ def preview_sheet(path):
     has_status = "Status" in df.columns
     by_domain = {}
     total = 0
-    seen = set()
-    for _, r in df.iterrows():
-        p = _row_to_product(r, has_live, has_status)
-        if not p or p["key"] in seen:
+    for idx, rd in enumerate(df.to_dict("records"), start=1):
+        p = _row_to_product(rd, idx, has_live, has_status)
+        if not p:
             continue
-        seen.add(p["key"])
         total += 1
         by_domain[p["brand"]] = by_domain.get(p["brand"], 0) + 1
     domains = sorted(({"domain": d or "(none)", "count": c}
@@ -301,8 +296,11 @@ def import_sheet(path, replace=True, contains=None, domains=None):
         keys = []
         for p in prods:
             p["updated_at"] = now
-            con.execute(upsert, p)
             keys.append(p["key"])
+        # Bulk upsert (psycopg3 executemany is pipelined -> far faster than a
+        # per-row execute loop over the pooler).
+        if prods:
+            con.cursor().executemany(upsert, prods)
 
         deleted = 0
         if replace:
@@ -328,24 +326,41 @@ def import_sheet(path, replace=True, contains=None, domains=None):
             "file": os.path.basename(path)}
 
 
-def work_rows(mode="fresh"):
-    """The pipeline's work list — read straight from the last imported sheet
-    (links come from the sheet, irrespective of the DB).
+def db_products(mode="fresh"):
+    """The pipeline's work list read straight from the permanent DB — so the
+    app can run with NO sheet upload at all (the DB is the product catalog).
 
-    mode="fresh"  -> every link in the sheet.
-    mode="update" -> only links not yet done (DB state pending) or errored.
-    Returns [] if no sheet has been imported.
+    mode="fresh"  -> every product.
+    mode="update" -> only products not yet done (pending) or errored.
+    """
+    where = "" if mode == "fresh" else "WHERE state IN ('pending','error')"
+    con = connect()
+    rows = con.execute(
+        "SELECT key, mbo_url, url, platform, custom_regex, brand, base_price, "
+        f"state FROM products {where} ORDER BY id").fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def work_rows(mode="fresh"):
+    """The pipeline's work list.
+
+    Default source is the **permanent Supabase DB** (no sheet upload needed).
+    If a sheet was explicitly imported and the file is still present, the links
+    are taken from that sheet instead (sheet overrides DB for that session).
+
+    mode="fresh"  -> every product.
+    mode="update" -> only products pending/errored.
     """
     path = get_meta("last_import_path")
     if not path or not os.path.exists(path):
-        return []
+        return db_products(mode)          # permanent DB is the source
     contains = (get_meta("last_import_contains") or "") or None
     dom = get_meta("last_import_domains") or ""
     domains = [d for d in dom.split(",") if d] or None
     prods = sheet_products(path, contains=contains, domains=domains)
     if mode == "fresh":
         return prods
-    # update: keep links whose DB state is pending/error/unknown
     con = connect()
     rows = con.execute("SELECT key, state FROM products").fetchall()
     con.close()
