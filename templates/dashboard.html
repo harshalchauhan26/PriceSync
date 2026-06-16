@@ -4,9 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PriceSync · Console</title>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<!-- Pinned to Babel 7: its preset-react defaults to the classic JSX runtime.
+     Babel 8 (the unversioned "latest") emits `import` statements that can't run
+     as a plain inline script, which blanks the whole page. -->
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   :root{--bg:#09090b;--panel:#121214;--panel2:#18181b;--border:#27272a;
