@@ -46,6 +46,7 @@ CONFIG = {
     "simulation": False, "retry_errors": False, "fresh_start": False,
     "safe_retry": True, "safe_concurrency": 1, "safe_cooldown_min": 4.0,
     "safe_cooldown_max": 8.0, "safe_rest_between": 30, "safe_batch_size": 25,
+    "vendors": [],   # empty = whole catalog; else only these vendor domains
 }
 STATE = {
     "running": False, "abort": False, "phase": "idle", "total_rows": 0,
@@ -212,12 +213,13 @@ def _pipeline():
     run_id = time.strftime("%Y%m%d-%H%M%S")
     try:
         mode = "fresh" if CONFIG["fresh_start"] else "update"
-        rows = store.work_rows(mode)            # links come from the SHEET
-        total = store.counts()["total"]
+        vendors = CONFIG.get("vendors") or None      # vendor-scoped run
+        rows = store.work_rows(mode, vendors)
+        total = store.count_products(vendors)
+        scope = f"{len(vendors)} vendor(s)" if vendors else "all vendors"
         with LOCK:
-            STATE.update(total_rows=max(total, len(rows)),
-                         pre_done=max(0, total - len(rows)),
-                         message=f"Main pass - {len(rows)} link(s) from sheet")
+            STATE.update(total_rows=total, pre_done=max(0, total - len(rows)),
+                         message=f"Main pass - {len(rows)} product(s) · {scope}")
 
         def main_done(prod, st):
             with LOCK:

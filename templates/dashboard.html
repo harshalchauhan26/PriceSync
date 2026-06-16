@@ -156,8 +156,12 @@ function Pipeline({onMeta}){
   const [cfg,setCfg]=useState({concurrency:16,timeout_ms:12000,batch_size:500,rest_between:60,safe_retry:true,simulation:false});
   const [adv,setAdv]=useState(false);
   const [cat,setCat]=useState({total:0,pending:0});
+  const [vendors,setVendors]=useState([]);
+  const [vsel,setVsel]=useState([]);          // vendor scope for the run
   const cursor=useRef(0); const logRef=useRef(null);
-  useEffect(()=>{api("/api/meta").then(d=>{if(d.counts)setCat(d.counts)})},[]);
+  useEffect(()=>{api("/api/meta").then(d=>{if(d.counts)setCat(d.counts)});
+    api("/api/vendors").then(d=>setVendors(d.vendors||[]))},[]);
+  const scopeCount=vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):(cat.total||0);
 
   const poll=useCallback(async()=>{
     const d=await api("/api/pipe/status?cursor="+cursor.current);
@@ -170,7 +174,7 @@ function Pipeline({onMeta}){
   useEffect(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight},[st.entries.length]);
 
   const sendCfg=async(extra)=>apiJSON("/api/pipe/config",{...cfg,...extra});
-  const run=async(mode)=>{await sendCfg({fresh_start:mode==="fresh",retry_errors:mode==="update"});
+  const run=async(mode)=>{await sendCfg({fresh_start:mode==="fresh",retry_errors:mode==="update",vendors:vsel});
     const d=await apiJSON("/api/pipe/start",{});
     d.error?toast(d.error,"err"):toast(mode==="fresh"?"Run started — checking every product":"Checking updates…","ok");
     setSt(s=>({...s,entries:[]}));cursor.current=0;};
@@ -218,11 +222,17 @@ function Pipeline({onMeta}){
 
     {/* run panel */}
     <div className="flex flex-col min-h-0 min-w-0">
-      <div className="flex gap-2.5 mb-3 flex-wrap">
+      <div className="flex gap-2.5 mb-3 flex-wrap items-center">
         <Btn kind="blue" onClick={()=>run("fresh")} disabled={st.running}><Icon n="play" s={14}/>Run from Start</Btn>
         <Btn kind="ghost" onClick={()=>run("update")} disabled={st.running}><Icon n="refresh" s={14}/>Check Updates</Btn>
         <Btn kind="red" onClick={abort} disabled={!st.running}><Icon n="stop" s={14}/>Abort</Btn>
         <Btn kind="emerald" onClick={()=>window.location="/api/export?kind=all&fmt=xlsx"}><Icon n="dl" s={14}/>Export</Btn>
+        <div className="ml-auto flex items-center gap-2.5">
+          <span className="text-[11.5px]" style={{color:"var(--mut)"}}>
+            Scope: <b style={{color:"#fff"}}>{scopeCount.toLocaleString()}</b> products{vsel.length?` · ${vsel.length} vendor(s)`:" · all vendors"}</span>
+          <ExcelFilter label="Vendors" selected={vsel} onChange={setVsel}
+            options={vendors.map(v=>({value:v.vendor,count:v.count}))}/>
+        </div>
       </div>
       <div className="grid grid-cols-6 gap-2.5 mb-3">
         <Stat k="TOTAL" v={fmtInt(st.total_rows)}/><Stat k="DONE" v={fmtInt(st.current_row)}/>

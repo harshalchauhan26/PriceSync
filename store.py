@@ -326,39 +326,62 @@ def import_sheet(path, replace=True, contains=None, domains=None):
             "file": os.path.basename(path)}
 
 
-def db_products(mode="fresh"):
+def db_products(mode="fresh", vendors=None):
     """The pipeline's work list read straight from the permanent DB — so the
     app can run with NO sheet upload at all (the DB is the product catalog).
 
-    mode="fresh"  -> every product.
-    mode="update" -> only products not yet done (pending) or errored.
+    mode="fresh"   -> every product.
+    mode="update"  -> only products not yet done (pending) or errored.
+    vendors=[...]  -> restrict to those vendor domains (brand) only.
     """
-    where = "" if mode == "fresh" else "WHERE state IN ('pending','error')"
+    clauses, params = [], []
+    if mode != "fresh":
+        clauses.append("state IN ('pending','error')")
+    if vendors:
+        clauses.append("brand IN (" + ",".join(["%s"] * len(vendors)) + ")")
+        params += list(vendors)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     con = connect()
     rows = con.execute(
         "SELECT key, mbo_url, url, platform, custom_regex, brand, base_price, "
-        f"state FROM products {where} ORDER BY id").fetchall()
+        f"state FROM products {where} ORDER BY id", params).fetchall()
     con.close()
     return [dict(r) for r in rows]
 
 
-def work_rows(mode="fresh"):
+def count_products(vendors=None):
+    """Total products in the catalog, optionally restricted to vendors."""
+    con = connect()
+    if vendors:
+        ph = ",".join(["%s"] * len(vendors))
+        r = con.execute(f"SELECT COUNT(*) c FROM products WHERE brand IN ({ph})",
+                        list(vendors)).fetchone()
+    else:
+        r = con.execute("SELECT COUNT(*) c FROM products").fetchone()
+    con.close()
+    return r["c"] or 0
+
+
+def work_rows(mode="fresh", vendors=None):
     """The pipeline's work list.
 
     Default source is the **permanent Supabase DB** (no sheet upload needed).
     If a sheet was explicitly imported and the file is still present, the links
     are taken from that sheet instead (sheet overrides DB for that session).
 
-    mode="fresh"  -> every product.
-    mode="update" -> only products pending/errored.
+    vendors=[...] restricts the run to those vendor domains only.
+    mode="fresh"  -> every product. mode="update" -> only pending/errored.
     """
     path = get_meta("last_import_path")
     if not path or not os.path.exists(path):
-        return db_products(mode)          # permanent DB is the source
+        return db_products(mode, vendors)     # permanent DB is the source
     contains = (get_meta("last_import_contains") or "") or None
     dom = get_meta("last_import_domains") or ""
     domains = [d for d in dom.split(",") if d] or None
     prods = sheet_products(path, contains=contains, domains=domains)
+    if vendors:
+        vset = set(vendors)
+        prods = [p for p in prods if p["brand"] in vset]
     if mode == "fresh":
         return prods
     con = connect()
