@@ -112,9 +112,10 @@
     <div class="brand"><span class="logo">⚡</span><div><b>Price</b><span>Sync</span></div></div>
     <a class="navlink {{'active' if active=='pipeline' else ''}}" href="/pipeline"><span class="ic">▶</span>Pipeline</a>
     <a class="navlink {{'active' if active=='review' else ''}}" href="/review"><span class="ic">✓</span>Review &amp; Approve<span class="pill" id="navAwait">0</span></a>
+    <a class="navlink {{'active' if active=='alerts' else ''}}" href="/alerts"><span class="ic">🔔</span>Alerts<span class="pill" id="navAlerts">0</span></a>
     <a class="navlink {{'active' if active=='integrations' else ''}}" href="/integrations"><span class="ic">🔌</span>Integrations</a>
     <div class="nav-spacer"></div>
-    <div class="nav-foot"><span class="dot"></span>SQLite-backed · live<div id="navMeta" style="margin-top:6px"></div></div>
+    <div class="nav-foot"><span class="dot"></span>Supabase-backed · live<div id="navMeta" style="margin-top:6px"></div></div>
   </nav>
   <div id="content">
     <div class="topbar">
@@ -143,6 +144,7 @@ function plink(u){if(!u)return "—";let l=u.replace(/^https?:\/\//,"");
 async function refreshNav(){
   try{const d=await (await fetch("/api/meta")).json();
     $("navAwait").textContent=d.counts.awaiting||0;
+    const na=$("navAlerts"); if(na) na.textContent=d.alerts||0;
     if(d.last_import) $("navMeta").textContent="imported "+d.last_import_rows+" rows · "+d.last_import;
   }catch(e){}
 }

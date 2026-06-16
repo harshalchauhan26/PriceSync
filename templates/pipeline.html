@@ -36,10 +36,22 @@
 <div class="pipewrap">
   <div id="cfg">
     <label class="fld">PRODUCT DATA (xlsx / csv)</label>
-    <div id="dropzone">📁 Drop a sheet — it <b>replaces</b> the database</div>
+    <div id="dropzone">📁 Drop a sheet — filter, then <b>import</b></div>
     <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none">
-    <div class="hint" style="margin-top:6px">Importing makes the DB equal exactly that sheet (the app only works on those products).</div>
+    <div class="hint" style="margin-top:6px">Links are always read from the sheet on every run — the database is permanent result memory only.</div>
     <div class="hint" id="importInfo" style="margin-top:8px"></div>
+
+    <div id="filterPanel" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+      <label class="fld">FILTER BY DESIGNER PRODUCT URL</label>
+      <input type="text" id="containsFilter" placeholder="contains text, e.g. anitadongre">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:11px 0 5px">
+        <span class="fld" style="margin:0">DESIGNER DOMAINS <span id="domCount" class="hint"></span></span>
+        <span><a href="#" id="domAll" class="hint">all</a> · <a href="#" id="domNone" class="hint">none</a></span>
+      </div>
+      <div id="domList" style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:7px;padding:6px"></div>
+      <div class="hint" id="filterMatch" style="margin-top:7px"></div>
+      <button class="btn primary sm" id="doImportBtn" style="width:100%;margin-top:8px">⤓ Import filtered → replaces DB</button>
+    </div>
     <button class="btn red sm" id="clearDbBtn" style="margin-top:8px">🗑 Clear database</button>
 
     <div class="grid2" style="margin-top:6px">
@@ -108,16 +120,53 @@ async function applyCfg(){await sendCfg({});
   setTimeout(()=>$("applyBtn").textContent="Apply Config",1200)}
 $("applyBtn").onclick=applyCfg;
 
-async function importFile(file){
+let PREVIEW={path:null,domains:[],rows:0};
+function selectedDomains(){return [...document.querySelectorAll("#domList input:checked")].map(c=>c.value)}
+function updateFilterMatch(){
+  const sel=new Set(selectedDomains());
+  const txt=($("containsFilter").value||"").trim().toLowerCase();
+  let n=0; for(const d of PREVIEW.domains){
+    if(!sel.has(d.domain))continue;
+    n += d.count; // domain match; contains is row-level, shown as a hint only
+  }
+  const cl = txt? ` · then rows whose URL contains "${txt}"` : "";
+  $("filterMatch").textContent=`${sel.size} of ${PREVIEW.domains.length} domains ≈ ${n.toLocaleString()} products${cl}`;
+}
+async function previewFile(file){
   const fd=new FormData();fd.append("file",file);
-  $("importInfo").textContent="Importing "+file.name+" ...";
+  $("importInfo").textContent="Reading "+file.name+" …";
+  let d; try{ d=await(await fetch("/api/import/preview",{method:"POST",body:fd})).json(); }
+  catch(e){ $("importInfo").textContent="Preview failed"; return; }
+  if(!d.ok){ $("importInfo").textContent="Preview failed: "+d.error; showToast(d.error,"err"); return; }
+  PREVIEW={path:d.path,domains:d.domains,rows:d.rows};
+  $("importInfo").textContent=`${file.name} — ${d.rows.toLocaleString()} products across ${d.domains.length} domains`;
+  $("domCount").textContent=`(${d.domains.length})`;
+  $("domList").innerHTML=d.domains.map(x=>
+    `<label style="display:flex;gap:8px;align-items:center;font-size:12px;padding:2px 0;cursor:pointer">
+       <input type="checkbox" value="${x.domain}" checked style="width:auto">
+       <span style="flex:1">${x.domain}</span><span class="hint">${x.count}</span></label>`).join("");
+  $("domList").querySelectorAll("input").forEach(c=>c.onchange=updateFilterMatch);
+  $("filterPanel").style.display="block";
+  updateFilterMatch();
+}
+$("containsFilter").oninput=updateFilterMatch;
+$("domAll").onclick=e=>{e.preventDefault();$("domList").querySelectorAll("input").forEach(c=>c.checked=true);updateFilterMatch()};
+$("domNone").onclick=e=>{e.preventDefault();$("domList").querySelectorAll("input").forEach(c=>c.checked=false);updateFilterMatch()};
+$("doImportBtn").onclick=async()=>{
+  if(!PREVIEW.path){showToast("Choose a sheet first","err");return}
+  const fd=new FormData();
+  fd.append("path",PREVIEW.path);
+  fd.append("contains",($("containsFilter").value||"").trim());
+  selectedDomains().forEach(d=>fd.append("domains",d));
+  $("importInfo").textContent="Importing filtered sheet …";
   const d=await(await fetch("/api/import",{method:"POST",body:fd})).json();
   if(d.ok){
-    $("importInfo").textContent=`DB now = ${d.counts.total} products (${d.rows} in sheet, ${d.removed} removed)`;
+    $("importInfo").textContent=`DB now = ${d.counts.total} products (${d.rows} imported, ${d.removed} removed)`;
     showToast(`Imported ${d.rows} products — DB now has exactly ${d.counts.total}`,"ok");
+    $("filterPanel").style.display="none";
   } else { $("importInfo").textContent="Import failed: "+d.error; showToast("Import failed: "+d.error,"err"); }
   refreshNav();
-}
+};
 $("clearDbBtn").onclick=async()=>{
   if(!confirm("Delete ALL products from the database? (Shopify tokens are kept.)"))return;
   const d=await(await fetch("/api/clear_db",{method:"POST"})).json();
@@ -126,10 +175,10 @@ $("clearDbBtn").onclick=async()=>{
 };
 const dz=$("dropzone");
 dz.onclick=()=>$("fileInput").click();
-$("fileInput").onchange=e=>e.target.files[0]&&importFile(e.target.files[0]);
+$("fileInput").onchange=e=>e.target.files[0]&&previewFile(e.target.files[0]);
 dz.ondragover=e=>{e.preventDefault();dz.classList.add("drag")};
 dz.ondragleave=()=>dz.classList.remove("drag");
-dz.ondrop=e=>{e.preventDefault();dz.classList.remove("drag");e.dataTransfer.files[0]&&importFile(e.dataTransfer.files[0])};
+dz.ondrop=e=>{e.preventDefault();dz.classList.remove("drag");e.dataTransfer.files[0]&&previewFile(e.dataTransfer.files[0])};
 
 async function run(mode){
   // fresh = re-check every product; update = only pending rows + retry errors

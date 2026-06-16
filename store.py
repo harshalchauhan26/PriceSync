@@ -1,60 +1,85 @@
 #!/usr/bin/env python3
 """
-PriceSync data layer — a single SQLite database is the source of truth.
+PriceSync data layer — a single Supabase (Postgres) database is the permanent
+source of truth. Replaces the old SQLite file, so nothing accumulates locally
+and the memory survives restarts / multiple machines.
 
 Tables:
-  products      one row per tracked product (sheet facts + live results +
-                approval decision + Shopify push status), keyed by a natural
-                `key` (Designer URL, or MBO URL when the Designer URL is blank).
-  integrations  Shopify credentials per brand (replaces shopify_brands.json).
-  meta          small key/value store (last import, etc.).
+  products       one row per tracked product (sheet facts + latest live result +
+                 approval decision + Shopify push status), keyed by a natural
+                 `key` (Designer URL, or MBO URL when the Designer URL is blank).
+  price_history  one row per (product, run) — an append-only price timeline that
+                 powers the Alerts page (drops / spikes vs the previous run).
+  integrations   Shopify credentials per brand.
+  meta           small key/value store (last import, last import file path, ...).
 
-Nothing here reads or writes Excel except `import_sheet`, the one-time (or
-on-demand) loader that pulls an .xlsx/.csv into `products`.
+Important design choice: the *list of links to check* always comes from the
+uploaded sheet (see `work_rows`), never from the DB. The DB is permanent memory
+for results — it never decides which URLs get fetched.
+
+Connection: set SUPABASE_DB_URL in .env (see .env.example), or the pieces
+SUPABASE_PROJECT_REF + SUPABASE_DB_PASSWORD.
 """
 
 import os
-import sqlite3
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote
 
 import pandas as pd
+import psycopg
+from psycopg.rows import dict_row
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:  # python-dotenv optional at runtime
+    pass
 
 import price_tracker as pt
 
-DB_PATH = os.environ.get("PRICESYNC_DB", "pricesync.db")
+
+def conninfo():
+    """Build the Postgres connection string from env."""
+    url = os.environ.get("SUPABASE_DB_URL", "").strip()
+    if url:
+        return url
+    ref = os.environ.get("SUPABASE_PROJECT_REF", "").strip()
+    pw = os.environ.get("SUPABASE_DB_PASSWORD", "").strip()
+    port = os.environ.get("SUPABASE_DB_PORT", "5432").strip()
+    if ref and pw:
+        return (f"postgresql://postgres:{quote(pw, safe='')}"
+                f"@db.{ref}.supabase.co:{port}/postgres")
+    raise RuntimeError(
+        "No Supabase connection configured. Set SUPABASE_DB_URL (or "
+        "SUPABASE_PROJECT_REF + SUPABASE_DB_PASSWORD) in your .env file. "
+        "See .env.example.")
 
 
 def connect():
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=5000")
-    return con
+    return psycopg.connect(conninfo(), connect_timeout=15, row_factory=dict_row)
 
 
-def init():
-    con = connect()
-    con.executescript("""
+_SCHEMA = [
+    """
     CREATE TABLE IF NOT EXISTS products (
-        id           INTEGER PRIMARY KEY,
+        id           BIGSERIAL PRIMARY KEY,
         key          TEXT UNIQUE,
         mbo_url      TEXT,
         url          TEXT,
         platform     TEXT,
         custom_regex TEXT,
         brand        TEXT,
-        base_price   REAL,
-        live_price   REAL,
+        base_price   DOUBLE PRECISION,
+        live_price   DOUBLE PRECISION,
         currency     TEXT,
         status       TEXT DEFAULT '',
-        state        TEXT DEFAULT 'pending',   -- pending|matched|mismatch|error
-        delta        REAL,
-        decision     TEXT DEFAULT 'pending',   -- pending|approved|rejected
-        markup_pct   REAL,
-        custom_price REAL,
+        state        TEXT DEFAULT 'pending',
+        delta        DOUBLE PRECISION,
+        decision     TEXT DEFAULT 'pending',
+        markup_pct   DOUBLE PRECISION,
+        custom_price DOUBLE PRECISION,
         ref          TEXT DEFAULT 'live',
-        final_price  REAL,
+        final_price  DOUBLE PRECISION,
         note         TEXT,
         decided_at   TEXT,
         shopify_status TEXT,
@@ -62,10 +87,25 @@ def init():
         rerun_status TEXT,
         rerun_at     TEXT,
         updated_at   TEXT
-    );
-    CREATE INDEX IF NOT EXISTS ix_products_state ON products(state);
-    CREATE INDEX IF NOT EXISTS ix_products_brand ON products(brand);
-
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_products_state ON products(state)",
+    "CREATE INDEX IF NOT EXISTS ix_products_brand ON products(brand)",
+    """
+    CREATE TABLE IF NOT EXISTS price_history (
+        id          BIGSERIAL PRIMARY KEY,
+        key         TEXT,
+        url         TEXT,
+        brand       TEXT,
+        base_price  DOUBLE PRECISION,
+        live_price  DOUBLE PRECISION,
+        delta       DOUBLE PRECISION,
+        state       TEXT,
+        status      TEXT,
+        run_id      TEXT,
+        created_at  TIMESTAMPTZ DEFAULT now()
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_hist_key ON price_history(key, created_at)",
+    """
     CREATE TABLE IF NOT EXISTS integrations (
         brand        TEXT PRIMARY KEY,
         shop_domain  TEXT,
@@ -73,12 +113,30 @@ def init():
         api_version  TEXT DEFAULT '2024-10',
         dry_run      INTEGER DEFAULT 0,
         updated_at   TEXT
-    );
+    )""",
+    "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)",
+]
 
-    CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
-    """)
-    con.commit()
-    con.close()
+
+def init():
+    con = connect()
+    try:
+        for stmt in _SCHEMA:
+            con.execute(stmt)
+        con.commit()
+    finally:
+        con.close()
+
+
+def ping():
+    """Quick connectivity check used at startup. Returns (ok, message)."""
+    try:
+        con = connect()
+        con.execute("SELECT 1")
+        con.close()
+        return True, "connected"
+    except Exception as exc:
+        return False, str(exc)
 
 
 def brand_of(url):
@@ -98,31 +156,22 @@ def state_of(status):
 
 
 def set_meta(con, k, v):
-    con.execute("INSERT INTO meta(k,v) VALUES(?,?) "
+    con.execute("INSERT INTO meta(k,v) VALUES(%s,%s) "
                 "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, str(v)))
 
 
 def get_meta(k, default=None):
     con = connect()
-    r = con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+    r = con.execute("SELECT v FROM meta WHERE k=%s", (k,)).fetchone()
     con.close()
     return r["v"] if r else default
 
 
 # ---------------------------------------------------------------------------
-# One-time / on-demand import of a tracker sheet into the DB
+# Reading a tracker sheet -> normalized rows (the ONLY source of links)
 # ---------------------------------------------------------------------------
 
-def import_sheet(path, replace=True):
-    """Sync `products` to the sheet so the DB equals exactly what you upload.
-
-    - Rows in the sheet are inserted/updated (keyed by `key`).
-    - Your approval decision + Shopify status are preserved for rows that stay.
-    - Live results/Status are only overwritten when the sheet actually carries
-      those columns (a URL-only sheet keeps existing results).
-    - replace=True (default): products NOT in the sheet are DELETED, so the DB
-      mirrors the sheet — the app only works on what you sent.
-    """
+def _read_df(path):
     if path.lower().endswith(".csv"):
         df = pd.read_csv(path)
     else:
@@ -130,12 +179,112 @@ def import_sheet(path, replace=True):
     missing = [c for c in pt.REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"missing required columns: {missing}")
+    return df
 
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
+
+def _row_to_product(r, has_live, has_status):
+    url = str(r.get("Designer Product URL") or "").strip()
+    mbo = str(r.get("MBO Product URL") or "").strip()
+    key = url or mbo
+    if not key:
+        return None
+    regex = r.get("Custom Regex")
+    regex = "" if pd.isna(regex) else str(regex).strip()
+    base = pt.sanitize_price(r.get("Studio East Price"))
+    live = pt.sanitize_price(r.get("Live Price")) if has_live else None
+    cur = str(r.get("Detected Currency") or "").strip() if has_live else ""
+    status = str(r.get("Status") or "").strip() if has_status else ""
+    state = state_of(status)
+    delta = (live - base) if (live is not None and base is not None) else None
+    return {
+        "key": key, "mbo_url": mbo, "url": url,
+        "platform": str(r.get("Platform Type") or "").strip(),
+        "custom_regex": regex, "brand": brand_of(url),
+        "base_price": base, "live_price": live, "currency": cur,
+        "status": status, "state": state, "delta": delta,
+    }
+
+
+def _matches(prod, contains, domains):
+    """Designer-URL filter applied at import AND at run time."""
+    if contains:
+        if contains.lower() not in (prod["url"] or "").lower():
+            return False
+    if domains:
+        if prod["brand"] not in domains:
+            return False
+    return True
+
+
+def sheet_products(path, contains=None, domains=None):
+    """Parse a sheet into a list of product dicts, applying the Designer-URL
+    filter (contains substring + domain whitelist). This is what the pipeline
+    iterates — links always come from here, never from the DB."""
+    df = _read_df(path)
     has_live = "Live Price" in df.columns
     has_status = "Status" in df.columns
+    contains = (contains or "").strip().lower() or None
+    domains = set(domains) if domains else None
+    out = []
+    seen = set()
+    for _, r in df.iterrows():
+        p = _row_to_product(r, has_live, has_status)
+        if not p or not _matches(p, contains, domains):
+            continue
+        if p["key"] in seen:        # one decision per Designer URL
+            continue
+        seen.add(p["key"])
+        out.append(p)
+    return out
 
-    # Only refresh result columns the sheet actually provides.
+
+def preview_sheet(path):
+    """Inspect an uploaded sheet without importing: distinct designer domains
+    and counts, so the UI can offer a domain picker + contains filter."""
+    df = _read_df(path)
+    has_live = "Live Price" in df.columns
+    has_status = "Status" in df.columns
+    by_domain = {}
+    total = 0
+    seen = set()
+    for _, r in df.iterrows():
+        p = _row_to_product(r, has_live, has_status)
+        if not p or p["key"] in seen:
+            continue
+        seen.add(p["key"])
+        total += 1
+        by_domain[p["brand"]] = by_domain.get(p["brand"], 0) + 1
+    domains = sorted(({"domain": d or "(none)", "count": c}
+                      for d, c in by_domain.items()),
+                     key=lambda x: -x["count"])
+    return {"rows": total, "domains": domains,
+            "has_results": has_live or has_status}
+
+
+# ---------------------------------------------------------------------------
+# Import: sync `products` to the (filtered) sheet, and remember the file so the
+# pipeline can re-read the links straight from it.
+# ---------------------------------------------------------------------------
+
+_UPSERT_BASE = """
+INSERT INTO products
+  (key, mbo_url, url, platform, custom_regex, brand,
+   base_price, live_price, currency, status, state, delta, updated_at)
+VALUES (%(key)s,%(mbo_url)s,%(url)s,%(platform)s,%(custom_regex)s,%(brand)s,
+        %(base_price)s,%(live_price)s,%(currency)s,%(status)s,%(state)s,
+        %(delta)s,%(updated_at)s)
+ON CONFLICT(key) DO UPDATE SET """
+
+
+def import_sheet(path, replace=True, contains=None, domains=None):
+    """Sync `products` to the filtered sheet. The DB becomes exactly the rows
+    you uploaded that pass the Designer-URL filter (when replace=True)."""
+    prods = sheet_products(path, contains=contains, domains=domains)
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    # Always upsert facts; only overwrite result columns the sheet carries.
+    df = _read_df(path)
+    has_live = "Live Price" in df.columns
+    has_status = "Status" in df.columns
     set_parts = ["mbo_url=excluded.mbo_url", "url=excluded.url",
                  "platform=excluded.platform", "custom_regex=excluded.custom_regex",
                  "brand=excluded.brand", "base_price=excluded.base_price",
@@ -145,48 +294,33 @@ def import_sheet(path, replace=True):
                       "currency=excluded.currency", "delta=excluded.delta"]
     if has_status:
         set_parts += ["status=excluded.status", "state=excluded.state"]
-    upsert = ("""INSERT INTO products
-                   (key, mbo_url, url, platform, custom_regex, brand,
-                    base_price, live_price, currency, status, state, delta,
-                    updated_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                 ON CONFLICT(key) DO UPDATE SET """ + ", ".join(set_parts))
+    upsert = _UPSERT_BASE + ", ".join(set_parts)
 
     con = connect()
-    keys = []
     try:
-        for _, r in df.iterrows():
-            url = str(r.get("Designer Product URL") or "").strip()
-            mbo = str(r.get("MBO Product URL") or "").strip()
-            key = url or mbo
-            if not key:
-                continue
-            regex = r.get("Custom Regex")
-            regex = "" if pd.isna(regex) else str(regex).strip()
-            base = pt.sanitize_price(r.get("Studio East Price"))
-            live = pt.sanitize_price(r.get("Live Price")) if has_live else None
-            cur = str(r.get("Detected Currency") or "").strip() if has_live else ""
-            status = str(r.get("Status") or "").strip() if has_status else ""
-            state = state_of(status)
-            delta = (live - base) if (live is not None and base is not None) else None
-            con.execute(upsert,
-                (key, mbo, url, str(r.get("Platform Type") or "").strip(), regex,
-                 brand_of(url), base, live, cur, status, state, delta, now))
-            keys.append(key)
+        keys = []
+        for p in prods:
+            p["updated_at"] = now
+            con.execute(upsert, p)
+            keys.append(p["key"])
 
         deleted = 0
         if replace:
-            con.execute("CREATE TEMP TABLE _keep(key TEXT PRIMARY KEY)")
-            con.executemany("INSERT OR IGNORE INTO _keep VALUES(?)",
-                            [(k,) for k in keys])
+            con.execute("CREATE TEMP TABLE _keep(key TEXT PRIMARY KEY) "
+                        "ON COMMIT DROP")
+            con.cursor().executemany("INSERT INTO _keep VALUES(%s) "
+                                     "ON CONFLICT DO NOTHING",
+                                     [(k,) for k in keys])
             deleted = con.execute(
                 "DELETE FROM products WHERE key NOT IN (SELECT key FROM _keep)"
                 ).rowcount
-            con.execute("DROP TABLE _keep")
 
         set_meta(con, "last_import", now)
         set_meta(con, "last_import_file", os.path.basename(path))
+        set_meta(con, "last_import_path", os.path.abspath(path))
         set_meta(con, "last_import_rows", len(keys))
+        set_meta(con, "last_import_contains", contains or "")
+        set_meta(con, "last_import_domains", ",".join(domains) if domains else "")
         con.commit()
     finally:
         con.close()
@@ -194,25 +328,73 @@ def import_sheet(path, replace=True):
             "file": os.path.basename(path)}
 
 
+def work_rows(mode="fresh"):
+    """The pipeline's work list — read straight from the last imported sheet
+    (links come from the sheet, irrespective of the DB).
+
+    mode="fresh"  -> every link in the sheet.
+    mode="update" -> only links not yet done (DB state pending) or errored.
+    Returns [] if no sheet has been imported.
+    """
+    path = get_meta("last_import_path")
+    if not path or not os.path.exists(path):
+        return []
+    contains = (get_meta("last_import_contains") or "") or None
+    dom = get_meta("last_import_domains") or ""
+    domains = [d for d in dom.split(",") if d] or None
+    prods = sheet_products(path, contains=contains, domains=domains)
+    if mode == "fresh":
+        return prods
+    # update: keep links whose DB state is pending/error/unknown
+    con = connect()
+    rows = con.execute("SELECT key, state FROM products").fetchall()
+    con.close()
+    state_by_key = {r["key"]: r["state"] for r in rows}
+    return [p for p in prods
+            if state_by_key.get(p["key"], "pending") in ("pending", "error")]
+
+
+def alert_count(threshold=5.0):
+    """How many products moved >= threshold% between their last two runs."""
+    con = connect()
+    try:
+        r = con.execute("""
+            SELECT COUNT(*) c FROM (
+              SELECT live_price, prev FROM (
+                SELECT live_price,
+                  LAG(live_price) OVER (PARTITION BY key ORDER BY created_at) prev,
+                  ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) rn
+                FROM price_history WHERE live_price IS NOT NULL
+              ) t WHERE rn=1 AND prev IS NOT NULL AND prev<>0
+                AND ABS((live_price-prev)/prev*100) >= %s
+            ) z""", (abs(float(threshold)),)).fetchone()
+        return r["c"] or 0
+    except Exception:
+        return 0
+    finally:
+        con.close()
+
+
 def counts():
     con = connect()
     row = con.execute("""
         SELECT
           COUNT(*) total,
-          SUM(state='pending') pending,
-          SUM(state='matched') matched,
-          SUM(state='mismatch') mismatch,
-          SUM(state='error') error,
-          SUM(decision='approved') approved,
-          SUM(state='mismatch' AND decision='pending') awaiting,
-          SUM(decision='rejected') rejected
+          COUNT(*) FILTER (WHERE state='pending')  pending,
+          COUNT(*) FILTER (WHERE state='matched')  matched,
+          COUNT(*) FILTER (WHERE state='mismatch') mismatch,
+          COUNT(*) FILTER (WHERE state='error')    error,
+          COUNT(*) FILTER (WHERE decision='approved') approved,
+          COUNT(*) FILTER (WHERE state='mismatch' AND decision='pending') awaiting,
+          COUNT(*) FILTER (WHERE decision='rejected') rejected
         FROM products""").fetchone()
     con.close()
     return {k: (row[k] or 0) for k in row.keys()}
 
 
 if __name__ == "__main__":
-    init()
-    if get_meta("last_import") is None and os.path.exists("MBO_Scraped_Result.xlsx"):
-        print(import_sheet("MBO_Scraped_Result.xlsx"))
-    print(counts())
+    ok, msg = ping()
+    print("Supabase:", "OK" if ok else "FAIL", "-", msg)
+    if ok:
+        init()
+        print(counts())

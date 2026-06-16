@@ -34,6 +34,8 @@ UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "uploads")
 
 LOCK = threading.Lock()
 LOG = []
+LOG_MAX = 5000                 # keep memory bounded; older entries are dropped
+LOGMETA = {"offset": 0}        # absolute index of LOG[0] (entries dropped so far)
 _thread_local = threading.local()
 ACTIVE_COOLDOWN = pt.COOLDOWN_RANGE
 
@@ -76,63 +78,91 @@ def _log(row_no, platform, brand, currency, price, status, msg="", url=""):
             "url": url, "currency": currency or "-",
             "price": f"{price:.2f}" if isinstance(price, (int, float)) else "-",
             "status": status, "msg": msg})
+        if len(LOG) > LOG_MAX:               # bound memory; drop oldest in bulk
+            drop = len(LOG) - LOG_MAX
+            del LOG[:drop]
+            LOGMETA["offset"] += drop
 
 
 def _process(prod):
-    """Fetch + verify one product row. Returns (id, status, live, cur, state)."""
-    pid = prod["id"]
+    """Fetch + verify one product (a dict read from the sheet).
+    Returns (prod, status, live, cur, state)."""
     url = (prod["url"] or "").strip()
     platform = (prod["platform"] or "").strip()
     regex = prod["custom_regex"] or None
     base = prod["base_price"]
     brand = prod["brand"]
+    tag = prod.get("key") or url
 
     if CONFIG["simulation"]:
         time.sleep(random.uniform(0.03, 0.12))
         roll = random.random()
         if roll < 0.05 or base is None:
-            _log(pid, platform, brand, None, None, "Fetch Error",
+            _log(tag, platform, brand, None, None, "Fetch Error",
                  "simulated failure", url=url)
-            return pid, "Fetch Error", None, None, "error"
+            return prod, "Fetch Error", None, None, "error"
         live = base if roll > 0.12 else round(base * random.choice([0.9, 1.1]), 2)
         cur = "INR" if brand.endswith(".in") else "USD"
         if abs(live - base) <= pt.MATCH_TOLERANCE:
-            _log(pid, platform, brand, cur, live, "Price Matched", url=url)
-            return pid, f"Price Matched ({cur})", live, cur, "matched"
-        _log(pid, platform, brand, cur, live, "Price Mismatch!",
+            _log(tag, platform, brand, cur, live, "Price Matched", url=url)
+            return prod, f"Price Matched ({cur})", live, cur, "matched"
+        _log(tag, platform, brand, cur, live, "Price Mismatch!",
              f"delta {live - base:+.2f}", url=url)
-        return pid, f"Price Mismatch! ({cur})", live, cur, "mismatch"
+        return prod, f"Price Mismatch! ({cur})", live, cur, "mismatch"
 
     try:
         live, currency = pt.extract_row(_get_fetcher(), url, platform, regex)
         if live is None:
             raise ValueError("price not found")
     except Exception as exc:
-        _log(pid, platform, brand, None, None, "Fetch Error", f"{exc}", url=url)
-        return pid, "Fetch Error", None, None, "error"
+        _log(tag, platform, brand, None, None, "Fetch Error", f"{exc}", url=url)
+        return prod, "Fetch Error", None, None, "error"
 
     cur = currency or "UNKNOWN"
     if base is None:
-        _log(pid, platform, brand, cur, live, "Fetch Error",
+        _log(tag, platform, brand, cur, live, "Fetch Error",
              "baseline price unreadable", url=url)
-        return pid, "Fetch Error", live, cur, "error"
+        return prod, "Fetch Error", live, cur, "error"
     delta = live - base
     if abs(delta) <= pt.MATCH_TOLERANCE:
-        _log(pid, platform, brand, cur, live, "Price Matched", url=url)
-        return pid, f"Price Matched ({cur})", live, cur, "matched"
-    _log(pid, platform, brand, cur, live, "Price Mismatch!", f"delta {delta:+.2f}", url=url)
-    return pid, f"Price Mismatch! ({cur})", live, cur, "mismatch"
+        _log(tag, platform, brand, cur, live, "Price Matched", url=url)
+        return prod, f"Price Matched ({cur})", live, cur, "matched"
+    _log(tag, platform, brand, cur, live, "Price Mismatch!", f"delta {delta:+.2f}", url=url)
+    return prod, f"Price Mismatch! ({cur})", live, cur, "mismatch"
 
 
-def _pending_ids(con):
-    if CONFIG["fresh_start"]:
-        rows = con.execute("SELECT id FROM products").fetchall()
-    elif CONFIG["retry_errors"]:
-        rows = con.execute(
-            "SELECT id FROM products WHERE state IN ('pending','error')").fetchall()
-    else:
-        rows = con.execute("SELECT id FROM products WHERE state='pending'").fetchall()
-    return [r["id"] for r in rows]
+_RESULT_UPSERT = """
+INSERT INTO products
+  (key, mbo_url, url, platform, custom_regex, brand, base_price,
+   live_price, currency, status, state, delta, updated_at)
+VALUES (%(key)s,%(mbo_url)s,%(url)s,%(platform)s,%(custom_regex)s,%(brand)s,
+        %(base_price)s,%(live_price)s,%(currency)s,%(status)s,%(state)s,
+        %(delta)s,%(updated_at)s)
+ON CONFLICT(key) DO UPDATE SET
+  live_price=excluded.live_price, currency=excluded.currency,
+  status=excluded.status, state=excluded.state, delta=excluded.delta,
+  updated_at=excluded.updated_at
+"""
+
+
+def _save_result(con, prod, status, live, cur, state, run_id):
+    """Write the latest result to `products` (upsert by key) and append a row
+    to `price_history` so the Alerts page can see movement over time."""
+    base = prod["base_price"]
+    delta = (live - base) if (live is not None and base is not None) else None
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    con.execute(_RESULT_UPSERT, {
+        "key": prod["key"], "mbo_url": prod.get("mbo_url", ""), "url": prod["url"],
+        "platform": prod["platform"], "custom_regex": prod["custom_regex"],
+        "brand": prod["brand"], "base_price": base, "live_price": live,
+        "currency": cur, "status": status, "state": state, "delta": delta,
+        "updated_at": now})
+    con.execute(
+        "INSERT INTO price_history(key,url,brand,base_price,live_price,delta,"
+        "state,status,run_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (prod["key"], prod["url"], prod["brand"], base, live, delta,
+         state, status, run_id))
+    return delta
 
 
 def _abortable_rest(seconds, label):
@@ -143,38 +173,31 @@ def _abortable_rest(seconds, label):
         time.sleep(0.5)
 
 
-def _run_pass(con, ids, workers, batch_size, rest_between, cooldown, phase, label, on_done):
+def _run_pass(con, rows, workers, batch_size, rest_between, cooldown, phase,
+              label, on_done, run_id):
+    """rows is a list of product dicts read from the sheet."""
     global ACTIVE_COOLDOWN
     ACTIVE_COOLDOWN = cooldown
     workers = max(1, int(workers))
     batch_size = max(1, int(batch_size))
     with LOCK:
         STATE["phase"] = phase
-    for bstart in range(0, len(ids), batch_size):
+    for bstart in range(0, len(rows), batch_size):
         if STATE["abort"]:
             return False
-        batch = ids[bstart:bstart + batch_size]
-        prods = {r["id"]: r for r in con.execute(
-            "SELECT id,url,platform,custom_regex,base_price,brand FROM products "
-            f"WHERE id IN ({','.join('?' * len(batch))})", batch).fetchall()}
+        batch = rows[bstart:bstart + batch_size]
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(_process, prods[i]): i for i in batch if i in prods}
+            futs = [ex.submit(_process, p) for p in batch]
             for fut in as_completed(futs):
                 if STATE["abort"]:
                     for f2 in futs:
                         f2.cancel()
                     break
-                pid, status, live, cur, st = fut.result()
-                base = prods[pid]["base_price"]
-                delta = (live - base) if (live is not None and base is not None) else None
-                con.execute(
-                    "UPDATE products SET status=?,live_price=?,currency=?,state=?,"
-                    "delta=?,updated_at=? WHERE id=?",
-                    (status, live, cur, st, delta,
-                     time.strftime("%Y-%m-%d %H:%M:%S"), pid))
+                prod, status, live, cur, st = fut.result()
+                _save_result(con, prod, status, live, cur, st, run_id)
                 con.commit()  # commit per row so Review/counts update live
-                on_done(pid, st)
-        if not STATE["abort"] and bstart + batch_size < len(ids):
+                on_done(prod, st)
+        if not STATE["abort"] and bstart + batch_size < len(rows):
             _abortable_rest(rest_between, label)
             with LOCK:
                 STATE["message"] = label
@@ -184,35 +207,40 @@ def _run_pass(con, ids, workers, batch_size, rest_between, cooldown, phase, labe
 def _pipeline():
     global ACTIVE_COOLDOWN
     con = store.connect()
+    run_id = time.strftime("%Y%m%d-%H%M%S")
     try:
-        ids = _pending_ids(con)
-        total = con.execute("SELECT COUNT(*) c FROM products").fetchone()["c"]
+        mode = "fresh" if CONFIG["fresh_start"] else "update"
+        rows = store.work_rows(mode)            # links come from the SHEET
+        total = store.counts()["total"]
         with LOCK:
-            STATE.update(total_rows=total, pre_done=total - len(ids),
-                         message=f"Main pass - {len(ids)} pending")
+            STATE.update(total_rows=max(total, len(rows)),
+                         pre_done=max(0, total - len(rows)),
+                         message=f"Main pass - {len(rows)} link(s) from sheet")
 
-        def main_done(pid, st):
+        def main_done(prod, st):
             with LOCK:
                 STATE["completed"] += 1
                 STATE["matched" if st == "matched" else
                       "mismatch" if st == "mismatch" else "errors"] += 1
 
         finished = _run_pass(
-            con, ids, min(25, max(1, int(CONFIG["concurrency"]))),
+            con, rows, min(25, max(1, int(CONFIG["concurrency"]))),
             CONFIG["batch_size"], CONFIG["rest_between"], pt.COOLDOWN_RANGE,
-            "main", "Main pass", main_done)
+            "main", "Main pass", main_done, run_id)
 
         if finished and CONFIG["safe_retry"]:
-            err = [r["id"] for r in con.execute(
-                "SELECT id FROM products WHERE state='error' AND base_price IS NOT NULL"
-                ).fetchall()]
+            # which of the worked links ended this run in error (with a baseline)
+            erkeys = {r["key"] for r in con.execute(
+                "SELECT key FROM products WHERE state='error' "
+                "AND base_price IS NOT NULL").fetchall()}
+            err = [p for p in rows if p["key"] in erkeys]
             with LOCK:
                 STATE.update(retry_total=len(err), retry_completed=0, retry_recovered=0)
             if err:
                 with LOCK:
                     STATE["message"] = f"Safe-Retry Window - {len(err)} errors, gently"
 
-                def retry_done(pid, st):
+                def retry_done(prod, st):
                     with LOCK:
                         STATE["retry_completed"] += 1
                         if st != "error":
@@ -227,7 +255,7 @@ def _pipeline():
                           CONFIG["safe_batch_size"], CONFIG["safe_rest_between"],
                           (float(CONFIG["safe_cooldown_min"]),
                            float(CONFIG["safe_cooldown_max"])),
-                          "safe_retry", "Safe-Retry Window", retry_done)
+                          "safe_retry", "Safe-Retry Window", retry_done, run_id)
         ACTIVE_COOLDOWN = pt.COOLDOWN_RANGE
         final = "Aborted" if STATE["abort"] else "Completed"
         rec = STATE["retry_recovered"]
@@ -248,7 +276,7 @@ def _pipeline():
 
 def _integration(brand):
     con = store.connect()
-    r = con.execute("SELECT * FROM integrations WHERE brand=?", (brand,)).fetchone()
+    r = con.execute("SELECT * FROM integrations WHERE brand=%s", (brand,)).fetchone()
     con.close()
     return dict(r) if r else None
 
@@ -337,6 +365,11 @@ def page_integrations():
     return render_template("integrations.html", active="integrations")
 
 
+@app.route("/alerts")
+def page_alerts():
+    return render_template("alerts.html", active="alerts")
+
+
 @app.route("/healthz")
 def healthz():
     with LOCK:
@@ -346,6 +379,7 @@ def healthz():
 @app.route("/api/meta")
 def api_meta():
     return jsonify(counts=store.counts(),
+                   alerts=store.alert_count(5),
                    last_import=store.get_meta("last_import"),
                    last_import_rows=store.get_meta("last_import_rows"),
                    last_import_file=store.get_meta("last_import_file"))
@@ -353,21 +387,56 @@ def api_meta():
 
 # ---- Pipeline API ----
 
-@app.route("/api/import", methods=["POST"])
-def api_import():
-    f = request.files.get("file")
-    if not f or not f.filename:
-        return jsonify(ok=False, error="no file"), 400
+def _save_upload(f):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     path = os.path.join(UPLOAD_DIR, secure_filename(f.filename))
     f.save(path)
-    # replace=True -> the DB becomes exactly this sheet (rows not in it are removed)
-    replace = (request.args.get("mode", "replace") != "add")
+    return path
+
+
+@app.route("/api/import/preview", methods=["POST"])
+def api_import_preview():
+    """Inspect an uploaded sheet (no DB write): return distinct designer
+    domains + counts so the user can filter before importing."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify(ok=False, error="no file"), 400
+    path = _save_upload(f)
     try:
-        res = store.import_sheet(path, replace=replace)
+        prev = store.preview_sheet(path)
     except Exception as exc:
         return jsonify(ok=False, error=str(exc)), 400
-    return jsonify(ok=True, **res, counts=store.counts())
+    # stash the path so /api/import can reuse it without re-uploading
+    return jsonify(ok=True, path=os.path.basename(path), **prev)
+
+
+@app.route("/api/import", methods=["POST"])
+def api_import():
+    """Import with an optional Designer-URL filter (contains text + domain
+    whitelist). Accepts either a fresh file upload or a previously previewed
+    filename (form field `path`)."""
+    contains = (request.form.get("contains") or request.args.get("contains") or "").strip()
+    domains = request.form.getlist("domains") or request.form.getlist("domains[]")
+    domains = [d for d in domains if d and d != "(none)"]
+
+    f = request.files.get("file")
+    if f and f.filename:
+        path = _save_upload(f)
+    else:
+        name = secure_filename(request.form.get("path", ""))
+        path = os.path.join(UPLOAD_DIR, name) if name else None
+        if not path or not os.path.exists(path):
+            return jsonify(ok=False, error="no file"), 400
+
+    replace = (request.form.get("mode", request.args.get("mode", "replace")) != "add")
+    try:
+        res = store.import_sheet(path, replace=replace,
+                                 contains=contains or None,
+                                 domains=domains or None)
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    return jsonify(ok=True, **res, counts=store.counts(),
+                   contains=contains, domains=domains)
 
 
 @app.route("/api/clear_db", methods=["POST"])
@@ -416,6 +485,7 @@ def api_abort():
 def api_clear_log():
     with LOCK:
         LOG.clear()
+        LOGMETA["offset"] = 0
     return jsonify(ok=True)
 
 
@@ -423,7 +493,10 @@ def api_clear_log():
 def api_status():
     cursor = int(request.args.get("cursor", 0))
     with LOCK:
-        entries = LOG[cursor:]
+        offset = LOGMETA["offset"]
+        start = max(0, cursor - offset)      # cursor is an absolute index
+        entries = LOG[start:]
+        total = offset + len(LOG)
         snap = dict(STATE)
         cfg = dict(CONFIG)
     elapsed = int(time.time() - snap["started_at"]) if snap["started_at"] else 0
@@ -436,8 +509,12 @@ def api_status():
                    retry_completed=snap["retry_completed"],
                    retry_recovered=snap["retry_recovered"], elapsed=elapsed,
                    message=snap["message"], config=cfg,
-                   cursor=cursor + len(entries), entries=entries,
-                   log_total=cursor + len(entries))
+                   cursor=total, entries=entries, log_total=total)
+
+
+_FILL_MISMATCH = "FFF2CC"   # soft yellow
+_FILL_ERROR = "F8CBAD"      # soft red
+_FILL_HEADER = "1F2A40"
 
 
 @app.route("/api/export")
@@ -447,23 +524,59 @@ def api_export():
     con = store.connect()
     where = {"all": "1=1", "mismatch": "state='mismatch'", "error": "state='error'",
              "approved": "decision='approved'"}.get(kind, "1=1")
-    df = pd.read_sql_query(
-        f"SELECT id, brand, platform, url, base_price, live_price, currency, "
-        f"status, delta, decision, markup_pct, custom_price, final_price, "
-        f"shopify_status, shopify_at FROM products WHERE {where} ORDER BY id",
-        con)
+    cols = ["id", "brand", "platform", "url", "base_price", "live_price",
+            "currency", "status", "state", "delta", "decision", "markup_pct",
+            "custom_price", "final_price", "shopify_status", "shopify_at"]
+    # Build the DataFrame from dict rows directly; pandas' read_sql does not
+    # support a raw psycopg3 (dict_row) connection.
+    rows = con.execute(
+        f"SELECT {', '.join(cols)} FROM products WHERE {where} ORDER BY id"
+        ).fetchall()
     con.close()
+    df = pd.DataFrame([dict(r) for r in rows], columns=cols)
     bio = io.BytesIO()
     if fmt_ == "csv":
         bio.write(df.to_csv(index=False).encode("utf-8"))
         mime, name = "text/csv", f"pricesync_{kind}.csv"
     else:
-        with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-            df.to_excel(xw, index=False, sheet_name="export")
+        _write_colored_xlsx(bio, df)
         mime, name = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                       f"pricesync_{kind}.xlsx")
     bio.seek(0)
     return send_file(bio, mimetype=mime, as_attachment=True, download_name=name)
+
+
+def _write_colored_xlsx(bio, df):
+    """Write df to xlsx and tint each row: yellow for a price MISMATCH,
+    red for a fetch ERROR. Color is driven by the `state` column."""
+    from openpyxl.styles import PatternFill, Font
+    with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+        df.to_excel(xw, index=False, sheet_name="export")
+        ws = xw.sheets["export"]
+        try:
+            state_col = list(df.columns).index("state") + 1  # 1-based
+        except ValueError:
+            state_col = None
+        head = PatternFill("solid", fgColor=_FILL_HEADER)
+        hfont = Font(color="FFFFFF", bold=True)
+        for c in range(1, ws.max_column + 1):
+            ws.cell(row=1, column=c).fill = head
+            ws.cell(row=1, column=c).font = hfont
+        yellow = PatternFill("solid", fgColor=_FILL_MISMATCH)
+        red = PatternFill("solid", fgColor=_FILL_ERROR)
+        if state_col:
+            for i in range(len(df)):
+                st = df.iat[i, state_col - 1]
+                fill = yellow if st == "mismatch" else red if st == "error" else None
+                if fill:
+                    for c in range(1, ws.max_column + 1):
+                        ws.cell(row=i + 2, column=c).fill = fill
+        # legend on a second sheet
+        leg = xw.book.create_sheet("legend")
+        leg["A1"] = "Yellow = Price Mismatch"
+        leg["A1"].fill = yellow
+        leg["A2"] = "Red = Fetch Error"
+        leg["A2"].fill = red
 
 
 # ---- Review API ----
@@ -473,9 +586,9 @@ def api_items():
     kind = request.args.get("kind", "mismatch")
     brand = request.args.get("brand", "").strip()
     state = {"mismatch": "mismatch", "error": "error", "resolved": "matched"}.get(kind, "mismatch")
-    where, params = "state=?", [state]
+    where, params = "state=%s", [state]
     if brand:
-        where += " AND brand=?"
+        where += " AND brand=%s"
         params.append(brand)
     con = store.connect()
     rows = con.execute(
@@ -491,7 +604,7 @@ def api_brands():
     state = {"mismatch": "mismatch", "error": "error", "resolved": "matched"}.get(kind)
     con = store.connect()
     if state:
-        rows = con.execute("SELECT brand, COUNT(*) c FROM products WHERE state=? "
+        rows = con.execute("SELECT brand, COUNT(*) c FROM products WHERE state=%s "
                            "AND brand<>'' GROUP BY brand ORDER BY c DESC", (state,)).fetchall()
     else:
         rows = con.execute("SELECT brand, COUNT(*) c FROM products WHERE brand<>'' "
@@ -510,7 +623,7 @@ def api_decide():
     if pid in (None, ""):
         return jsonify(ok=False, error="missing row"), 400
     con = store.connect()
-    it = con.execute("SELECT base_price, live_price FROM products WHERE id=?", (int(pid),)).fetchone()
+    it = con.execute("SELECT base_price, live_price FROM products WHERE id=%s", (int(pid),)).fetchone()
     if it is None:
         con.close()
         return jsonify(ok=False, error="unknown row"), 404
@@ -523,8 +636,8 @@ def api_decide():
     final = None
     if decision == "approved":
         final = store_compute_final(it["base_price"], it["live_price"], ref, markup, custom)
-    con.execute("UPDATE products SET decision=?,markup_pct=?,custom_price=?,ref=?,"
-                "final_price=?,note=?,decided_at=? WHERE id=?",
+    con.execute("UPDATE products SET decision=%s,markup_pct=%s,custom_price=%s,ref=%s,"
+                "final_price=%s,note=%s,decided_at=%s WHERE id=%s",
                 (decision, markup, custom, ref, final, d.get("note", ""),
                  time.strftime("%Y-%m-%d %H:%M:%S"), int(pid)))
     con.commit()
@@ -574,7 +687,7 @@ def _rerun_worker(ids):
                 if not RERUN["running"]:
                     break
             it = con.execute("SELECT url,platform,custom_regex,base_price,brand "
-                             "FROM products WHERE id=?", (pid,)).fetchone()
+                             "FROM products WHERE id=%s", (pid,)).fetchone()
             if it is None:
                 continue
             try:
@@ -583,7 +696,7 @@ def _rerun_worker(ids):
                 if live is None:
                     raise ValueError("price not found")
             except Exception as exc:
-                con.execute("UPDATE products SET rerun_status=?,rerun_at=? WHERE id=?",
+                con.execute("UPDATE products SET rerun_status=%s,rerun_at=%s WHERE id=%s",
                             (f"Fetch Error: {exc}", time.strftime("%Y-%m-%d %H:%M:%S"), pid))
                 con.commit()
                 still += 1
@@ -598,8 +711,8 @@ def _rerun_worker(ids):
             else:
                 state, st = "mismatch", f"Price Mismatch! ({cur})"
             delta = (live - base) if base is not None else None
-            con.execute("UPDATE products SET state=?,status=?,live_price=?,currency=?,"
-                        "delta=?,rerun_status=?,rerun_at=? WHERE id=?",
+            con.execute("UPDATE products SET state=%s,status=%s,live_price=%s,currency=%s,"
+                        "delta=%s,rerun_status=%s,rerun_at=%s WHERE id=%s",
                         (state, st, live, cur, delta, st,
                          time.strftime("%Y-%m-%d %H:%M:%S"), pid))
             con.commit()
@@ -632,7 +745,7 @@ def api_push():
     d = request.get_json(force=True) or {}
     pid = d.get("row")
     con = store.connect()
-    it = con.execute("SELECT brand,url,final_price,decision FROM products WHERE id=?",
+    it = con.execute("SELECT brand,url,final_price,decision FROM products WHERE id=%s",
                      (int(pid),)).fetchone()
     if it is None:
         con.close()
@@ -641,7 +754,7 @@ def api_push():
         con.close()
         return jsonify(ok=False, error="approve a final price first"), 400
     res = push_price_to_shopify(it["brand"], it["url"], it["final_price"])
-    con.execute("UPDATE products SET shopify_status=?,shopify_at=? WHERE id=?",
+    con.execute("UPDATE products SET shopify_status=%s,shopify_at=%s WHERE id=%s",
                 (res["status"], time.strftime("%Y-%m-%d %H:%M:%S"), int(pid)))
     con.commit()
     con.close()
@@ -656,7 +769,7 @@ def api_push_all():
     d = request.get_json(silent=True) or {}
     brand = (d.get("brand") or "").strip()
     con = store.connect()
-    q = "SELECT id FROM products WHERE decision='approved'" + (" AND brand=?" if brand else "")
+    q = "SELECT id FROM products WHERE decision='approved'" + (" AND brand=%s" if brand else "")
     ids = [r["id"] for r in con.execute(q, (brand,) if brand else ()).fetchall()]
     con.close()
     if not ids:
@@ -676,11 +789,11 @@ def _push_all_worker(ids):
             with PUSH_LOCK:
                 if not PUSH["running"]:
                     break
-            it = con.execute("SELECT brand,url,final_price FROM products WHERE id=?", (pid,)).fetchone()
+            it = con.execute("SELECT brand,url,final_price FROM products WHERE id=%s", (pid,)).fetchone()
             if it is None:
                 continue
             res = push_price_to_shopify(it["brand"], it["url"], it["final_price"])
-            con.execute("UPDATE products SET shopify_status=?,shopify_at=? WHERE id=?",
+            con.execute("UPDATE products SET shopify_status=%s,shopify_at=%s WHERE id=%s",
                         (res["status"], time.strftime("%Y-%m-%d %H:%M:%S"), pid))
             con.commit()
             ok, fail = (ok + 1, fail) if res["ok"] else (ok, fail + 1)
@@ -707,8 +820,8 @@ def api_push_status():
 def api_integrations():
     con = store.connect()
     brands = con.execute(
-        "SELECT brand, COUNT(*) c, SUM(state='mismatch') m FROM products "
-        "WHERE brand<>'' GROUP BY brand ORDER BY c DESC").fetchall()
+        "SELECT brand, COUNT(*) c, COUNT(*) FILTER (WHERE state='mismatch') m "
+        "FROM products WHERE brand<>'' GROUP BY brand ORDER BY c DESC").fetchall()
     cfgs = {r["brand"]: dict(r) for r in con.execute("SELECT * FROM integrations").fetchall()}
     con.close()
     out = []
@@ -729,12 +842,12 @@ def api_int_save():
     if not brand:
         return jsonify(ok=False, error="missing brand"), 400
     con = store.connect()
-    existing = con.execute("SELECT access_token FROM integrations WHERE brand=?", (brand,)).fetchone()
+    existing = con.execute("SELECT access_token FROM integrations WHERE brand=%s", (brand,)).fetchone()
     token = (d.get("access_token") or "").strip()
     if not token and existing:  # keep existing token if field left blank
         token = existing["access_token"]
     con.execute("""INSERT INTO integrations(brand,shop_domain,access_token,api_version,dry_run,updated_at)
-                   VALUES(?,?,?,?,?,?)
+                   VALUES(%s,%s,%s,%s,%s,%s)
                    ON CONFLICT(brand) DO UPDATE SET shop_domain=excluded.shop_domain,
                      access_token=excluded.access_token, api_version=excluded.api_version,
                      dry_run=excluded.dry_run, updated_at=excluded.updated_at""",
@@ -758,16 +871,88 @@ def api_int_verify():
 def api_int_delete():
     brand = ((request.get_json(silent=True) or {}).get("brand") or "").strip()
     con = store.connect()
-    con.execute("DELETE FROM integrations WHERE brand=?", (brand,))
+    con.execute("DELETE FROM integrations WHERE brand=%s", (brand,))
     con.commit()
     con.close()
     return jsonify(ok=True)
 
 
+# ---- Alerts API (price drops / spikes vs the previous run) ----
+
+@app.route("/api/alerts")
+def api_alerts():
+    """Compare each product's latest price snapshot to its previous one and
+    flag movements beyond `threshold` percent. direction = all|drop|spike."""
+    try:
+        threshold = abs(float(request.args.get("threshold", 5)))
+    except (TypeError, ValueError):
+        threshold = 5.0
+    direction = request.args.get("direction", "all")
+    brand = request.args.get("brand", "").strip()
+
+    con = store.connect()
+    params = []                       # placeholders in query order: [brand?], threshold
+    bclause = ""
+    if brand:
+        bclause = "AND brand=%s"
+        params.append(brand)
+    params.append(threshold)
+    rows = con.execute(f"""
+        SELECT key, url, brand, live_price, prev, created_at, status,
+               (live_price - prev) AS abs_change,
+               ROUND(((live_price - prev) / prev * 100)::numeric, 2) AS pct
+        FROM (
+          SELECT key, url, brand, live_price, status, created_at,
+            LAG(live_price) OVER (PARTITION BY key ORDER BY created_at) AS prev,
+            ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) AS rn
+          FROM price_history
+          WHERE live_price IS NOT NULL
+        ) t
+        WHERE rn = 1 AND prev IS NOT NULL AND prev <> 0 {bclause}
+          AND ABS((live_price - prev) / prev * 100) >= %s
+        ORDER BY ABS((live_price - prev) / prev * 100) DESC
+        LIMIT 1000
+    """, params).fetchall()
+    con.close()
+
+    items = []
+    for r in rows:
+        pct = float(r["pct"]) if r["pct"] is not None else 0.0
+        dir_ = "spike" if pct > 0 else "drop"
+        if direction in ("drop", "spike") and dir_ != direction:
+            continue
+        d = dict(r)
+        d["pct"] = pct
+        d["abs_change"] = float(r["abs_change"]) if r["abs_change"] is not None else None
+        d["direction"] = dir_
+        d["created_at"] = str(d["created_at"])
+        items.append(d)
+    spikes = sum(1 for i in items if i["direction"] == "spike")
+    drops = sum(1 for i in items if i["direction"] == "drop")
+    return jsonify(items=items, total=len(items), spikes=spikes, drops=drops,
+                   threshold=threshold)
+
+
+@app.route("/api/alerts/brands")
+def api_alerts_brands():
+    con = store.connect()
+    rows = con.execute(
+        "SELECT brand, COUNT(DISTINCT key) c FROM price_history "
+        "WHERE brand<>'' GROUP BY brand ORDER BY c DESC").fetchall()
+    con.close()
+    return jsonify(brands=[{"brand": r["brand"], "count": r["c"]} for r in rows])
+
+
 # ---------------------------------------------------------------------------
 
 def serve():
-    store.init()  # start empty; the app only works on sheets you import
+    ok, msg = store.ping()
+    if not ok:
+        print("[PriceSync] Supabase connection FAILED:", msg)
+        print("[PriceSync] Set SUPABASE_DB_URL in .env (see .env.example).")
+        raise SystemExit(1)
+    store.init()  # ensure tables exist; the app only works on sheets you import
+    print("[PriceSync] Supabase connected.")
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8080"))
     try:
