@@ -26,8 +26,17 @@ import requests
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.utils import secure_filename
 
+import fx
 import price_tracker as pt
 import store
+
+
+def _match_tol(base, cur):
+    """Foreign-currency conversions carry FX noise, so allow a small relative
+    band for non-INR; INR stays strict (legacy behaviour)."""
+    if cur in ("INR", "UNKNOWN", None, ""):
+        return pt.MATCH_TOLERANCE
+    return max(pt.MATCH_TOLERANCE, 0.005 * abs(base or 0))
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(
@@ -126,8 +135,9 @@ def _process(prod):
         _log(tag, platform, brand, cur, live, "Fetch Error",
              "baseline price unreadable", url=url)
         return prod, "Fetch Error", live, cur, "error"
-    delta = live - base
-    if abs(delta) <= pt.MATCH_TOLERANCE:
+    live_inr = fx.to_inr(live, cur)          # USD/CAD -> INR at current rate
+    delta = live_inr - base                  # compare in INR
+    if abs(delta) <= _match_tol(base, cur):
         _log(tag, platform, brand, cur, live, "Price Matched", url=url)
         return prod, f"Price Matched ({cur})", live, cur, "matched"
     _log(tag, platform, brand, cur, live, "Price Mismatch!", f"delta {delta:+.2f}", url=url)
@@ -152,7 +162,8 @@ def _save_result(con, prod, status, live, cur, state, run_id):
     """Write the latest result to `products` (upsert by key) and append a row
     to `price_history` so the Alerts page can see movement over time."""
     base = prod["base_price"]
-    delta = (live - base) if (live is not None and base is not None) else None
+    # delta is in INR: convert the (raw) live price by its currency first
+    delta = (fx.to_inr(live, cur) - base) if (live is not None and base is not None) else None
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     con.execute(_RESULT_UPSERT, {
         "key": prod["key"], "mbo_url": prod.get("mbo_url", ""), "url": prod["url"],
@@ -717,7 +728,8 @@ def api_decide():
     if pid in (None, ""):
         return jsonify(ok=False, error="missing row"), 400
     con = store.connect()
-    it = con.execute("SELECT base_price, live_price FROM products WHERE id=%s", (int(pid),)).fetchone()
+    it = con.execute("SELECT base_price, live_price, currency FROM products WHERE id=%s",
+                     (int(pid),)).fetchone()
     if it is None:
         con.close()
         return jsonify(ok=False, error="unknown row"), 404
@@ -725,11 +737,13 @@ def api_decide():
     ref = d.get("ref", "live")
     markup = d.get("markup_pct")
     custom = d.get("custom_price")
+    convert = d.get("convert", True)
     markup = None if markup in ("", None) else float(markup)
     custom = None if custom in ("", None) else float(custom)
     final = None
     if decision == "approved":
-        final = store_compute_final(it["base_price"], it["live_price"], ref, markup, custom)
+        final = store_compute_final(it["base_price"], it["live_price"],
+                                    it["currency"], ref, markup, custom, convert)
     con.execute("UPDATE products SET decision=%s,markup_pct=%s,custom_price=%s,ref=%s,"
                 "final_price=%s,note=%s,decided_at=%s WHERE id=%s",
                 (decision, markup, custom, ref, final, d.get("note", ""),
@@ -739,15 +753,89 @@ def api_decide():
     return jsonify(ok=True, final_price=final)
 
 
-def store_compute_final(base, live, ref, markup_pct, custom_price):
+def store_compute_final(base, live, currency, ref, markup_pct, custom_price, convert=True):
+    """Final price in INR. custom overrides; else apply markup on the reference.
+    When convert=True the live reference is converted from its currency to INR."""
     if custom_price is not None and float(custom_price) > 0:
         return round(float(custom_price), 2)
-    reference = base if ref == "base" else live
+    if ref == "base":
+        reference = base
+    else:
+        reference = fx.to_inr(live, currency) if convert else live
     if reference is None:
-        reference = live if live is not None else base
+        reference = base
     if reference is None:
         return None
     return round(reference * (1 + float(markup_pct or 0) / 100.0), 2)
+
+
+@app.route("/api/review/approve_all", methods=["POST"])
+def api_approve_all():
+    """One control to rule them all: apply a single markup (+FX conversion) to
+    every mismatch in the current scope and approve them together."""
+    d = request.get_json(force=True) or {}
+    markup = d.get("markup_pct")
+    markup = 0.0 if markup in ("", None) else float(markup)
+    ref = d.get("ref", "live")
+    convert = d.get("convert", True)
+    kind = d.get("kind", "mismatch")
+    brands = [b for b in (d.get("brands") or []) if b]
+    state = {"mismatch": "mismatch", "error": "error", "resolved": "matched"}.get(kind, "mismatch")
+    where, params = "state=%s", [state]
+    if brands:
+        where += " AND brand IN (" + ",".join(["%s"] * len(brands)) + ")"
+        params += brands
+    con = store.connect()
+    rows = con.execute(f"SELECT id, base_price, live_price, currency FROM products "
+                       f"WHERE {where}", params).fetchall()
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    n = 0
+    for r in rows:
+        final = store_compute_final(r["base_price"], r["live_price"], r["currency"],
+                                    ref, markup, None, convert)
+        con.execute("UPDATE products SET decision='approved',markup_pct=%s,custom_price=NULL,"
+                    "ref=%s,final_price=%s,decided_at=%s WHERE id=%s",
+                    (markup, ref, final, now, r["id"]))
+        n += 1
+    con.commit()
+    con.close()
+    return jsonify(ok=True, approved=n, markup=markup, convert=bool(convert))
+
+
+@app.route("/api/fx")
+def api_fx():
+    return jsonify(rates=fx.snapshot(("USD", "CAD", "INR")))
+
+
+@app.route("/api/insights")
+def api_insights():
+    """Aggregates for the Power-BI-style home dashboard."""
+    con = store.connect()
+    c = store.counts()
+    top_mis = con.execute(
+        "SELECT brand, COUNT(*) c FROM products WHERE state='mismatch' AND brand<>'' "
+        "GROUP BY brand ORDER BY c DESC LIMIT 10").fetchall()
+    top_prod = con.execute(
+        "SELECT brand, COUNT(*) c FROM products WHERE brand<>'' "
+        "GROUP BY brand ORDER BY c DESC LIMIT 10").fetchall()
+    agg = con.execute(
+        "SELECT COALESCE(SUM(CASE WHEN delta>0 THEN delta ELSE 0 END),0) over_, "
+        "COALESCE(SUM(CASE WHEN delta<0 THEN -delta ELSE 0 END),0) under_, "
+        "COALESCE(AVG(ABS(delta)),0) avgd FROM products WHERE state='mismatch'").fetchone()
+    vendors = con.execute(
+        "SELECT COUNT(DISTINCT brand) c FROM products WHERE brand<>''").fetchone()["c"]
+    approved_val = con.execute(
+        "SELECT COALESCE(SUM(final_price),0) v FROM products WHERE decision='approved'"
+        ).fetchone()["v"]
+    con.close()
+    return jsonify(
+        counts=c, vendors=vendors,
+        top_mismatch=[{"brand": r["brand"], "count": r["c"]} for r in top_mis],
+        top_products=[{"brand": r["brand"], "count": r["c"]} for r in top_prod],
+        exposure={"over": float(agg["over_"] or 0), "under": float(agg["under_"] or 0),
+                  "avg": float(agg["avgd"] or 0)},
+        approved_value=float(approved_val or 0),
+        fx=fx.snapshot(("USD", "CAD", "INR")))
 
 
 @app.route("/api/review/rerun", methods=["POST"])
@@ -800,11 +888,12 @@ def _rerun_worker(ids):
                 continue
             base = it["base_price"]
             cur = currency or "UNKNOWN"
-            if base is not None and abs(live - base) <= pt.MATCH_TOLERANCE:
+            live_inr = fx.to_inr(live, cur)
+            if base is not None and abs(live_inr - base) <= _match_tol(base, cur):
                 state, st = "matched", f"Price Matched ({cur})"
             else:
                 state, st = "mismatch", f"Price Mismatch! ({cur})"
-            delta = (live - base) if base is not None else None
+            delta = (live_inr - base) if base is not None else None
             con.execute("UPDATE products SET state=%s,status=%s,live_price=%s,currency=%s,"
                         "delta=%s,rerun_status=%s,rerun_at=%s WHERE id=%s",
                         (state, st, live, cur, delta, st,

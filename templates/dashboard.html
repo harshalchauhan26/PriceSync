@@ -11,6 +11,7 @@
      as a plain inline script, which blanks the whole page. -->
 <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
   :root{--bg:#09090b;--panel:#121214;--panel2:#18181b;--border:#27272a;
     --blue:#2563eb;--emerald:#10b981;--amber:#f59e0b;--red:#ef4444;--mut:#71717a;}
@@ -56,6 +57,7 @@ const P = {
   cloud:"M12 13v8m-4-4 4 4 4-4M20 16.6A5 5 0 0 0 18 7h-1.3A8 8 0 1 0 4 15.2",
   dl:"M12 3v12m-5-5 5 5 5-5M5 21h14", zap:"M13 2 3 14h7l-1 8 10-12h-7l1-8Z",
   filter:"M22 3H2l8 9.5V19l4 2v-8.5L22 3Z", mail:"M4 5h16v14H4zM4 7l8 6 8-6",
+  home:"M3 11l9-8 9 8M5 10v10h14V10", chart:"M3 3v18h18M8 16v-5M13 16V8M18 16v-9",
 };
 const Icon=({n,s=16,c="currentColor",sw=2,cls=""})=>(
   <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={sw}
@@ -147,6 +149,106 @@ function ExcelFilter({label,options,selected,onChange}){
       <div className="text-[10px] mt-1.5 px-0.5" style={{color:"var(--mut)"}}>
         {active?`Showing ${selected.length} vendor(s)`:"Showing all vendors"}</div>
     </div>}
+  </div>;
+}
+
+/* ===================== HOME (insights) ===================== */
+function ChartBox({type,labels,datasets,options,h=250}){
+  const ref=useRef(null);const inst=useRef(null);
+  useEffect(()=>{
+    if(!window.Chart||!ref.current)return;
+    if(inst.current){inst.current.destroy();inst.current=null;}
+    const grid="#27272a",tick="#a1a1aa";
+    inst.current=new window.Chart(ref.current.getContext("2d"),{type,data:{labels,datasets},
+      options:Object.assign({responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{labels:{color:tick,font:{size:11},boxWidth:12}}},
+        scales:(type==="doughnut"||type==="pie")?{}:{
+          x:{ticks:{color:tick,font:{size:10}},grid:{color:grid}},
+          y:{ticks:{color:tick,font:{size:10}},grid:{color:grid}}}},options||{})});
+    return ()=>{if(inst.current){inst.current.destroy();inst.current=null;}};
+  });
+  return <div style={{height:h}}><canvas ref={ref}/></div>;
+}
+const Panel=({title,children,sub})=>(
+  <div className="rounded-xl border p-4" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
+    <div className="flex items-baseline justify-between mb-3">
+      <h3 className="text-[12px] font-bold tracking-wide">{title}</h3>
+      {sub&&<span className="text-[10.5px]" style={{color:"var(--mut)"}}>{sub}</span>}</div>
+    {children}</div>);
+
+function Home({go}){
+  const [d,setD]=useState(null);
+  useEffect(()=>{api("/api/insights").then(setD)},[]);
+  if(!d) return <div className="text-center py-20" style={{color:"var(--mut)"}}>Loading insights…</div>;
+  const c=d.counts||{}, ex=d.exposure||{}, fxr=d.fx||{};
+  const kpis=[
+    ["TOTAL PRODUCTS",fmtInt(c.total),"#fff"],
+    ["MATCHED",fmtInt(c.matched),COL.emerald],
+    ["MISMATCHES",fmtInt(c.mismatch),COL.amber],
+    ["ERRORS",fmtInt(c.error),COL.red],
+    ["VENDORS",fmtInt(d.vendors),COL.blue],
+    ["AWAITING APPROVAL",fmtInt(c.awaiting),COL.amber],
+    ["APPROVED",fmtInt(c.approved),COL.emerald],
+    ["OVERPRICED EXPOSURE",`₹${fmtInt(Math.round(ex.over||0))}`,COL.red],
+  ];
+  const matchRate=c.total?Math.round((c.matched/c.total)*100):0;
+  return <div className="h-full overflow-auto pr-1">
+    <div className="grid grid-cols-4 gap-3 mb-4">
+      {kpis.map(([k,v,col])=><Stat key={k} k={k} v={v} color={col}/>)}
+    </div>
+    <div className="grid grid-cols-3 gap-3 mb-4">
+      <Panel title="Catalog status" sub={`${matchRate}% matched`}>
+        <ChartBox type="doughnut" h={230}
+          labels={["Matched","Mismatch","Error","Pending"]}
+          datasets={[{data:[c.matched||0,c.mismatch||0,c.error||0,c.pending||0],
+            backgroundColor:[COL.emerald,COL.amber,COL.red,"#3f3f46"],borderWidth:0}]}
+          options={{plugins:{legend:{position:"bottom"}},cutout:"62%"}}/>
+      </Panel>
+      <Panel title="Top vendors by mismatch" sub="needs review">
+        <ChartBox type="bar" h={230}
+          labels={d.top_mismatch.map(v=>v.brand.replace(/\.(com|in|co|net).*$/,""))}
+          datasets={[{label:"mismatches",data:d.top_mismatch.map(v=>v.count),
+            backgroundColor:COL.amber,borderRadius:4}]}
+          options={{indexAxis:"y",plugins:{legend:{display:false}}}}/>
+      </Panel>
+      <Panel title="Largest vendors" sub="by product count">
+        <ChartBox type="bar" h={230}
+          labels={d.top_products.map(v=>v.brand.replace(/\.(com|in|co|net).*$/,""))}
+          datasets={[{label:"products",data:d.top_products.map(v=>v.count),
+            backgroundColor:COL.blue,borderRadius:4}]}
+          options={{indexAxis:"y",plugins:{legend:{display:false}}}}/>
+      </Panel>
+    </div>
+    <div className="grid grid-cols-3 gap-3">
+      <Panel title="Exposure (mismatch gap)">
+        <div className="space-y-3 py-1">
+          <div className="flex justify-between"><span className="text-[12px]" style={{color:"var(--mut)"}}>Overpriced (site &gt; base)</span>
+            <b className="font-mono" style={{color:COL.red}}>₹{fmtInt(Math.round(ex.over||0))}</b></div>
+          <div className="flex justify-between"><span className="text-[12px]" style={{color:"var(--mut)"}}>Underpriced (site &lt; base)</span>
+            <b className="font-mono" style={{color:COL.emerald}}>₹{fmtInt(Math.round(ex.under||0))}</b></div>
+          <div className="flex justify-between"><span className="text-[12px]" style={{color:"var(--mut)"}}>Avg gap / mismatch</span>
+            <b className="font-mono">₹{fmtInt(Math.round(ex.avg||0))}</b></div>
+          <div className="flex justify-between border-t pt-2" style={{borderColor:"var(--border)"}}><span className="text-[12px]" style={{color:"var(--mut)"}}>Approved value</span>
+            <b className="font-mono" style={{color:COL.emerald}}>₹{fmtInt(Math.round(d.approved_value||0))}</b></div>
+        </div>
+      </Panel>
+      <Panel title="Live FX rates" sub="to INR">
+        <div className="space-y-3 py-1">
+          {["USD","CAD"].map(cur=><div key={cur} className="flex justify-between items-center">
+            <span className="text-[13px] font-semibold">{cur}</span>
+            <b className="font-mono text-[15px]" style={{color:COL.blue}}>₹{fmt(fxr[cur])}</b></div>)}
+          <div className="text-[10.5px] pt-2 border-t" style={{borderColor:"var(--border)",color:"var(--mut)"}}>Used for conversion in matching &amp; approval.</div>
+        </div>
+      </Panel>
+      <Panel title="Quick actions">
+        <div className="flex flex-col gap-2 py-1">
+          <Btn kind="blue" onClick={()=>go("pipeline")}><Icon n="play" s={14}/>Run the pipeline</Btn>
+          <Btn kind="amber" onClick={()=>go("review")}><Icon n="check" s={14}/>Review {fmtInt(c.awaiting)} awaiting</Btn>
+          <Btn kind="ghost" onClick={()=>go("alerts")}><Icon n="bell" s={14}/>View alerts</Btn>
+          <Btn kind="emerald" onClick={()=>window.location="/api/export?kind=all&fmt=xlsx"}><Icon n="dl" s={14}/>Export full catalog</Btn>
+        </div>
+      </Panel>
+    </div>
   </div>;
 }
 
@@ -277,19 +379,33 @@ function Review({onMeta}){
   const [items,setItems]=useState([]);
   const [counts,setCounts]=useState({});
   const [busy,setBusy]=useState(false);
+  const [gMarkup,setGMarkup]=useState(0);     // ONE global markup for all
+  const [gConvert,setGConvert]=useState(true);// ONE global FX convert for all
+  const [fxr,setFxr]=useState({USD:0,CAD:0,INR:1});
   const load=useCallback(async()=>{setBusy(true);
     const d=await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(vsel.join(","))}`);
     setItems(d.items||[]);setCounts(d.counts||{});setBusy(false);onMeta&&onMeta();},[tab,vsel]);
   useEffect(()=>{load()},[load]);
   useEffect(()=>{api(`/api/vendors?kind=${tab}`).then(d=>setVendors(d.vendors||[]))},[tab]);
+  useEffect(()=>{api("/api/fx").then(d=>d.rates&&setFxr(d.rates))},[]);
 
-  const decide=async(it,decision)=>{const r=await apiJSON("/api/review/decide",{row:it.id,decision,ref:it._ref||"live",markup_pct:it._markup,custom_price:it._custom,note:it._note});
+  // convert the raw live price to INR at the CURRENT rate (robust for old rows)
+  const liveInr=it=>{if(it.live_price==null)return null;const c=(it.currency||"INR").toUpperCase();
+    const r=(c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1);return it.live_price*r;};
+  const dInr=it=>{const li=liveInr(it);return (li!=null&&it.base_price!=null)?li-it.base_price:null;};
+  const projFinal=it=>{const r=gConvert?liveInr(it):it.live_price;return r==null?null:r*(1+(+gMarkup||0)/100)};
+  const decide=async(it,decision)=>{const r=await apiJSON("/api/review/decide",
+    {row:it.id,decision,ref:"live",markup_pct:gMarkup,convert:gConvert});
     if(r.ok){toast(decision==="approved"?`Approved → ₹${fmt(r.final_price)}`:"Rejected","ok");load()}else toast(r.error||"Failed","err")};
+  const approveAll=async()=>{
+    if(!confirm(`Approve ALL ${items.length} ${tab} item(s) with +${gMarkup}% markup${gConvert?" and USD/CAD→INR conversion":""}? (Nothing is pushed to any store — approval only.)`))return;
+    const r=await apiJSON("/api/review/approve_all",{markup_pct:gMarkup,convert:gConvert,ref:"live",kind:tab,brands:vsel});
+    r.ok?toast(`Approved ${r.approved} item(s) at +${r.markup}%`,"ok"):toast(r.error||"Failed","err");load();};
   const push=async(it)=>{toast("Pushing to store…");const r=await apiJSON("/api/review/push",{row:it.id});toast(r.status||"done",r.ok?"ok":"err");load()};
   const rerun=async()=>{const r=await apiJSON("/api/review/rerun",{});r.ok?toast(`Re-running ${r.total} errors…`):toast(r.error,"err")};
-  const emailMismatch=async()=>{toast("Sending mismatch sheet…");const r=await apiJSON("/api/alerts/email_mismatch",{});
+  const emailMismatch=async()=>{const to=prompt("Recipient email (leave blank for the default):","");if(to===null)return;
+    toast("Sending mismatch sheet…");const r=await apiJSON("/api/alerts/email_mismatch",to.trim()?{to:to.trim()}:{});
     toast(r.ok?`Emailed ${r.count} mismatches → ${r.to}`:(r.error||"Send failed"),r.ok?"ok":"err")};
-  const set=(id,k,v)=>setItems(x=>x.map(it=>it.id===id?{...it,[k]:v}:it));
   const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error,"var(--red)"],["resolved","Resolved",counts.matched,"var(--emerald)"]];
 
   return <div className="h-full min-h-0 flex flex-col">
@@ -298,13 +414,37 @@ function Review({onMeta}){
       <Stat k="MISMATCH" v={fmtInt(counts.mismatch)} color="var(--amber)"/><Stat k="ERRORS" v={fmtInt(counts.error)} color="var(--red)"/>
       <Stat k="APPROVED" v={fmtInt(counts.approved)} color="var(--blue)"/><Stat k="AWAITING" v={fmtInt(counts.awaiting)} color="var(--amber)"/>
     </div>
-    <div className="flex gap-1.5 mb-3">
+
+    {/* ONE global control: markup + FX conversion applied to everything */}
+    <div className="flex items-center gap-3 mb-3 px-3.5 py-2.5 rounded-xl border flex-wrap"
+      style={{background:"var(--panel)",borderColor:"var(--border)"}}>
+      <span className="text-[11px] tracking-wider" style={{color:"var(--mut)"}}>GLOBAL PRICING</span>
+      <div className="flex items-center gap-2">
+        <span className="text-[12px]" style={{color:"var(--mut)"}}>Markup</span>
+        <input type="number" value={gMarkup} onChange={e=>setGMarkup(e.target.value)}
+          className="w-20 rounded px-2 py-1.5 text-[12.5px] font-mono text-right"
+          style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/>
+        <span className="text-[12px]" style={{color:"var(--mut)"}}>%</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <Toggle on={gConvert} onChange={setGConvert}/>
+        <span className="text-[12px]">Convert USD/CAD → INR</span>
+      </div>
+      <span className="text-[11px] font-mono" style={{color:"var(--mut)"}}>
+        FX: USD ₹{fmt(fxr.USD)} · CAD ₹{fmt(fxr.CAD)}</span>
+      <div className="ml-auto flex gap-2 items-center">
+        <ExcelFilter label="Vendor" selected={vsel} onChange={setVsel}
+          options={vendors.map(v=>({value:v.vendor,count:v.count}))}/>
+        <Btn kind="emerald" onClick={approveAll} disabled={!items.length}>
+          <Icon n="check" s={13}/>Apply &amp; Approve all ({items.length})</Btn>
+      </div>
+    </div>
+
+    <div className="flex gap-1.5 mb-3 items-center">
       {tabs.map(([k,lbl,n,c])=><button key={k} onClick={()=>{setTab(k);setVsel([])}} className="px-4 py-2 rounded-t-lg text-[13px] font-semibold border-b-2 navi"
         style={{background:tab===k?"var(--panel2)":"transparent",borderColor:tab===k?c:"transparent",color:tab===k?"#fff":"var(--mut)"}}>
         {lbl} <span className="font-mono text-[11px]" style={{color:c}}>{fmtInt(n)}</span></button>)}
       <div className="ml-auto flex gap-2 items-center">
-        <ExcelFilter label="Vendor" selected={vsel} onChange={setVsel}
-          options={vendors.map(v=>({value:v.vendor,count:v.count}))}/>
         {tab==="error"&&<Btn kind="ghost" sm onClick={rerun}><Icon n="refresh" s={12}/>Re-run errors</Btn>}
         {tab==="mismatch"&&<Btn kind="amber" sm onClick={emailMismatch}><Icon n="mail" s={12}/>Email sheet</Btn>}
         <Btn kind="emerald" sm onClick={()=>window.location=`/api/export?kind=${tab==="resolved"?"all":tab}&fmt=xlsx`}><Icon n="dl" s={12}/>Export</Btn>
@@ -312,29 +452,23 @@ function Review({onMeta}){
     </div>
     <div className="flex-1 min-h-0 overflow-auto rounded-xl border" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
       <table className="w-full text-[12px]"><thead className="sticky top-0" style={{background:"var(--panel)"}}>
-        <tr style={{color:"var(--mut)"}}>{["PRODUCT","BRAND","BASE","LIVE","Δ","MARKUP %","CUSTOM","REF","FINAL","ACTIONS"].map(h=>
+        <tr style={{color:"var(--mut)"}}>{["PRODUCT","VENDOR","BASE ₹","LIVE (site)","≈ ₹ LIVE","Δ ₹","FINAL ₹","ACTIONS"].map(h=>
           <th key={h} className="text-left font-semibold px-3 py-2 text-[10px] tracking-wider border-b whitespace-nowrap" style={{borderColor:"var(--border)"}}>{h}</th>)}</tr></thead>
-        <tbody>{items.map(it=>{const up=(it.delta||0)>0;return <tr key={it.id} className="border-b" style={{borderColor:"var(--border)"}}>
+        <tbody>{items.map(it=>{const li=liveInr(it);const dl=dInr(it);const up=(dl||0)>0;const pf=it.final_price!=null?it.final_price:projFinal(it);return <tr key={it.id} className="border-b" style={{borderColor:"var(--border)"}}>
           <td className="px-3 py-2 font-mono"><a href={it.url} target="_blank" style={{color:"var(--blue)"}}>{trunc(it.url,34)}</a></td>
           <td className="px-3 py-2 font-mono text-[11px]">{it.brand}</td>
           <td className="px-3 py-2 font-mono text-right">{fmt(it.base_price)}</td>
-          <td className="px-3 py-2 font-mono text-right">{fmt(it.live_price)}</td>
-          <td className="px-3 py-2 font-mono text-right" style={{color:up?"var(--red)":"var(--emerald)"}}>{it.delta!=null?(up?"+":"")+fmt(it.delta):"—"}</td>
-          <td className="px-3 py-2"><input type="number" placeholder="%" defaultValue={it.markup_pct||""} onChange={e=>set(it.id,"_markup",e.target.value)}
-            className="w-16 rounded px-1.5 py-1 text-[11.5px] font-mono text-right" style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/></td>
-          <td className="px-3 py-2"><input type="number" placeholder="₹" defaultValue={it.custom_price||""} onChange={e=>set(it.id,"_custom",e.target.value)}
-            className="w-20 rounded px-1.5 py-1 text-[11.5px] font-mono text-right" style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/></td>
-          <td className="px-3 py-2"><select defaultValue={it.ref||"live"} onChange={e=>set(it.id,"_ref",e.target.value)}
-            className="rounded px-1 py-1 text-[11.5px]" style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}>
-            <option value="live">live</option><option value="base">base</option></select></td>
-          <td className="px-3 py-2 font-mono text-right font-bold" style={{color:"var(--emerald)"}}>{it.final_price!=null?fmt(it.final_price):"—"}</td>
+          <td className="px-3 py-2 font-mono text-right">{fmt(it.live_price)} <span style={{color:"var(--mut)"}}>{it.currency}</span></td>
+          <td className="px-3 py-2 font-mono text-right">{fmt(li)}</td>
+          <td className="px-3 py-2 font-mono text-right" style={{color:up?"var(--red)":"var(--emerald)"}}>{dl!=null?(up?"+":"")+fmt(dl):"—"}</td>
+          <td className="px-3 py-2 font-mono text-right font-bold" style={{color:it.final_price!=null?"var(--emerald)":"var(--mut)"}}>{pf!=null?fmt(pf):"—"}</td>
           <td className="px-3 py-2"><div className="flex gap-1.5 items-center">
             {it.decision==="approved"?<Pill color={COL.emerald}>approved</Pill>:it.decision==="rejected"?<Pill color={COL.red}>rejected</Pill>:
-              <><Btn kind="emerald" sm onClick={()=>decide(it,"approved")}><Icon n="check" s={11}/></Btn>
+              <><Btn kind="emerald" sm onClick={()=>decide(it,"approved")} title="Approve at global markup"><Icon n="check" s={11}/></Btn>
                 <Btn kind="red" sm onClick={()=>decide(it,"rejected")}><Icon n="x" s={11}/></Btn></>}
             <Btn kind="blue" sm onClick={()=>push(it)} disabled={it.decision!=="approved"} title="Push to Store"><Icon n="cloud" s={12}/></Btn>
           </div></td></tr>})}
-        {!items.length&&<tr><td colSpan="10" className="text-center py-12" style={{color:"var(--mut)"}}>{busy?"Loading…":"Nothing here."}</td></tr>}
+        {!items.length&&<tr><td colSpan="8" className="text-center py-12" style={{color:"var(--mut)"}}>{busy?"Loading…":"Nothing here."}</td></tr>}
         </tbody></table>
     </div>
   </div>;
@@ -425,15 +559,16 @@ function Integrations(){
 
 /* ===================== SHELL ===================== */
 function App(){
-  const [view,setView]=useState("pipeline");
+  const [view,setView]=useState("home");
   const [meta,setMeta]=useState({counts:{},alerts:0});
   const [run,setRun]=useState({running:false,phase:"idle"});
   const loadMeta=useCallback(async()=>{const d=await api("/api/meta");if(d.counts)setMeta(d)},[]);
   useEffect(()=>{loadMeta();const t=setInterval(loadMeta,6000);return()=>clearInterval(t)},[loadMeta]);
   useEffect(()=>{const t=setInterval(async()=>{const d=await api("/api/pipe/status?cursor=999999999");if(d.running!==undefined)setRun(d)},4000);return()=>clearInterval(t)},[]);
-  const nav=[["pipeline","Pipeline","play",null],["review","Review & Approve","check",meta.counts.awaiting],
+  const nav=[["home","Home","home",null],["pipeline","Pipeline","play",null],
+    ["review","Review & Approve","check",meta.counts.awaiting],
     ["alerts","Alerts","bell",meta.alerts],["integrations","Integrations","plug",null]];
-  const titles={pipeline:"Pipeline",review:"Review & Approve",alerts:"Alerts",integrations:"Integrations"};
+  const titles={home:"Insights",pipeline:"Pipeline",review:"Review & Approve",alerts:"Alerts",integrations:"Integrations"};
   const runPill=run.running?`Run: ${run.phase==="safe_retry"?"Safe-retry…":"Processing…"}`:"Idle";
 
   return <div className="flex h-screen" style={{background:"var(--bg)"}}>
@@ -471,6 +606,7 @@ function App(){
         </div>
       </div>
       <div className="flex-1 min-h-0 p-5">
+        {view==="home"&&<Home go={setView}/>}
         {view==="pipeline"&&<Pipeline onMeta={loadMeta}/>}
         {view==="review"&&<Review onMeta={loadMeta}/>}
         {view==="alerts"&&<Alerts/>}
