@@ -137,10 +137,13 @@ def _process(prod):
         return prod, "Fetch Error", live, cur, "error"
     live_inr = fx.to_inr(live, cur)          # USD/CAD -> INR at current rate
     delta = live_inr - base                  # compare in INR
+    disp = cur if cur in ("INR", "UNKNOWN") else f"{cur}->INR"
+    note = "" if cur in ("INR", "UNKNOWN") else f"{cur} {live:g} @{fx.rate_of(cur):.2f}"
     if abs(delta) <= _match_tol(base, cur):
-        _log(tag, platform, brand, cur, live, "Price Matched", url=url)
+        _log(tag, platform, brand, disp, live_inr, "Price Matched", note, url=url)
         return prod, f"Price Matched ({cur})", live, cur, "matched"
-    _log(tag, platform, brand, cur, live, "Price Mismatch!", f"delta {delta:+.2f}", url=url)
+    _log(tag, platform, brand, disp, live_inr, "Price Mismatch!",
+         (note + f" · Δ{delta:+.0f}").strip(" ·"), url=url)
     return prod, f"Price Mismatch! ({cur})", live, cur, "mismatch"
 
 

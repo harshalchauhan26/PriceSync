@@ -112,7 +112,10 @@ class Fetcher:
         return {
             "User-Agent": random.choice(USER_AGENTS),
             "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
+            # India locale so geo-aware sites serve INR pricing (not USD/CAD).
+            # In USD mode many sites also expose a different/misparsed price.
+            "Accept-Language": "en-IN,en;q=0.9",
+            "X-Forwarded-For": "103.48.196.1",   # hint an Indian origin to CDNs
         }
 
     def _cooldown(self):
