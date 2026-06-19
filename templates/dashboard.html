@@ -117,7 +117,7 @@ function ChartBox({type,labels,datasets,options,h=210}){
 /* ===================== PIPELINE ===================== */
 function Pipeline({admin}){
   const [st,setSt]=useState({running:false,phase:"idle",total_rows:0,current_row:0,matched:0,mismatch:0,errors:0,elapsed:0,message:"Idle.",entries:[],log_total:0});
-  const [cfg,setCfg]=useState({concurrency:12,timeout_ms:5000,batch_size:250,rest_between:1,safe_retry:true,simulation:false});
+  const [cfg,setCfg]=useState({concurrency:8,timeout_ms:12000,batch_size:250,rest_between:2,safe_retry:true,simulation:false});
   const [vendors,setVendors]=useState([]);const [vsel,setVsel]=useState([]);
   const [rows,setRows]=useState([]);const cursor=useRef(0),logRef=useRef(null);
   useEffect(()=>{api("/api/vendors").then(d=>setVendors(d.vendors||[]))},[]);
@@ -365,6 +365,48 @@ function Integrations({admin}){
   </div>;
 }
 
+/* ===================== HISTORY (approved archive) ===================== */
+function History({admin}){
+  const [d,setD]=useState({items:[],count:0,value:0,pushed:0});
+  const load=useCallback(()=>api("/api/history").then(setD),[]);
+  useEffect(()=>{load()},[load]);
+  const push=async(it)=>{if(!admin)return toast("Admin only","err");toast("Pushing to store…");
+    const r=await apiJSON("/api/history/push",{row:it.id});toast(r.status||"done",r.ok?"ok":"err");load();};
+  const pushAll=async()=>{if(!admin)return toast("Admin only","err");if(!confirm("Push all not-yet-pushed approved prices to the store?"))return;
+    toast("Pushing…");const r=await apiJSON("/api/history/push_all",{});toast(`Pushed ${r.pushed}${r.failed?", "+r.failed+" failed":""}`,r.failed?"err":"ok");load();};
+  return <div className="h-full min-h-0 overflow-auto">
+    <div className="flex items-start justify-between mb-4">
+      <div><h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.02em"}}>Approval History</h1>
+        <div className="text-[13px] mt-1" style={{color:"var(--on-var)"}}>Approved prices archived from review · finalized records.</div></div>
+      <div className="flex gap-2.5">
+        <Btn kind="ghost" sm onClick={()=>window.location="/api/history/export?fmt=xlsx"}><Icon n="dl" s={13}/>Export</Btn>
+        <Btn kind="primary" sm onClick={pushAll} disabled={!admin}><Icon n="share" s={13}/>Push all to store</Btn></div>
+    </div>
+    <div className="grid grid-cols-3 gap-3 mb-4">
+      <div className="card p-4"><div className="lbl">Approved (archived)</div><div className="mono" style={{fontSize:24,fontWeight:600,marginTop:6}}>{fmtInt(d.count)}</div></div>
+      <div className="card p-4"><div className="lbl">Total Final Value</div><div className="mono" style={{fontSize:24,fontWeight:600,marginTop:6,color:COL.sec}}>{inr(d.value)}</div></div>
+      <div className="card p-4"><div className="lbl">Pushed to Store</div><div className="mono" style={{fontSize:24,fontWeight:600,marginTop:6,color:COL.primary}}>{fmtInt(d.pushed)}/{fmtInt(d.count)}</div></div>
+    </div>
+    <div className="card overflow-auto">
+      <table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Brand","Product ID","Base ₹","Live","Markup %","Final ₹","Approved By","When","Store","Action"].map(h=>
+        <th key={h} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
+        <tbody>{d.items.map(it=>(
+          <tr key={it.id} style={{borderTop:"1px solid var(--c-low)"}}>
+            <td className="px-3 py-2.5"><div className="flex items-center gap-2"><BrandDot b={it.brand}/><span>{(it.brand||"").replace(/^www\./,"")}</span></div></td>
+            <td className="px-3 py-2.5 mono" style={{color:"var(--outline)",fontSize:11}}>{pid(it.url)}</td>
+            <td className="px-3 py-2.5 mono text-right">{inr(it.base_price)}</td>
+            <td className="px-3 py-2.5 mono text-right">{fmt(it.live_price)} <span style={{color:"var(--outline)",fontSize:10}}>{it.currency}</span></td>
+            <td className="px-3 py-2.5 mono text-right">{it.markup_pct!=null?(+it.markup_pct).toFixed(1)+"%":"—"}</td>
+            <td className="px-3 py-2.5 mono text-right font-semibold" style={{color:COL.sec}}>{inr(it.final_price)}</td>
+            <td className="px-3 py-2.5 text-[11px]" style={{color:"var(--on-var)"}}>{it.approved_by||"—"}</td>
+            <td className="px-3 py-2.5 mono text-[11px]" style={{color:"var(--outline)"}}>{(it.approved_at||"").slice(0,16).replace("T"," ")}</td>
+            <td className="px-3 py-2.5 text-[11px]">{it.shopify_status?<span style={{color:it.shopify_status.includes("FAIL")||it.shopify_status.includes("error")?COL.err:COL.sec}}>{it.shopify_status.slice(0,26)}</span>:<span style={{color:"var(--outline)"}}>not pushed</span>}</td>
+            <td className="px-3 py-2.5"><button onClick={()=>push(it)} title="Push to store" style={{color:COL.primary}}><Icon n="share" s={15}/></button></td></tr>))}
+          {!d.items.length&&<tr><td colSpan="10" className="text-center py-12" style={{color:"var(--outline)"}}>No approvals yet — approve items in Review and they'll archive here.</td></tr>}
+        </tbody></table></div>
+  </div>;
+}
+
 /* ===================== SETTINGS / OWNER CONSOLE ===================== */
 function Settings({me}){
   const owner=me&&me.role==="owner";
@@ -413,7 +455,7 @@ function App(){
   const admin=!!(me&&(me.role==="admin"||me.role==="owner"));
   useEffect(()=>{api("/api/me").then(d=>{if(d.email)setMe(d)})},[]);
   useEffect(()=>{const t=setInterval(async()=>{const d=await api("/api/pipe/status?cursor=999999999");if(d.running!==undefined)setRun(d)},5000);return()=>clearInterval(t)},[]);
-  const nav=[["pipeline","Pipeline","pipeline"],["review","Review","review"],["alerts","Alerts","alerts"],["integrations","Integrations","integrations"]];
+  const nav=[["pipeline","Pipeline","pipeline"],["review","Review","review"],["history","History","clock"],["alerts","Alerts","alerts"],["integrations","Integrations","integrations"]];
   return <div className="flex h-screen" style={{background:"var(--bg)"}}>
     <Toaster/>
     <nav className="shrink-0 flex flex-col p-3" style={{width:220,background:"var(--surface)",borderRight:"1px solid var(--ov)"}}>
@@ -443,6 +485,7 @@ function App(){
       <div className="flex-1 min-h-0 p-6">
         {view==="pipeline"&&<Pipeline admin={admin}/>}
         {view==="review"&&<Review admin={admin}/>}
+        {view==="history"&&<History admin={admin}/>}
         {view==="alerts"&&<Alerts/>}
         {view==="integrations"&&<Integrations admin={admin}/>}
         {view==="settings"&&<Settings me={me}/>}

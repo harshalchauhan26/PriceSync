@@ -749,6 +749,30 @@ def api_vendors():
     return jsonify(vendors=[{"vendor": r["brand"], "count": r["c"]} for r in rows])
 
 
+_HIST_INSERT = """
+INSERT INTO review_history
+  (key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,status,
+   markup_pct,ref,final_price,note,approved_by,approved_at)
+VALUES (%(key)s,%(mbo_url)s,%(url)s,%(platform)s,%(brand)s,%(base_price)s,
+   %(live_price)s,%(currency)s,%(delta)s,%(status)s,%(markup_pct)s,%(ref)s,
+   %(final_price)s,%(note)s,%(approved_by)s,%(approved_at)s)
+"""
+
+
+def _archive_approved(con, prow, final, markup, ref, note, by):
+    """Move an approved product into review_history, then remove it from the
+    live products table so the review queue stays clean."""
+    con.execute(_HIST_INSERT, {
+        "key": prow.get("key"), "mbo_url": prow.get("mbo_url"), "url": prow.get("url"),
+        "platform": prow.get("platform"), "brand": prow.get("brand"),
+        "base_price": prow.get("base_price"), "live_price": prow.get("live_price"),
+        "currency": prow.get("currency"), "delta": prow.get("delta"),
+        "status": prow.get("status"), "markup_pct": markup, "ref": ref,
+        "final_price": final, "note": note, "approved_by": by,
+        "approved_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    con.execute("DELETE FROM products WHERE id=%s", (prow["id"],))
+
+
 @app.route("/api/review/decide", methods=["POST"])
 def api_decide():
     d = request.get_json(force=True) or {}
@@ -756,8 +780,7 @@ def api_decide():
     if pid in (None, ""):
         return jsonify(ok=False, error="missing row"), 400
     con = store.connect()
-    it = con.execute("SELECT base_price, live_price, currency FROM products WHERE id=%s",
-                     (int(pid),)).fetchone()
+    it = con.execute("SELECT * FROM products WHERE id=%s", (int(pid),)).fetchone()
     if it is None:
         con.close()
         return jsonify(ok=False, error="unknown row"), 404
@@ -768,17 +791,20 @@ def api_decide():
     convert = d.get("convert", True)
     markup = None if markup in ("", None) else float(markup)
     custom = None if custom in ("", None) else float(custom)
-    final = None
+    by = (security.current_user() or {}).get("email")
     if decision == "approved":
         final = store_compute_final(it["base_price"], it["live_price"],
                                     it["currency"], ref, markup, custom, convert)
-    con.execute("UPDATE products SET decision=%s,markup_pct=%s,custom_price=%s,ref=%s,"
-                "final_price=%s,note=%s,decided_at=%s WHERE id=%s",
-                (decision, markup, custom, ref, final, d.get("note", ""),
-                 time.strftime("%Y-%m-%d %H:%M:%S"), int(pid)))
+        _archive_approved(con, dict(it), final, markup, ref, d.get("note", ""), by)
+        con.commit()
+        con.close()
+        return jsonify(ok=True, final_price=final, archived=True)
+    # rejected / flagged: stays in products, just marked
+    con.execute("UPDATE products SET decision=%s,note=%s,decided_at=%s WHERE id=%s",
+                (decision, d.get("note", ""), time.strftime("%Y-%m-%d %H:%M:%S"), int(pid)))
     con.commit()
     con.close()
-    return jsonify(ok=True, final_price=final)
+    return jsonify(ok=True)
 
 
 def store_compute_final(base, live, currency, ref, markup_pct, custom_price, convert=True):
@@ -814,20 +840,97 @@ def api_approve_all():
         where += " AND brand IN (" + ",".join(["%s"] * len(brands)) + ")"
         params += brands
     con = store.connect()
-    rows = con.execute(f"SELECT id, base_price, live_price, currency FROM products "
-                       f"WHERE {where}", params).fetchall()
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    rows = con.execute(f"SELECT * FROM products WHERE {where}", params).fetchall()
+    by = (security.current_user() or {}).get("email")
     n = 0
     for r in rows:
         final = store_compute_final(r["base_price"], r["live_price"], r["currency"],
                                     ref, markup, None, convert)
-        con.execute("UPDATE products SET decision='approved',markup_pct=%s,custom_price=NULL,"
-                    "ref=%s,final_price=%s,decided_at=%s WHERE id=%s",
-                    (markup, ref, final, now, r["id"]))
+        _archive_approved(con, dict(r), final, markup, ref, "", by)
         n += 1
     con.commit()
     con.close()
     return jsonify(ok=True, approved=n, markup=markup, convert=bool(convert))
+
+
+# ---- Approval history ----
+
+@app.route("/api/history")
+def api_history():
+    brand = request.args.get("brand", "").strip()
+    con = store.connect()
+    where, params = "1=1", []
+    if brand:
+        where, params = "brand=%s", [brand]
+    rows = con.execute(f"SELECT * FROM review_history WHERE {where} "
+                       "ORDER BY approved_at DESC LIMIT 2000", params).fetchall()
+    summ = con.execute(
+        "SELECT COUNT(*) c, COALESCE(SUM(final_price),0) v, "
+        "COUNT(*) FILTER (WHERE shopify_status IS NOT NULL) pushed FROM review_history"
+        ).fetchone()
+    con.close()
+    items = []
+    for r in rows:
+        x = dict(r)
+        x["approved_at"] = str(x.get("approved_at"))
+        items.append(x)
+    return jsonify(items=items, count=summ["c"] or 0,
+                   value=float(summ["v"] or 0), pushed=summ["pushed"] or 0)
+
+
+@app.route("/api/history/push", methods=["POST"])
+def api_history_push():
+    hid = (request.get_json(silent=True) or {}).get("row")
+    con = store.connect()
+    it = con.execute("SELECT * FROM review_history WHERE id=%s", (int(hid),)).fetchone()
+    if it is None:
+        con.close()
+        return jsonify(ok=False, error="unknown row"), 404
+    res = push_price_to_shopify(it["brand"], it["url"], it["final_price"])
+    con.execute("UPDATE review_history SET shopify_status=%s,shopify_at=%s WHERE id=%s",
+                (res["status"], time.strftime("%Y-%m-%d %H:%M:%S"), int(hid)))
+    con.commit()
+    con.close()
+    return jsonify(ok=res["ok"], status=res["status"])
+
+
+@app.route("/api/history/push_all", methods=["POST"])
+def api_history_push_all():
+    con = store.connect()
+    rows = con.execute("SELECT * FROM review_history WHERE shopify_status IS NULL "
+                       "ORDER BY approved_at LIMIT 500").fetchall()
+    ok = fail = 0
+    for it in rows:
+        res = push_price_to_shopify(it["brand"], it["url"], it["final_price"])
+        con.execute("UPDATE review_history SET shopify_status=%s,shopify_at=%s WHERE id=%s",
+                    (res["status"], time.strftime("%Y-%m-%d %H:%M:%S"), it["id"]))
+        ok, fail = (ok + 1, fail) if res["ok"] else (ok, fail + 1)
+    con.commit()
+    con.close()
+    return jsonify(ok=True, pushed=ok, failed=fail)
+
+
+@app.route("/api/history/export")
+def api_history_export():
+    fmt_ = request.args.get("fmt", "xlsx")
+    cols = ["brand", "url", "base_price", "live_price", "currency", "markup_pct",
+            "final_price", "approved_by", "approved_at", "shopify_status"]
+    con = store.connect()
+    rows = con.execute(f"SELECT {', '.join(cols)} FROM review_history "
+                       "ORDER BY approved_at DESC").fetchall()
+    con.close()
+    df = pd.DataFrame([dict(r) for r in rows], columns=cols)
+    bio = io.BytesIO()
+    if fmt_ == "csv":
+        bio.write(df.to_csv(index=False).encode("utf-8"))
+        mime, name = "text/csv", "approval_history.csv"
+    else:
+        with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+            df.to_excel(xw, index=False, sheet_name="history")
+        mime, name = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                      "approval_history.xlsx")
+    bio.seek(0)
+    return send_file(bio, mimetype=mime, as_attachment=True, download_name=name)
 
 
 @app.route("/api/fx")
@@ -853,8 +956,8 @@ def api_insights():
     vendors = con.execute(
         "SELECT COUNT(DISTINCT brand) c FROM products WHERE brand<>''").fetchone()["c"]
     approved_val = con.execute(
-        "SELECT COALESCE(SUM(final_price),0) v FROM products WHERE decision='approved'"
-        ).fetchone()["v"]
+        "SELECT COALESCE(SUM(final_price),0) v FROM review_history").fetchone()["v"]
+    approved_n = con.execute("SELECT COUNT(*) c FROM review_history").fetchone()["c"]
     con.close()
     return jsonify(
         counts=c, vendors=vendors,
@@ -862,7 +965,7 @@ def api_insights():
         top_products=[{"brand": r["brand"], "count": r["c"]} for r in top_prod],
         exposure={"over": float(agg["over_"] or 0), "under": float(agg["under_"] or 0),
                   "avg": float(agg["avgd"] or 0)},
-        approved_value=float(approved_val or 0),
+        approved_value=float(approved_val or 0), approved_count=approved_n or 0,
         fx=fx.snapshot(("USD", "CAD", "INR")))
 
 

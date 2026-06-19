@@ -25,6 +25,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+
+try:
+    from urllib3.util.retry import Retry
+except Exception:                       # very old urllib3
+    Retry = None
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -85,6 +91,16 @@ class Fetcher:
         self.quiet = quiet
         self.max_retries = max_retries
         self._first_call = True
+        # Transport-level retries (connection resets, 5xx) + connection pooling.
+        # This absorbs most transient errors before they ever bubble up.
+        if Retry is not None:
+            retry = Retry(total=2, connect=2, read=2, backoff_factor=1.0,
+                          status_forcelist=(502, 503, 504, 520, 522, 524),
+                          allowed_methods=frozenset(["GET", "HEAD"]),
+                          raise_on_status=False)
+            adapter = HTTPAdapter(max_retries=retry, pool_connections=24, pool_maxsize=24)
+            self.session.mount("https://", adapter)
+            self.session.mount("http://", adapter)
 
     def _await_domain_slot(self, url):
         """Block until this domain's next-allowed timestamp; reserve a slot."""
@@ -320,7 +336,13 @@ def extract_shopify(fetcher, url):
             return price, currency
     except (requests.RequestException, ValueError):
         pass  # blocked or non-JSON -> fall back to HTML parsing
-    html = fetcher.get(url).text
+    try:
+        html = fetcher.get(url).text
+    except requests.HTTPError as e:
+        code = e.response.status_code if e.response is not None else "?"
+        if code == 404:
+            raise ValueError("product unavailable (removed / 404)")
+        raise ValueError(f"store returned HTTP {code}")
     price = descale_if_cents(extract_price_from_html(html))
     currency = detect_currency(html) or _DOMAIN_CURRENCY.get(domain)
     if price is not None and currency:

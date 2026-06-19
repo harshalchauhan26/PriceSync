@@ -106,6 +106,29 @@ _SCHEMA = [
     )""",
     "CREATE INDEX IF NOT EXISTS ix_hist_key ON price_history(key, created_at)",
     """
+    CREATE TABLE IF NOT EXISTS review_history (
+        id           BIGSERIAL PRIMARY KEY,
+        key          TEXT,
+        mbo_url      TEXT,
+        url          TEXT,
+        platform     TEXT,
+        brand        TEXT,
+        base_price   DOUBLE PRECISION,
+        live_price   DOUBLE PRECISION,
+        currency     TEXT,
+        delta        DOUBLE PRECISION,
+        status       TEXT,
+        markup_pct   DOUBLE PRECISION,
+        ref          TEXT,
+        final_price  DOUBLE PRECISION,
+        note         TEXT,
+        approved_by  TEXT,
+        approved_at  TIMESTAMPTZ DEFAULT now(),
+        shopify_status TEXT,
+        shopify_at   TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_hist_brand ON review_history(brand)",
+    """
     CREATE TABLE IF NOT EXISTS integrations (
         brand        TEXT PRIMARY KEY,
         shop_domain  TEXT,
