@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · PriceSync</title>
+<style>
+  :root{--bg:#09090b;--panel:#121214;--panel2:#18181b;--border:#27272a;
+    --blue:#2563eb;--emerald:#10b981;--red:#ef4444;--mut:#71717a;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:#e4e4e7;font-family:Inter,"Segoe UI",system-ui,sans-serif;
+    height:100vh;display:flex;align-items:center;justify-content:center}
+  .card{width:360px;background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:30px 28px;
+    box-shadow:0 24px 60px rgba(0,0,0,.5)}
+  .brand{display:flex;align-items:center;gap:10px;margin-bottom:22px}
+  .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--blue),var(--emerald));
+    display:flex;align-items:center;justify-content:center;font-size:18px}
+  .brand b{font-size:18px;font-weight:800} .brand span{color:var(--mut);font-size:11px;display:block}
+  label{display:block;font-size:11px;letter-spacing:.5px;color:var(--mut);margin:14px 0 6px}
+  input{width:100%;background:var(--panel2);border:1px solid var(--border);color:#e4e4e7;border-radius:8px;
+    padding:11px 12px;font-size:14px;outline:none}
+  input:focus{border-color:var(--blue)}
+  button{width:100%;margin-top:20px;background:var(--blue);border:none;color:#fff;font-weight:700;font-size:14px;
+    padding:11px;border-radius:8px;cursor:pointer}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  .err{margin-top:14px;font-size:12.5px;color:var(--red);min-height:16px}
+  .hint{margin-top:16px;font-size:11px;color:var(--mut);text-align:center}
+</style>
+</head>
+<body>
+  <form class="card" id="f">
+    <div class="brand"><span class="logo">⚡</span><div><b>PriceSync</b><span>sign in to continue</span></div></div>
+    <label>EMAIL</label>
+    <input type="email" id="email" autocomplete="username" required autofocus>
+    <label>PASSWORD</label>
+    <input type="password" id="password" autocomplete="current-password" required>
+    <button type="submit" id="btn">Sign in</button>
+    <div class="err" id="err"></div>
+    <div class="hint">Multi-user · role-based access</div>
+  </form>
+<script>
+  const f=document.getElementById("f");
+  f.onsubmit=async(e)=>{
+    e.preventDefault();
+    const btn=document.getElementById("btn"),err=document.getElementById("err");
+    btn.disabled=true;btn.textContent="Signing in…";err.textContent="";
+    try{
+      const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({email:document.getElementById("email").value,password:document.getElementById("password").value})});
+      const d=await r.json();
+      if(d.ok){window.location="/";}
+      else{err.textContent=d.error||"Login failed";btn.disabled=false;btn.textContent="Sign in";}
+    }catch(_){err.textContent="Network error";btn.disabled=false;btn.textContent="Sign in";}
+  };
+</script>
+</body>
+</html>

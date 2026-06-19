@@ -253,7 +253,7 @@ function Home({go}){
 }
 
 /* ===================== PIPELINE ===================== */
-function Pipeline({onMeta}){
+function Pipeline({onMeta,admin}){
   const [st,setSt]=useState({running:false,phase:"idle",total_rows:0,current_row:0,matched:0,mismatch:0,errors:0,elapsed:0,message:"Idle.",entries:[],log_total:0});
   const [cfg,setCfg]=useState({concurrency:16,timeout_ms:12000,batch_size:500,rest_between:60,safe_retry:true,simulation:false});
   const [adv,setAdv]=useState(false);
@@ -325,9 +325,9 @@ function Pipeline({onMeta}){
     {/* run panel */}
     <div className="flex flex-col min-h-0 min-w-0">
       <div className="flex gap-2.5 mb-3 flex-wrap items-center">
-        <Btn kind="blue" onClick={()=>run("fresh")} disabled={st.running}><Icon n="play" s={14}/>Run from Start</Btn>
-        <Btn kind="ghost" onClick={()=>run("update")} disabled={st.running}><Icon n="refresh" s={14}/>Check Updates</Btn>
-        <Btn kind="red" onClick={abort} disabled={!st.running}><Icon n="stop" s={14}/>Abort</Btn>
+        <Btn kind="blue" onClick={()=>run("fresh")} disabled={st.running||!admin} title={admin?"":"admin only"}><Icon n="play" s={14}/>Run from Start</Btn>
+        <Btn kind="ghost" onClick={()=>run("update")} disabled={st.running||!admin}><Icon n="refresh" s={14}/>Check Updates</Btn>
+        <Btn kind="red" onClick={abort} disabled={!st.running||!admin}><Icon n="stop" s={14}/>Abort</Btn>
         <Btn kind="emerald" onClick={()=>window.location="/api/export?kind=all&fmt=xlsx"}><Icon n="dl" s={14}/>Export</Btn>
         <div className="ml-auto flex items-center gap-2.5">
           <span className="text-[11.5px]" style={{color:"var(--mut)"}}>
@@ -372,7 +372,7 @@ function Pipeline({onMeta}){
 }
 
 /* ===================== REVIEW ===================== */
-function Review({onMeta}){
+function Review({onMeta,admin}){
   const [tab,setTab]=useState("mismatch");
   const [vendors,setVendors]=useState([]);
   const [vsel,setVsel]=useState([]);          // selected vendors (Excel filter)
@@ -435,7 +435,7 @@ function Review({onMeta}){
       <div className="ml-auto flex gap-2 items-center">
         <ExcelFilter label="Vendor" selected={vsel} onChange={setVsel}
           options={vendors.map(v=>({value:v.vendor,count:v.count}))}/>
-        <Btn kind="emerald" onClick={approveAll} disabled={!items.length}>
+        <Btn kind="emerald" onClick={approveAll} disabled={!items.length||!admin} title={admin?"":"admin only"}>
           <Icon n="check" s={13}/>Apply &amp; Approve all ({items.length})</Btn>
       </div>
     </div>
@@ -464,9 +464,9 @@ function Review({onMeta}){
           <td className="px-3 py-2 font-mono text-right font-bold" style={{color:it.final_price!=null?"var(--emerald)":"var(--mut)"}}>{pf!=null?fmt(pf):"—"}</td>
           <td className="px-3 py-2"><div className="flex gap-1.5 items-center">
             {it.decision==="approved"?<Pill color={COL.emerald}>approved</Pill>:it.decision==="rejected"?<Pill color={COL.red}>rejected</Pill>:
-              <><Btn kind="emerald" sm onClick={()=>decide(it,"approved")} title="Approve at global markup"><Icon n="check" s={11}/></Btn>
-                <Btn kind="red" sm onClick={()=>decide(it,"rejected")}><Icon n="x" s={11}/></Btn></>}
-            <Btn kind="blue" sm onClick={()=>push(it)} disabled={it.decision!=="approved"} title="Push to Store"><Icon n="cloud" s={12}/></Btn>
+              <><Btn kind="emerald" sm onClick={()=>decide(it,"approved")} disabled={!admin} title={admin?"Approve at global markup":"admin only"}><Icon n="check" s={11}/></Btn>
+                <Btn kind="red" sm onClick={()=>decide(it,"rejected")} disabled={!admin}><Icon n="x" s={11}/></Btn></>}
+            <Btn kind="blue" sm onClick={()=>push(it)} disabled={it.decision!=="approved"||!admin} title="Push to Store"><Icon n="cloud" s={12}/></Btn>
           </div></td></tr>})}
         {!items.length&&<tr><td colSpan="8" className="text-center py-12" style={{color:"var(--mut)"}}>{busy?"Loading…":"Nothing here."}</td></tr>}
         </tbody></table>
@@ -521,7 +521,7 @@ function Alerts(){
 }
 
 /* ===================== INTEGRATIONS ===================== */
-function Integrations(){
+function Integrations({admin}){
   const [rows,setRows]=useState([]);
   const load=async()=>{const d=await api("/api/integrations");setRows(d.brands||[])};
   useEffect(()=>{load()},[]);
@@ -547,9 +547,9 @@ function Integrations(){
           <td className="px-3 py-2.5"><div className="flex items-center gap-2"><Toggle on={!r.dry_run} onChange={v=>set(r.brand,"dry_run",!v)}/>
             <span className="text-[10.5px]" style={{color:r.dry_run?"var(--amber)":"var(--emerald)"}}>{r.dry_run?"Dry Run":"Live"}</span></div></td>
           <td className="px-3 py-2.5"><div className="flex gap-1.5">
-            <Btn kind="blue" sm onClick={()=>save(r)}><Icon n="check" s={11}/>Save</Btn>
-            <Btn kind="ghost" sm onClick={()=>verify(r)}><Icon n="plug" s={11}/>Verify</Btn>
-            <Btn kind="red" sm onClick={()=>del(r)}><Icon n="x" s={11}/></Btn></div>
+            <Btn kind="blue" sm onClick={()=>save(r)} disabled={!admin} title={admin?"":"admin only"}><Icon n="check" s={11}/>Save</Btn>
+            <Btn kind="ghost" sm onClick={()=>verify(r)} disabled={!admin}><Icon n="plug" s={11}/>Verify</Btn>
+            <Btn kind="red" sm onClick={()=>del(r)} disabled={!admin}><Icon n="x" s={11}/></Btn></div>
             {r._v&&<div className="text-[10px] mt-1" style={{color:"var(--mut)"}}>{r._v}</div>}</td></tr>)}
         {!rows.length&&<tr><td colSpan="7" className="text-center py-12" style={{color:"var(--mut)"}}>No brands yet — import a catalog or run the pipeline.</td></tr>}
         </tbody></table>
@@ -562,6 +562,9 @@ function App(){
   const [view,setView]=useState("home");
   const [meta,setMeta]=useState({counts:{},alerts:0});
   const [run,setRun]=useState({running:false,phase:"idle"});
+  const [me,setMe]=useState(null);
+  const admin=!!(me&&me.role==="admin");
+  useEffect(()=>{api("/api/me").then(d=>{if(d.email)setMe(d)})},[]);
   const loadMeta=useCallback(async()=>{const d=await api("/api/meta");if(d.counts)setMeta(d)},[]);
   useEffect(()=>{loadMeta();const t=setInterval(loadMeta,6000);return()=>clearInterval(t)},[loadMeta]);
   useEffect(()=>{const t=setInterval(async()=>{const d=await api("/api/pipe/status?cursor=999999999");if(d.running!==undefined)setRun(d)},4000);return()=>clearInterval(t)},[]);
@@ -602,15 +605,22 @@ function App(){
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg" style={{background:"var(--panel2)",border:"1px solid var(--border)"}}>
             <Icon n="search" s={14} c="var(--mut)"/><input placeholder="Search logs…" className="bg-transparent text-[12px] w-36" style={{color:"#e4e4e7"}}/></div>
           <button style={{color:"var(--mut)"}}><Icon n="bell" s={17}/></button>
-          <div className="w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold" style={{background:"var(--blue)",color:"#fff"}}>PS</div>
+          {me&&<div className="flex items-center gap-2">
+            <div className="text-right leading-tight">
+              <div className="text-[12px] font-semibold">{me.email}</div>
+              <div className="text-[10px]" style={{color:admin?"var(--emerald)":"var(--mut)"}}>{me.role}</div></div>
+            <div className="w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold" style={{background:"var(--blue)",color:"#fff"}}>
+              {(me.email||"?")[0].toUpperCase()}</div>
+            <a href="/logout" title="Sign out" className="navi px-2 py-1.5 rounded-lg" style={{color:"var(--mut)",border:"1px solid var(--border)"}}><Icon n="x" s={14}/></a>
+          </div>}
         </div>
       </div>
       <div className="flex-1 min-h-0 p-5">
         {view==="home"&&<Home go={setView}/>}
-        {view==="pipeline"&&<Pipeline onMeta={loadMeta}/>}
-        {view==="review"&&<Review onMeta={loadMeta}/>}
+        {view==="pipeline"&&<Pipeline onMeta={loadMeta} admin={admin}/>}
+        {view==="review"&&<Review onMeta={loadMeta} admin={admin}/>}
         {view==="alerts"&&<Alerts/>}
-        {view==="integrations"&&<Integrations/>}
+        {view==="integrations"&&<Integrations admin={admin}/>}
       </div>
     </div>
   </div>;

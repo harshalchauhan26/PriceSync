@@ -29,6 +29,10 @@ from werkzeug.utils import secure_filename
 import fx
 import price_tracker as pt
 import store
+from core import security
+from core.config import Config
+from api.auth_routes import auth_bp
+from services import auth_service
 
 
 def _match_tol(base, cur):
@@ -39,9 +43,15 @@ def _match_tol(base, cur):
     return max(pt.MATCH_TOLERANCE, 0.005 * abs(base or 0))
 
 app = Flask(__name__)
+app.config.from_object(Config)
+app.secret_key = Config.SECRET_KEY
 app.config["MAX_CONTENT_LENGTH"] = int(
     float(os.environ.get("MAX_UPLOAD_MB", "64")) * 1024 * 1024)
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "uploads")
+
+# --- Auth: register routes + gate every request (viewers are read-only) ---
+app.register_blueprint(auth_bp)
+app.before_request(security.guard)
 
 LOCK = threading.Lock()
 LOG = []
@@ -1138,6 +1148,10 @@ def serve():
         print("[PriceSync] Set SUPABASE_DB_URL in .env (see .env.example).")
         raise SystemExit(1)
     store.init()  # ensure tables exist; the app only works on sheets you import
+    auth_service.init()
+    seeded = auth_service.seed_admin(Config.ADMIN_EMAIL, Config.ADMIN_PASSWORD)
+    if seeded:
+        print(f"[PriceSync] Seeded admin user: {seeded} (change the password!)")
     print("[PriceSync] Supabase connected.")
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8080"))
