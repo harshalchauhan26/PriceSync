@@ -114,6 +114,15 @@ function ChartBox({type,labels,datasets,options,h=210}){
     return()=>{if(inst.current){inst.current.destroy();inst.current=null}};});
   return <div style={{height:h}}><canvas ref={ref}/></div>;}
 
+/* reusable vendor filter (every page) */
+function VendorSelect({value,onChange,kind}){
+  const [vs,setVs]=useState([]);
+  useEffect(()=>{api("/api/vendors"+(kind?("?kind="+kind):"")).then(d=>setVs(d.vendors||[]))},[kind]);
+  return <select className="inp mono" style={{width:210}} value={value} onChange={e=>onChange(e.target.value)}>
+    <option value="">All vendors ({vs.length})</option>
+    {vs.map(v=><option key={v.vendor} value={v.vendor}>{v.vendor.replace(/^www\./,"")} · {v.count}</option>)}</select>;
+}
+
 /* ===================== PIPELINE ===================== */
 function Pipeline({admin}){
   const [st,setSt]=useState({running:false,phase:"idle",total_rows:0,current_row:0,matched:0,mismatch:0,errors:0,elapsed:0,message:"Idle.",entries:[],log_total:0});
@@ -191,7 +200,7 @@ function Pipeline({admin}){
           <tr key={i} className="fadeup" style={{borderBottom:"1px solid var(--c-low)"}}>
             <td className="px-3 py-1.5" style={{color:"var(--outline)",width:78}}>{e.t}</td>
             <td className="px-2 py-1.5" style={{color:"var(--primary2)",width:120}}>[{(e.domain||"?").replace(/^www\./,"").toUpperCase().slice(0,12)}]</td>
-            <td className="px-2 py-1.5" style={{color:"var(--on-var)"}}>{trunc(e.url,46)}</td>
+            <td className="px-2 py-1.5">{e.url?<a href={e.url} target="_blank" rel="noopener" className="hover:underline" style={{color:"var(--primary2)"}}>{trunc(e.url,46)}</a>:<span style={{color:"var(--on-var)"}}>—</span>}</td>
             <td className="px-3 py-1.5 text-right" style={{width:62}}><span style={{color:c,fontWeight:600}}>{t}</span></td></tr>);})}
           {!rows.length&&<tr><td className="text-center py-12" style={{color:"var(--outline)"}}>Stream idle — hit Run from Start.</td></tr>}
         </tbody></table></div>
@@ -204,8 +213,9 @@ function Pipeline({admin}){
 function Review({admin}){
   const [tab,setTab]=useState("mismatch");const [items,setItems]=useState([]);const [counts,setCounts]=useState({});
   const [sel,setSel]=useState(()=>new Set());const [fxr,setFxr]=useState({USD:0,CAD:0,INR:1});const [busy,setBusy]=useState(false);
-  const load=useCallback(async()=>{setBusy(true);const d=await api(`/api/review/items?kind=${tab}`);
-    setItems((d.items||[]).map(it=>({...it,_m:it.markup_pct||0})));setCounts(d.counts||{});setSel(new Set());setBusy(false);},[tab]);
+  const [brand,setBrand]=useState("");
+  const load=useCallback(async()=>{setBusy(true);const d=await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(brand)}`);
+    setItems((d.items||[]).map(it=>({...it,_m:it.markup_pct||0})));setCounts(d.counts||{});setSel(new Set());setBusy(false);},[tab,brand]);
   useEffect(()=>{load()},[load]);
   useEffect(()=>{api("/api/fx").then(d=>d.rates&&setFxr(d.rates))},[]);
   const liveInr=it=>{if(it.live_price==null)return null;const c=(it.currency||"INR").toUpperCase();return it.live_price*((c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1));};
@@ -225,7 +235,8 @@ function Review({admin}){
     <div className="flex items-start justify-between mb-4">
       <div><h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.02em"}}>Review &amp; Approval Queue</h1>
         <div className="text-[13px] mt-1" style={{color:"var(--on-var)"}}>Audit algorithmic price shifts and finalize valuations.</div></div>
-      <div className="flex gap-2.5">
+      <div className="flex gap-2.5 items-center">
+        <VendorSelect value={brand} onChange={setBrand} kind={tab}/>
         <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13}/>Refresh Data</Btn>
         <Btn kind="ghost" sm onClick={()=>window.location=`/api/export?kind=${tab==="resolved"?"all":tab}&fmt=csv`}><Icon n="dl" s={13}/>Export CSV</Btn>
         <Btn kind="primary" sm onClick={approveSelected} disabled={!admin}><Icon n="check" s={13}/>Approve Selected</Btn></div>
@@ -268,8 +279,8 @@ function Review({admin}){
 
 /* ===================== ALERTS ===================== */
 function Alerts(){
-  const [thr,setThr]=useState(15);const [dir,setDir]=useState("all");const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
-  const load=useCallback(async()=>{const r=await api(`/api/alerts?threshold=${thr}&direction=${dir}`);setD(r);},[thr,dir]);
+  const [thr,setThr]=useState(15);const [dir,setDir]=useState("all");const [brand,setBrand]=useState("");const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
+  const load=useCallback(async()=>{const r=await api(`/api/alerts?threshold=${thr}&direction=${dir}&brand=${encodeURIComponent(brand)}`);setD(r);},[thr,dir,brand]);
   useEffect(()=>{load()},[load]);
   const seg=[["all","All Movements"],["drop","Drops"],["spike","Spikes"]];
   // velocity: bucket by hour-of-day from created_at
@@ -289,6 +300,7 @@ function Alerts(){
         <div className="flex rounded-md overflow-hidden" style={{border:"1px solid var(--ov)"}}>{seg.map(([k,l])=>
           <button key={k} onClick={()=>setDir(k)} className="navi px-4 py-2 text-[12.5px] font-semibold"
             style={{background:dir===k?COL.primary:"var(--c-low)",color:dir===k?"#fff":"var(--on-var)"}}>{l}</button>)}</div></div>
+      <div><div className="lbl mb-1.5">Vendor</div><VendorSelect value={brand} onChange={setBrand}/></div>
       <div className="ml-auto"><div className="lbl mb-1.5">Time Window</div>
         <div className="flex items-center gap-2"><span className="inp flex items-center gap-2" style={{width:160}}><Icon n="clock" s={13} c="var(--outline)"/>Latest run</span>
           <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13}/></Btn></div></div>
@@ -367,8 +379,8 @@ function Integrations({admin}){
 
 /* ===================== HISTORY (approved archive) ===================== */
 function History({admin}){
-  const [d,setD]=useState({items:[],count:0,value:0,pushed:0});
-  const load=useCallback(()=>api("/api/history").then(setD),[]);
+  const [d,setD]=useState({items:[],count:0,value:0,pushed:0});const [brand,setBrand]=useState("");
+  const load=useCallback(()=>api(`/api/history?brand=${encodeURIComponent(brand)}`).then(setD),[brand]);
   useEffect(()=>{load()},[load]);
   const push=async(it)=>{if(!admin)return toast("Admin only","err");toast("Pushing to store…");
     const r=await apiJSON("/api/history/push",{row:it.id});toast(r.status||"done",r.ok?"ok":"err");load();};
@@ -378,7 +390,8 @@ function History({admin}){
     <div className="flex items-start justify-between mb-4">
       <div><h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.02em"}}>Approval History</h1>
         <div className="text-[13px] mt-1" style={{color:"var(--on-var)"}}>Approved prices archived from review · finalized records.</div></div>
-      <div className="flex gap-2.5">
+      <div className="flex gap-2.5 items-center">
+        <VendorSelect value={brand} onChange={setBrand}/>
         <Btn kind="ghost" sm onClick={()=>window.location="/api/history/export?fmt=xlsx"}><Icon n="dl" s={13}/>Export</Btn>
         <Btn kind="primary" sm onClick={pushAll} disabled={!admin}><Icon n="share" s={13}/>Push all to store</Btn></div>
     </div>
