@@ -29,9 +29,10 @@ from werkzeug.utils import secure_filename
 import fx
 import price_tracker as pt
 import store
-from core import security
+from core import crypto, security
 from core.config import Config
 from api.auth_routes import auth_bp
+from api.admin_routes import admin_bp
 from services import auth_service
 
 
@@ -51,6 +52,7 @@ UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "uploads")
 
 # --- Auth: register routes + gate every request (viewers are read-only) ---
 app.register_blueprint(auth_bp)
+app.register_blueprint(admin_bp)
 app.before_request(security.guard)
 
 LOCK = threading.Lock()
@@ -306,7 +308,19 @@ def _integration(brand):
     con = store.connect()
     r = con.execute("SELECT * FROM integrations WHERE brand=%s", (brand,)).fetchone()
     con.close()
-    return dict(r) if r else None
+    if not r:
+        return None
+    d = dict(r)
+    if d.get("access_token"):                 # stored encrypted at rest
+        d["access_token"] = crypto.decrypt(d["access_token"])
+    return d
+
+
+STORE_BRAND = "__store__"   # the single MBO Shopify store (one integration)
+
+
+def _store_integration():
+    return _integration(STORE_BRAND)
 
 
 def _product_handle(url):
@@ -314,9 +328,10 @@ def _product_handle(url):
 
 
 def push_price_to_shopify(brand, url, price):
-    cfg = _integration(brand)
+    # one integration for the whole MBO store; fall back to per-brand if set
+    cfg = _store_integration() or _integration(brand)
     if not cfg or not cfg.get("shop_domain") or not cfg.get("access_token"):
-        return {"ok": False, "status": f"no Shopify token for '{brand}' (add it in Integrations)"}
+        return {"ok": False, "status": "no Shopify store connected (add it in Integrations)"}
     if price is None:
         return {"ok": False, "status": "approve a final price first"}
     handle = _product_handle(url)
@@ -1010,6 +1025,49 @@ def api_push_status():
         return jsonify(dict(PUSH))
 
 
+# ---- Single store integration (the one MBO Shopify store) ----
+
+@app.route("/api/integration")
+def api_integration_get():
+    cfg = _store_integration() or {}
+    return jsonify(shop_domain=cfg.get("shop_domain", ""),
+                   api_version=cfg.get("api_version", "2024-10"),
+                   dry_run=bool(cfg.get("dry_run", 0)),
+                   has_token=bool(cfg.get("access_token")),
+                   updated_at=cfg.get("updated_at"))
+
+
+@app.route("/api/integration/save", methods=["POST"])
+def api_integration_save():
+    d = request.get_json(force=True) or {}
+    con = store.connect()
+    existing = con.execute("SELECT access_token FROM integrations WHERE brand=%s",
+                           (STORE_BRAND,)).fetchone()
+    new_token = (d.get("access_token") or "").strip()
+    if new_token:
+        token = crypto.encrypt(new_token)
+    elif existing:
+        token = existing["access_token"]
+    else:
+        token = ""
+    con.execute("""INSERT INTO integrations(brand,shop_domain,access_token,api_version,dry_run,updated_at)
+                   VALUES(%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT(brand) DO UPDATE SET shop_domain=excluded.shop_domain,
+                     access_token=excluded.access_token, api_version=excluded.api_version,
+                     dry_run=excluded.dry_run, updated_at=excluded.updated_at""",
+                (STORE_BRAND, (d.get("shop_domain") or "").strip(), token,
+                 (d.get("api_version") or "2024-10").strip(),
+                 1 if d.get("dry_run") else 0, time.strftime("%Y-%m-%d %H:%M:%S")))
+    con.commit()
+    con.close()
+    return jsonify(ok=True)
+
+
+@app.route("/api/integration/verify", methods=["POST"])
+def api_integration_verify():
+    return jsonify(**verify_shopify(STORE_BRAND))
+
+
 # ---- Integrations API ----
 
 @app.route("/api/integrations")
@@ -1039,9 +1097,13 @@ def api_int_save():
         return jsonify(ok=False, error="missing brand"), 400
     con = store.connect()
     existing = con.execute("SELECT access_token FROM integrations WHERE brand=%s", (brand,)).fetchone()
-    token = (d.get("access_token") or "").strip()
-    if not token and existing:  # keep existing token if field left blank
-        token = existing["access_token"]
+    new_token = (d.get("access_token") or "").strip()
+    if new_token:
+        token = crypto.encrypt(new_token)            # encrypt at rest
+    elif existing:
+        token = existing["access_token"]             # keep existing (already encrypted)
+    else:
+        token = ""
     con.execute("""INSERT INTO integrations(brand,shop_domain,access_token,api_version,dry_run,updated_at)
                    VALUES(%s,%s,%s,%s,%s,%s)
                    ON CONFLICT(brand) DO UPDATE SET shop_domain=excluded.shop_domain,
@@ -1149,9 +1211,9 @@ def serve():
         raise SystemExit(1)
     store.init()  # ensure tables exist; the app only works on sheets you import
     auth_service.init()
-    seeded = auth_service.seed_admin(Config.ADMIN_EMAIL, Config.ADMIN_PASSWORD)
-    if seeded:
-        print(f"[PriceSync] Seeded admin user: {seeded} (change the password!)")
+    owner = auth_service.ensure_owner(Config.ADMIN_EMAIL, Config.ADMIN_PASSWORD)
+    if owner:
+        print(f"[PriceSync] Owner: {owner} (change the password!)")
     print("[PriceSync] Supabase connected.")
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8080"))

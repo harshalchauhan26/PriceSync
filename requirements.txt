@@ -6,3 +6,4 @@ requests==2.33.1
 waitress==3.0.2
 psycopg[binary]==3.2.13
 python-dotenv==1.0.1
+cryptography==49.0.0

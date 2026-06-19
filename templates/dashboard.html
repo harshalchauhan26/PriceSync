@@ -3,626 +3,450 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PriceSync · Console</title>
+<title>MBO Tracker · Terminal v2.4</title>
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
-<!-- Pinned to Babel 7: its preset-react defaults to the classic JSX runtime.
-     Babel 8 (the unversioned "latest") emits `import` statements that can't run
-     as a plain inline script, which blanks the whole page. -->
 <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  :root{--bg:#09090b;--panel:#121214;--panel2:#18181b;--border:#27272a;
-    --blue:#2563eb;--emerald:#10b981;--amber:#f59e0b;--red:#ef4444;--mut:#71717a;}
-  html,body{height:100%;background:var(--bg);color:#e4e4e7;
-    font-family:Inter,"SF Pro Display",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-  *{scrollbar-width:thin;scrollbar-color:#3f3f46 transparent}
-  *::-webkit-scrollbar{width:8px;height:8px}
-  *::-webkit-scrollbar-thumb{background:#3f3f46;border-radius:8px}
-  *::-webkit-scrollbar-track{background:transparent}
+  :root{
+    --bg:#0e0e10; --surface:#131315; --c-low:#1c1b1d; --c:#201f22; --c-high:#2a2a2c; --c-highest:#353437;
+    --on:#e5e1e4; --on-var:#c2c6d6; --outline:#8c909f; --ov:#424754;
+    --primary:#3b82f6; --primary2:#4d8eff; --secondary:#4ae176; --tertiary:#ffb95f; --error:#ff6b6b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);color:var(--on);font-family:Geist,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .mono{font-family:"JetBrains Mono",monospace}
+  .lbl{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--outline)}
+  *{scrollbar-width:thin;scrollbar-color:#3a3a3d transparent}
+  *::-webkit-scrollbar{width:8px;height:8px}*::-webkit-scrollbar-thumb{background:#3a3a3d;border-radius:8px}
+  input,select,button{outline:none;font-family:inherit}
+  .card{background:var(--surface);border:1px solid var(--ov);border-radius:10px}
+  .tile{background:var(--c-low);border:1px solid var(--ov);border-radius:10px}
+  .inp{background:var(--c-low);border:1px solid var(--ov);color:var(--on);border-radius:6px;padding:8px 10px;font-size:13px;width:100%}
+  .inp:focus{border-color:var(--primary)}
+  .navi{transition:background .15s,color .15s,border-color .15s}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+  .fadeup{animation:fadeUp .22s ease both}
   @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
-  .shine::after{content:"";position:absolute;inset:0;
-    background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);
-    animation:shimmer 1.6s infinite}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-  .fadeup{animation:fadeUp .25s ease both}
-  @keyframes slideIn{from{opacity:0;transform:translateX(40px) scale(.98)}
-    60%{transform:translateX(-4px) scale(1.01)}to{opacity:1;transform:translateX(0) scale(1)}}
-  .toastin{animation:slideIn .35s cubic-bezier(.22,1.2,.36,1) both}
-  @keyframes pulseDot{0%{box-shadow:0 0 0 0 rgba(16,185,129,.55)}
-    70%{box-shadow:0 0 0 6px rgba(16,185,129,0)}100%{box-shadow:0 0 0 0 rgba(16,185,129,0)}}
-  .pdot{animation:pulseDot 2s infinite}
+  .shine::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.3),transparent);animation:shimmer 1.6s infinite}
+  @keyframes pdot{0%{box-shadow:0 0 0 0 rgba(74,225,118,.5)}70%{box-shadow:0 0 0 6px rgba(74,225,118,0)}100%{box-shadow:0 0 0 0 rgba(74,225,118,0)}}
+  .pdot{animation:pdot 2s infinite}
+  @keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+  .toastin{animation:slideIn .3s cubic-bezier(.22,1.2,.36,1) both}
   .acc{overflow:hidden;transition:max-height .3s ease}
-  .navi{transition:background .2s ease,color .2s ease}
-  input,select,button{outline:none}
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
-const {useState,useEffect,useRef,useCallback} = React;
+const {useState,useEffect,useRef,useCallback}=React;
 
-/* ---------- tiny inline icon set ---------- */
-const P = {
-  play:"M8 5v14l11-7z", refresh:"M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5",
-  stop:"M6 6h12v12H6z", upload:"M12 16V4M7 9l5-5 5 5M5 20h14",
-  check:"M20 6 9 17l-5-5", bell:"M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a2 2 0 0 0 3.4 0",
-  alert:"M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z",
-  plug:"M9 2v6M15 2v6M7 8h10v3a5 5 0 0 1-10 0V8ZM12 16v6",
-  search:"M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM21 21l-4.3-4.3",
-  gear:"M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0-1.1-2.7H1a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 2.6 7a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H7a1.6 1.6 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1A1.6 1.6 0 0 0 17 2.6a1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V7a1.6 1.6 0 0 0 1.5 1H23a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z",
-  plus:"M12 5v14M5 12h14", x:"M18 6 6 18M6 6l12 12",
-  up:"M12 19V5M5 12l7-7 7 7", down:"M12 5v14M5 12l7 7 7-7",
-  cloud:"M12 13v8m-4-4 4 4 4-4M20 16.6A5 5 0 0 0 18 7h-1.3A8 8 0 1 0 4 15.2",
-  dl:"M12 3v12m-5-5 5 5 5-5M5 21h14", zap:"M13 2 3 14h7l-1 8 10-12h-7l1-8Z",
-  filter:"M22 3H2l8 9.5V19l4 2v-8.5L22 3Z", mail:"M4 5h16v14H4zM4 7l8 6 8-6",
-  home:"M3 11l9-8 9 8M5 10v10h14V10", chart:"M3 3v18h18M8 16v-5M13 16V8M18 16v-9",
+/* ---------- icons ---------- */
+const P={
+  pipeline:"M3 12h4l2 7 4-14 2 7h6", review:"M8 4h8v3H8zM6 5H5v16h14V5h-1M8.5 13.5l2 2 4.5-4.5",
+  alerts:"M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.5 21a2 2 0 0 0 3 0",
+  integrations:"M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6",
+  settings:"M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0-1.1-2.7H1a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 2.6 7a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H7a1.6 1.6 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1A1.6 1.6 0 0 0 17 2.6a1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V7a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z",
+  support:"M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 2.5M12 17h.01",
+  search:"M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16M21 21l-4.3-4.3",
+  share:"M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6M8.6 10.5l6.8-4M8.6 13.5l6.8 4",
+  card:"M3 6h18v12H3zM3 10h18", play:"M8 5v14l11-7z", refresh:"M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5",
+  stop:"M6 6h12v12H6z", upload:"M12 16V4M7 9l5-5 5 5M5 20h14", dl:"M12 3v12m-5-5 5 5 5-5M5 21h14",
+  trash:"M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13", check:"M20 6 9 17l-5-5", x:"M18 6 6 18M6 6l12 12",
+  flag:"M4 21V4h13l-2 4 2 4H6", up:"M12 19V5M6 11l6-6 6 6", down:"M12 5v14M6 13l6 6 6-6",
+  plus:"M12 5v14M5 12h14", bolt:"M13 2 3 14h7l-1 8 10-12h-7l1-8Z", clock:"M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18M12 7v5l3 2",
+  users:"M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8",
+  logout:"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
 };
-const Icon=({n,s=16,c="currentColor",sw=2,cls=""})=>(
-  <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={sw}
-    strokeLinecap="round" strokeLinejoin="round" className={cls}>
-    {(P[n]||"").split("M").filter(Boolean).map((d,i)=><path key={i} d={"M"+d}/>)}
-  </svg>);
+const Icon=({n,s=16,c="currentColor",sw=1.8})=>(
+  <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+    {(P[n]||"").split("M").filter(Boolean).map((d,i)=><path key={i} d={"M"+d}/>)}</svg>);
 
 /* ---------- helpers ---------- */
 const fmt=n=>(n==null||n==="")?"—":Number(n).toLocaleString(undefined,{maximumFractionDigits:2});
 const fmtInt=n=>(n==null)?"0":Number(n).toLocaleString();
-const trunc=(u,n=42)=>{if(!u)return"—";let l=u.replace(/^https?:\/\//,"");return l.length>n?l.slice(0,n-1)+"…":l};
+const inr=n=>(n==null)?"—":"₹"+Number(n).toLocaleString(undefined,{maximumFractionDigits:2});
+const trunc=(u,n=40)=>{if(!u)return"—";let l=u.replace(/^https?:\/\//,"");return l.length>n?l.slice(0,n-1)+"…":l};
+const pid=u=>{if(!u)return"—";const seg=u.split("?")[0].split("/").filter(Boolean).pop()||u;return seg.slice(0,22).toUpperCase();};
 const elapsed=s=>`${String(Math.floor(s/60)).padStart(2,"0")}m ${String(s%60).padStart(2,"0")}s`;
-async function api(path,opts){const r=await fetch(path,opts);try{return await r.json()}catch(e){return{}}}
-async function apiJSON(path,body){return api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})})}
-const COL={emerald:"#10b981",amber:"#f59e0b",red:"#ef4444",blue:"#2563eb",mut:"#71717a"};
-const hexA=(h,a)=>{const n=parseInt(h.slice(1),16);return `rgba(${n>>16&255},${n>>8&255},${n&255},${a})`};
+const hhmmss=()=>new Date().toLocaleTimeString("en-GB");
+const initials=b=>(b||"?").replace(/^www\./,"")[0].toUpperCase();
+async function api(p,o){const r=await fetch(p,o);try{return await r.json()}catch(e){return{}}}
+async function apiJSON(p,b){return api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})})}
+const COL={primary:"#3b82f6",sec:"#4ae176",ter:"#ffb95f",err:"#ff6b6b",out:"#8c909f"};
 
-/* ---------- Toasts (context-free, simple bus) ---------- */
-let _toastFn=()=>{};
-const toast=(text,kind="ok")=>_toastFn(text,kind);
-function Toaster(){
-  const [items,setItems]=useState([]);
-  _toastFn=(text,kind)=>{const id=Math.random();setItems(x=>[...x,{id,text,kind}]);
-    setTimeout(()=>setItems(x=>x.filter(i=>i.id!==id)),3000)};
-  return <div className="fixed top-4 right-4 z-50 flex flex-col gap-2">
-    {items.map(t=><div key={t.id} className="toastin px-4 py-2.5 rounded-lg text-[13px] border shadow-2xl max-w-sm"
-      style={{background:"var(--panel2)",borderColor:t.kind==="err"?"var(--red)":t.kind==="ok"?"var(--emerald)":"var(--border)"}}>
-      {t.text}</div>)}
-  </div>;
-}
+/* ---------- toasts ---------- */
+let _toast=()=>{};
+const toast=(t,k)=>_toast(t,k);
+function Toaster(){const[xs,setXs]=useState([]);
+  _toast=(t,k)=>{const id=Math.random();setXs(a=>[...a,{id,t,k}]);setTimeout(()=>setXs(a=>a.filter(x=>x.id!==id)),3200)};
+  return <div className="fixed top-4 right-4 z-50 flex flex-col gap-2">{xs.map(x=>
+    <div key={x.id} className="toastin px-4 py-2.5 rounded-lg text-[13px] shadow-2xl card" style={{borderColor:x.k==="err"?COL.err:x.k==="ok"?COL.sec:"var(--ov)"}}>{x.t}</div>)}</div>;}
 
-/* ---------- shared bits ---------- */
-const Badge=({children,color})=>(
-  <span className="ml-auto text-[10.5px] font-bold px-2 py-0.5 rounded-full"
-    style={{background:hexA(color,.16),color}}>{children}</span>);
-const Pill=({children,color})=>(
-  <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded"
-    style={{background:hexA(color,.14),color}}>{children}</span>);
-const Stat=({k,v,color})=>(
-  <div className="rounded-xl border px-3.5 py-3" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-    <div className="text-[10px] tracking-wider mb-1.5" style={{color:"var(--mut)"}}>{k}</div>
-    <div className="text-2xl font-bold font-mono" style={{color:color||"#fff"}}>{v}</div>
-  </div>);
-const Btn=({children,kind="ghost",onClick,disabled,title,sm})=>{
-  const base="inline-flex items-center gap-1.5 font-semibold rounded-lg border transition disabled:opacity-40 disabled:cursor-not-allowed";
-  const pad=sm?"px-2.5 py-1.5 text-[11.5px]":"px-3.5 py-2 text-[12.5px]";
-  const styles={blue:{background:"var(--blue)",borderColor:"var(--blue)",color:"#fff"},
-    emerald:{background:"var(--emerald)",borderColor:"var(--emerald)",color:"#04140d"},
-    amber:{background:"var(--amber)",borderColor:"var(--amber)",color:"#1a1203"},
-    red:{background:"transparent",borderColor:"var(--red)",color:"var(--red)"},
-    ghost:{background:"var(--panel2)",borderColor:"var(--border)",color:"#d4d4d8"}}[kind];
-  return <button title={title} onClick={onClick} disabled={disabled} className={base+" "+pad} style={styles}>{children}</button>;
-};
-function Toggle({on,onChange}){
-  return <button onClick={()=>onChange(!on)} className="relative w-10 h-[22px] rounded-full transition"
-    style={{background:on?"var(--emerald)":"var(--panel2)",border:"1px solid "+(on?"var(--emerald)":"var(--border)")}}>
-    <span className="absolute top-[2px] w-[16px] h-[16px] rounded-full transition-all"
-      style={{left:on?"20px":"2px",background:on?"#04140d":"var(--mut)"}}/></button>;
-}
-
-/* Excel-style multi-select filter (filter a column by its cell values) */
-function ExcelFilter({label,options,selected,onChange}){
-  const [open,setOpen]=useState(false);const [q,setQ]=useState("");const ref=useRef(null);
-  useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
-    document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h)},[]);
-  const sel=new Set(selected);
-  const filtered=options.filter(o=>o.value.toLowerCase().includes(q.toLowerCase()));
-  const toggle=v=>{const n=new Set(sel);n.has(v)?n.delete(v):n.add(v);onChange([...n])};
-  const active=selected.length>0;
-  return <div className="relative" ref={ref}>
-    <button onClick={()=>setOpen(o=>!o)} className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-semibold border"
-      style={{background:active?hexA(COL.blue,.16):"var(--panel2)",borderColor:active?COL.blue:"var(--border)",color:active?"#fff":"#d4d4d8"}}>
-      <Icon n="filter" s={13}/>{label}{active?` · ${selected.length}`:""}<span style={{color:"var(--mut)"}}>▾</span></button>
-    {open&&<div className="absolute right-0 z-40 mt-1 w-72 rounded-lg border shadow-2xl p-2 fadeup"
-      style={{background:"var(--panel2)",borderColor:"var(--border)"}}>
-      <div className="flex items-center gap-1.5 mb-1.5 rounded px-2 py-1.5" style={{background:"var(--panel)",border:"1px solid var(--border)"}}>
-        <Icon n="search" s={13} c="var(--mut)"/><input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder="Search vendor…"
-          className="bg-transparent text-[12px] w-full" style={{color:"#e4e4e7"}}/></div>
-      <div className="flex justify-between text-[10.5px] mb-1 px-0.5">
-        <a className="cursor-pointer font-semibold" style={{color:COL.blue}} onClick={()=>onChange(filtered.map(o=>o.value))}>SELECT ALL</a>
-        <a className="cursor-pointer" style={{color:"var(--mut)"}} onClick={()=>onChange([])}>CLEAR</a></div>
-      <div className="max-h-64 overflow-y-auto pr-0.5">
-        {filtered.map(o=><label key={o.value} className="flex items-center gap-2 text-[12px] px-1.5 py-1 rounded hover:bg-white/5 cursor-pointer">
-          <input type="checkbox" checked={sel.has(o.value)} onChange={()=>toggle(o.value)}/>
-          <span className="flex-1 truncate font-mono">{o.value}</span>
-          <span className="text-[10.5px]" style={{color:"var(--mut)"}}>{o.count}</span></label>)}
-        {!filtered.length&&<div className="text-center py-3 text-[11px]" style={{color:"var(--mut)"}}>no vendors match</div>}
-      </div>
-      <div className="text-[10px] mt-1.5 px-0.5" style={{color:"var(--mut)"}}>
-        {active?`Showing ${selected.length} vendor(s)`:"Showing all vendors"}</div>
-    </div>}
-  </div>;
-}
-
-/* ===================== HOME (insights) ===================== */
-function ChartBox({type,labels,datasets,options,h=250}){
-  const ref=useRef(null);const inst=useRef(null);
-  useEffect(()=>{
-    if(!window.Chart||!ref.current)return;
-    if(inst.current){inst.current.destroy();inst.current=null;}
-    const grid="#27272a",tick="#a1a1aa";
+/* ---------- shared ---------- */
+const BrandDot=({b})=><span className="inline-flex items-center justify-center mono shrink-0"
+  style={{width:18,height:18,borderRadius:4,background:"var(--c-high)",color:"var(--on-var)",fontSize:9,fontWeight:600}}>{initials(b)}</span>;
+const Pill=({children,c})=><span className="mono" style={{fontSize:9.5,fontWeight:600,letterSpacing:".06em",padding:"2px 7px",borderRadius:4,
+  background:c+"22",color:c,border:"1px solid "+c+"55"}}>{children}</span>;
+function Btn({children,kind="ghost",sm,onClick,disabled,title}){
+  const pad=sm?"padding:6px 11px;font-size:11.5px":"padding:9px 15px;font-size:13px";
+  const st={primary:`background:var(--primary);color:#fff;border:1px solid var(--primary)`,
+    ok:`background:var(--secondary);color:#04140d;border:1px solid var(--secondary)`,
+    warn:`background:var(--tertiary);color:#1a1203;border:1px solid var(--tertiary)`,
+    danger:`background:#3a1414;color:var(--error);border:1px solid #5a1d1d`,
+    ghost:`background:var(--c-low);color:var(--on);border:1px solid var(--ov)`}[kind];
+  return <button title={title} onClick={onClick} disabled={disabled}
+    className="inline-flex items-center gap-1.5 font-semibold rounded-md navi disabled:opacity-40 disabled:cursor-not-allowed"
+    style={{cssText:pad+";"+st}}>{children}</button>;}
+function Toggle({on,onChange}){return <button onClick={()=>onChange(!on)} className="relative navi" style={{width:42,height:23,borderRadius:20,
+  background:on?"var(--secondary)":"var(--c-high)",border:"1px solid "+(on?"var(--secondary)":"var(--ov)")}}>
+  <span className="absolute navi" style={{top:2,left:on?21:2,width:17,height:17,borderRadius:"50%",background:on?"#04140d":"var(--outline)"}}/></button>;}
+function ChartBox({type,labels,datasets,options,h=210}){
+  const ref=useRef(null),inst=useRef(null);
+  useEffect(()=>{if(!window.Chart||!ref.current)return;if(inst.current){inst.current.destroy();inst.current=null;}
     inst.current=new window.Chart(ref.current.getContext("2d"),{type,data:{labels,datasets},
-      options:Object.assign({responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{labels:{color:tick,font:{size:11},boxWidth:12}}},
-        scales:(type==="doughnut"||type==="pie")?{}:{
-          x:{ticks:{color:tick,font:{size:10}},grid:{color:grid}},
-          y:{ticks:{color:tick,font:{size:10}},grid:{color:grid}}}},options||{})});
-    return ()=>{if(inst.current){inst.current.destroy();inst.current=null;}};
-  });
-  return <div style={{height:h}}><canvas ref={ref}/></div>;
-}
-const Panel=({title,children,sub})=>(
-  <div className="rounded-xl border p-4" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-    <div className="flex items-baseline justify-between mb-3">
-      <h3 className="text-[12px] font-bold tracking-wide">{title}</h3>
-      {sub&&<span className="text-[10.5px]" style={{color:"var(--mut)"}}>{sub}</span>}</div>
-    {children}</div>);
-
-function Home({go}){
-  const [d,setD]=useState(null);
-  useEffect(()=>{api("/api/insights").then(setD)},[]);
-  if(!d) return <div className="text-center py-20" style={{color:"var(--mut)"}}>Loading insights…</div>;
-  const c=d.counts||{}, ex=d.exposure||{}, fxr=d.fx||{};
-  const kpis=[
-    ["TOTAL PRODUCTS",fmtInt(c.total),"#fff"],
-    ["MATCHED",fmtInt(c.matched),COL.emerald],
-    ["MISMATCHES",fmtInt(c.mismatch),COL.amber],
-    ["ERRORS",fmtInt(c.error),COL.red],
-    ["VENDORS",fmtInt(d.vendors),COL.blue],
-    ["AWAITING APPROVAL",fmtInt(c.awaiting),COL.amber],
-    ["APPROVED",fmtInt(c.approved),COL.emerald],
-    ["OVERPRICED EXPOSURE",`₹${fmtInt(Math.round(ex.over||0))}`,COL.red],
-  ];
-  const matchRate=c.total?Math.round((c.matched/c.total)*100):0;
-  return <div className="h-full overflow-auto pr-1">
-    <div className="grid grid-cols-4 gap-3 mb-4">
-      {kpis.map(([k,v,col])=><Stat key={k} k={k} v={v} color={col}/>)}
-    </div>
-    <div className="grid grid-cols-3 gap-3 mb-4">
-      <Panel title="Catalog status" sub={`${matchRate}% matched`}>
-        <ChartBox type="doughnut" h={230}
-          labels={["Matched","Mismatch","Error","Pending"]}
-          datasets={[{data:[c.matched||0,c.mismatch||0,c.error||0,c.pending||0],
-            backgroundColor:[COL.emerald,COL.amber,COL.red,"#3f3f46"],borderWidth:0}]}
-          options={{plugins:{legend:{position:"bottom"}},cutout:"62%"}}/>
-      </Panel>
-      <Panel title="Top vendors by mismatch" sub="needs review">
-        <ChartBox type="bar" h={230}
-          labels={d.top_mismatch.map(v=>v.brand.replace(/\.(com|in|co|net).*$/,""))}
-          datasets={[{label:"mismatches",data:d.top_mismatch.map(v=>v.count),
-            backgroundColor:COL.amber,borderRadius:4}]}
-          options={{indexAxis:"y",plugins:{legend:{display:false}}}}/>
-      </Panel>
-      <Panel title="Largest vendors" sub="by product count">
-        <ChartBox type="bar" h={230}
-          labels={d.top_products.map(v=>v.brand.replace(/\.(com|in|co|net).*$/,""))}
-          datasets={[{label:"products",data:d.top_products.map(v=>v.count),
-            backgroundColor:COL.blue,borderRadius:4}]}
-          options={{indexAxis:"y",plugins:{legend:{display:false}}}}/>
-      </Panel>
-    </div>
-    <div className="grid grid-cols-3 gap-3">
-      <Panel title="Exposure (mismatch gap)">
-        <div className="space-y-3 py-1">
-          <div className="flex justify-between"><span className="text-[12px]" style={{color:"var(--mut)"}}>Overpriced (site &gt; base)</span>
-            <b className="font-mono" style={{color:COL.red}}>₹{fmtInt(Math.round(ex.over||0))}</b></div>
-          <div className="flex justify-between"><span className="text-[12px]" style={{color:"var(--mut)"}}>Underpriced (site &lt; base)</span>
-            <b className="font-mono" style={{color:COL.emerald}}>₹{fmtInt(Math.round(ex.under||0))}</b></div>
-          <div className="flex justify-between"><span className="text-[12px]" style={{color:"var(--mut)"}}>Avg gap / mismatch</span>
-            <b className="font-mono">₹{fmtInt(Math.round(ex.avg||0))}</b></div>
-          <div className="flex justify-between border-t pt-2" style={{borderColor:"var(--border)"}}><span className="text-[12px]" style={{color:"var(--mut)"}}>Approved value</span>
-            <b className="font-mono" style={{color:COL.emerald}}>₹{fmtInt(Math.round(d.approved_value||0))}</b></div>
-        </div>
-      </Panel>
-      <Panel title="Live FX rates" sub="to INR">
-        <div className="space-y-3 py-1">
-          {["USD","CAD"].map(cur=><div key={cur} className="flex justify-between items-center">
-            <span className="text-[13px] font-semibold">{cur}</span>
-            <b className="font-mono text-[15px]" style={{color:COL.blue}}>₹{fmt(fxr[cur])}</b></div>)}
-          <div className="text-[10.5px] pt-2 border-t" style={{borderColor:"var(--border)",color:"var(--mut)"}}>Used for conversion in matching &amp; approval.</div>
-        </div>
-      </Panel>
-      <Panel title="Quick actions">
-        <div className="flex flex-col gap-2 py-1">
-          <Btn kind="blue" onClick={()=>go("pipeline")}><Icon n="play" s={14}/>Run the pipeline</Btn>
-          <Btn kind="amber" onClick={()=>go("review")}><Icon n="check" s={14}/>Review {fmtInt(c.awaiting)} awaiting</Btn>
-          <Btn kind="ghost" onClick={()=>go("alerts")}><Icon n="bell" s={14}/>View alerts</Btn>
-          <Btn kind="emerald" onClick={()=>window.location="/api/export?kind=all&fmt=xlsx"}><Icon n="dl" s={14}/>Export full catalog</Btn>
-        </div>
-      </Panel>
-    </div>
-  </div>;
-}
+      options:Object.assign({responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+        scales:{x:{ticks:{color:COL.out,font:{size:9}},grid:{display:false}},y:{display:false}}},options||{})});
+    return()=>{if(inst.current){inst.current.destroy();inst.current=null}};});
+  return <div style={{height:h}}><canvas ref={ref}/></div>;}
 
 /* ===================== PIPELINE ===================== */
-function Pipeline({onMeta,admin}){
+function Pipeline({admin}){
   const [st,setSt]=useState({running:false,phase:"idle",total_rows:0,current_row:0,matched:0,mismatch:0,errors:0,elapsed:0,message:"Idle.",entries:[],log_total:0});
-  const [cfg,setCfg]=useState({concurrency:16,timeout_ms:12000,batch_size:500,rest_between:60,safe_retry:true,simulation:false});
-  const [adv,setAdv]=useState(false);
-  const [cat,setCat]=useState({total:0,pending:0});
-  const [vendors,setVendors]=useState([]);
-  const [vsel,setVsel]=useState([]);          // vendor scope for the run
-  const cursor=useRef(0); const logRef=useRef(null);
-  useEffect(()=>{api("/api/meta").then(d=>{if(d.counts)setCat(d.counts)});
-    api("/api/vendors").then(d=>setVendors(d.vendors||[]))},[]);
-  const scopeCount=vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):(cat.total||0);
-
-  const poll=useCallback(async()=>{
-    const d=await api("/api/pipe/status?cursor="+cursor.current);
-    if(!d||d.running===undefined)return;
-    cursor.current=d.cursor;
-    setSt(s=>({...d,entries:[...s.entries,...(d.entries||[])].slice(-400)}));
-  },[]);
-  useEffect(()=>{let live=true;const loop=async()=>{if(!live)return;await poll();
-    setTimeout(loop, (st.running)?800:1800)};loop();return()=>{live=false}},[poll,st.running]);
-  useEffect(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight},[st.entries.length]);
-
-  const sendCfg=async(extra)=>apiJSON("/api/pipe/config",{...cfg,...extra});
-  const run=async(mode)=>{await sendCfg({fresh_start:mode==="fresh",retry_errors:mode==="update",vendors:vsel});
-    const d=await apiJSON("/api/pipe/start",{});
-    d.error?toast(d.error,"err"):toast(mode==="fresh"?"Run started — checking every product":"Checking updates…","ok");
-    setSt(s=>({...s,entries:[]}));cursor.current=0;};
-  const abort=async()=>{await apiJSON("/api/pipe/abort",{});toast("Aborting…")};
-
+  const [cfg,setCfg]=useState({concurrency:12,timeout_ms:5000,batch_size:250,rest_between:1,safe_retry:true,simulation:false});
+  const [vendors,setVendors]=useState([]);const [vsel,setVsel]=useState([]);
+  const [rows,setRows]=useState([]);const cursor=useRef(0),logRef=useRef(null);
+  useEffect(()=>{api("/api/vendors").then(d=>setVendors(d.vendors||[]))},[]);
+  const poll=useCallback(async()=>{const d=await api("/api/pipe/status?cursor="+cursor.current);if(d.running===undefined)return;
+    cursor.current=d.cursor;if(d.entries&&d.entries.length){const stamped=d.entries.map(e=>({...e,t:hhmmss()}));
+      setRows(r=>[...r,...stamped].slice(-300));}setSt(s=>({...s,...d}));},[]);
+  useEffect(()=>{let on=true;const loop=async()=>{if(!on)return;await poll();setTimeout(loop,st.running?900:2000)};loop();return()=>{on=false}},[poll,st.running]);
+  useEffect(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight},[rows.length]);
+  const sendCfg=x=>apiJSON("/api/pipe/config",{...cfg,...x});
+  const run=async(m)=>{if(!admin)return toast("Admin role required","err");await sendCfg({fresh_start:m==="fresh",retry_errors:m==="update",vendors:vsel});
+    const d=await apiJSON("/api/pipe/start",{});d.error?toast(d.error,"err"):toast(m==="fresh"?"Run started":"Checking updates…","ok");setRows([]);cursor.current=0;};
+  const abort=()=>apiJSON("/api/pipe/abort",{}).then(()=>toast("Aborting…"));
+  const onFile=async(f)=>{if(!f||!admin)return;const fd=new FormData();fd.append("file",f);toast("Reading "+f.name+"…");
+    const p=await api("/api/import/preview",{method:"POST",body:fd});if(!p.ok)return toast(p.error||"Preview failed","err");
+    const fd2=new FormData();fd2.append("path",p.path);const d=await api("/api/import",{method:"POST",body:fd2});
+    d.ok?toast(`Imported ${d.rows} products`,"ok"):toast(d.error||"Import failed","err");api("/api/vendors").then(d=>setVendors(d.vendors||[]));};
+  const toggleV=v=>setVsel(s=>s.includes(v)?s.filter(x=>x!==v):[...s,v]);
+  const pending=Math.max(0,(st.total_rows||0)-(st.current_row||0));
   const pct=st.total_rows?Math.min(100,st.current_row/st.total_rows*100):0;
-  const phaseTxt={main:"Extracting live pricing…",safe_retry:"Safe-retry window — gently re-fetching errors",done:"Run complete — saved to database"}[st.phase];
-  const statusColor=e=>e.status==="Price Matched"?"var(--emerald)":e.status&&e.status.startsWith("Price Mismatch")?"var(--amber)":"var(--red)";
-
-  return <div className="grid grid-cols-[320px_1fr] gap-5 h-full min-h-0">
-    {/* config */}
-    <div className="overflow-y-auto pr-1 space-y-3">
-      <div className="rounded-xl border p-3" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-        <div className="text-[10px] tracking-wider mb-2" style={{color:"var(--mut)"}}>PRODUCT CATALOG</div>
-        <div className="flex items-baseline gap-2">
-          <span className="text-2xl font-bold font-mono">{fmtInt(cat.total)}</span>
-          <span className="text-[11px]" style={{color:"var(--mut)"}}>products in database</span></div>
-        <div className="text-[11px] mt-1" style={{color:"var(--mut)"}}>{fmtInt(cat.pending)} pending · permanent</div>
-        <div className="text-[10.5px] mt-2 leading-relaxed" style={{color:"var(--mut)"}}>
-          <span style={{color:"var(--emerald)"}}>●</span> The catalog is permanent — no upload needed. Just configure and run.</div>
-      </div>
-
-      <div className="rounded-xl border p-3 space-y-2" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-        <div className="text-[10px] tracking-wider" style={{color:"var(--mut)"}}>ENGINE SETTINGS</div>
-        <div className="grid grid-cols-2 gap-2">
-          {[["Concurrency","concurrency"],["Timeout (ms)","timeout_ms"],["Batch Size","batch_size"],["Rest (s)","rest_between"]].map(([lbl,k])=>
-            <div key={k}><div className="text-[10px] mb-1" style={{color:"var(--mut)"}}>{lbl}</div>
-              <input type="number" value={cfg[k]} onChange={e=>setCfg({...cfg,[k]:+e.target.value})}
-                className="w-full rounded-md px-2 py-1.5 text-[12.5px] font-mono"
-                style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/></div>)}
-        </div>
-        <div className="flex items-center justify-between pt-1">
-          <div><div className="text-[12.5px]">Safe-Retry Window</div>
-            <div className="text-[10px]" style={{color:"var(--mut)"}}>Gently re-fetch errors after the run (no 429s)</div></div>
-          <Toggle on={cfg.safe_retry} onChange={v=>setCfg({...cfg,safe_retry:v})}/></div>
-        <button className="text-[10.5px] tracking-wider pt-1" style={{color:"var(--mut)"}} onClick={()=>setAdv(!adv)}>ADVANCED ▾</button>
-        <div className="acc" style={{maxHeight:adv?"96px":"0"}}>
-          <div className="flex items-center justify-between pt-1">
-            <div className="text-[12.5px]">Simulation Mode <span className="text-[10px]" style={{color:"var(--mut)"}}>(no network)</span></div>
-            <Toggle on={cfg.simulation} onChange={v=>setCfg({...cfg,simulation:v})}/></div>
-        </div>
-        <Btn kind="ghost" onClick={async()=>{await sendCfg({});toast("Configuration applied","ok")}}><Icon n="check" s={13}/>Apply Config</Btn>
-      </div>
+  const tag=e=>e.status==="Fetch Error"?["FAIL",COL.err]:e.status&&e.status.startsWith("Price Mismatch")?["WARN",COL.ter]:e.status==="Price Matched"||(e.status&&e.status.startsWith("Price Matched"))?["DONE",COL.sec]:["INFO",COL.primary];
+  const tiles=[["TOTAL UNITS",fmtInt(st.total_rows),"var(--on)"],["DONE",fmtInt(st.current_row),"var(--on)"],
+    ["MATCHED",fmtInt(st.matched),COL.sec],["MISMATCH",fmtInt(st.mismatch),COL.ter],["ERRORS",fmtInt(st.errors),COL.err],["PENDING",fmtInt(pending),"var(--on-var)"]];
+  return <div className="grid grid-cols-[300px_1fr] gap-5 h-full min-h-0">
+    <div className="overflow-y-auto pr-1 space-y-5">
+      <div><div className="lbl mb-2">Source Configuration</div>
+        <div onClick={()=>document.getElementById("fi").click()} className="rounded-lg border-2 border-dashed flex flex-col items-center justify-center cursor-pointer"
+          style={{borderColor:"var(--ov)",color:"var(--outline)",padding:"26px 10px"}}>
+          <Icon n="upload" s={22}/><div className="mt-2 text-[13px]" style={{color:"var(--on-var)"}}>Drop sheet or click to upload</div>
+          <div className="lbl mt-1" style={{fontSize:10}}>optional · max 50mb</div></div>
+        <input id="fi" type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e=>onFile(e.target.files[0])}/></div>
+      <div><div className="lbl mb-2">Designer Domain · run scope</div>
+        <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">{vendors.map(v=>{const on=vsel.includes(v.vendor);return(
+          <label key={v.vendor} className="tile flex items-center gap-2.5 px-3 py-2.5 cursor-pointer navi" style={{borderColor:on?"var(--primary)":"var(--ov)"}}>
+            <span className="flex items-center justify-center" style={{width:16,height:16,borderRadius:4,background:on?"var(--primary)":"transparent",border:"1px solid "+(on?"var(--primary)":"var(--outline)")}}>
+              {on&&<Icon n="check" s={11} c="#fff"/>}</span>
+            <input type="checkbox" className="hidden" checked={on} onChange={()=>toggleV(v.vendor)}/>
+            <span className="flex-1 truncate text-[13px]">{v.vendor.replace(/^www\./,"")}</span>
+            <span className="mono text-[11px]" style={{color:"var(--outline)"}}>{fmtInt(v.count)}</span></label>);})}
+          {!vendors.length&&<div className="lbl">no vendors</div>}</div>
+        <div className="lbl mt-1.5" style={{fontSize:10}}>{vsel.length?vsel.length+" selected":"all vendors"}</div></div>
+      <div><div className="lbl mb-2">Engine Settings</div>
+        <div className="grid grid-cols-2 gap-2.5">
+          {[["Concurrency","concurrency"],["Timeout (ms)","timeout_ms"],["Batch Size","batch_size"],["Interval (s)","rest_between"]].map(([l,k])=>
+            <div key={k}><div className="lbl mb-1" style={{fontSize:10}}>{l}</div>
+              <input type="number" className="inp mono" value={cfg[k]} onChange={e=>setCfg({...cfg,[k]:+e.target.value})}/></div>)}</div></div>
+      <div className="tile flex items-center justify-between px-3.5 py-3">
+        <div><div className="text-[13px] font-semibold">Safe Retry Mode</div><div className="lbl mt-0.5" style={{fontSize:10}}>backoff algorithm active</div></div>
+        <Toggle on={cfg.safe_retry} onChange={v=>setCfg({...cfg,safe_retry:v})}/></div>
+      <Btn kind="ghost" onClick={()=>{sendCfg({});toast("Config applied","ok")}}><Icon n="check" s={13}/>Apply Config</Btn>
     </div>
-
-    {/* run panel */}
     <div className="flex flex-col min-h-0 min-w-0">
-      <div className="flex gap-2.5 mb-3 flex-wrap items-center">
-        <Btn kind="blue" onClick={()=>run("fresh")} disabled={st.running||!admin} title={admin?"":"admin only"}><Icon n="play" s={14}/>Run from Start</Btn>
-        <Btn kind="ghost" onClick={()=>run("update")} disabled={st.running||!admin}><Icon n="refresh" s={14}/>Check Updates</Btn>
-        <Btn kind="red" onClick={abort} disabled={!st.running||!admin}><Icon n="stop" s={14}/>Abort</Btn>
-        <Btn kind="emerald" onClick={()=>window.location="/api/export?kind=all&fmt=xlsx"}><Icon n="dl" s={14}/>Export</Btn>
-        <div className="ml-auto flex items-center gap-2.5">
-          <span className="text-[11.5px]" style={{color:"var(--mut)"}}>
-            Scope: <b style={{color:"#fff"}}>{scopeCount.toLocaleString()}</b> products{vsel.length?` · ${vsel.length} vendor(s)`:" · all vendors"}</span>
-          <ExcelFilter label="Vendors" selected={vsel} onChange={setVsel}
-            options={vendors.map(v=>({value:v.vendor,count:v.count}))}/>
-        </div>
+      {st.phase!=="idle"&&st.phase!=="done"&&<div className="flex items-center gap-2 mb-3 px-4 py-2.5 rounded-lg text-[12.5px] font-semibold"
+        style={{border:"1px solid "+COL.ter+"66",background:COL.ter+"14",color:COL.ter}}>
+        <Icon n="alerts" s={14}/>CURRENT PHASE: {st.phase==="safe_retry"?"SAFE-RETRY WINDOW…":"EXTRACTING LIVE PRICING…"}</div>}
+      <div className="flex items-center gap-3 mb-4">
+        <Btn kind="primary" onClick={()=>run("fresh")} disabled={st.running}><Icon n="play" s={14}/>Run from Start</Btn>
+        <Btn kind="ghost" onClick={()=>run("update")} disabled={st.running}><Icon n="refresh" s={14}/>Check Updates</Btn>
+        <Btn kind="danger" onClick={abort} disabled={!st.running}><Icon n="stop" s={13}/>Abort</Btn>
+        <span className="ml-auto flex items-center gap-2 lbl">{st.running?<span className="w-2 h-2 rounded-full pdot" style={{background:COL.sec}}/>:<span className="w-2 h-2 rounded-full" style={{background:"var(--outline)"}}/>}Engine {st.running?"Live":"Idle"}</span>
       </div>
-      <div className="grid grid-cols-6 gap-2.5 mb-3">
-        <Stat k="TOTAL" v={fmtInt(st.total_rows)}/><Stat k="DONE" v={fmtInt(st.current_row)}/>
-        <Stat k="MATCHED" v={fmtInt(st.matched)} color="var(--emerald)"/>
-        <Stat k="MISMATCH" v={fmtInt(st.mismatch)} color="var(--amber)"/>
-        <Stat k="ERRORS" v={fmtInt(st.errors)} color="var(--red)"/>
-        <Stat k="ELAPSED" v={elapsed(st.elapsed||0)}/>
-      </div>
-      {phaseTxt&&st.phase!=="idle"&&<div className="flex items-center gap-2 mb-3 px-3.5 py-2 rounded-lg border text-[12.5px] font-semibold"
-        style={{borderColor:hexA(COL.amber,.3),background:hexA(COL.amber,.1),color:"var(--amber)"}}>
-        <Icon n="alert" s={14}/>Current Phase: {phaseTxt}</div>}
-      <div className="flex justify-between text-[11.5px] mb-1.5" style={{color:"var(--mut)"}}>
-        <span>Row {fmtInt(st.current_row)} of {fmtInt(st.total_rows)}</span><span>{pct.toFixed(1)}%</span></div>
-      <div className="h-2.5 rounded-full overflow-hidden mb-3 relative" style={{background:"var(--panel2)",border:"1px solid var(--border)"}}>
-        <div className="h-full relative overflow-hidden" style={{width:pct+"%",background:"var(--blue)"}}>
-          {st.running&&<span className="shine"/>}</div></div>
-      <div className="text-[11px] tracking-wider mb-1.5" style={{color:"var(--mut)"}}>LIVE LOG · {fmtInt(st.log_total)} entries</div>
-      <div ref={logRef} className="flex-1 min-h-0 overflow-y-auto rounded-xl border" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-        <table className="w-full text-[12px]"><thead className="sticky top-0" style={{background:"var(--panel)"}}>
-          <tr style={{color:"var(--mut)"}}>{["ROW","PLATFORM","PRODUCT LINK","CUR","PRICE","STATUS"].map(h=>
-            <th key={h} className="text-left font-semibold px-3 py-2 text-[10px] tracking-wider border-b" style={{borderColor:"var(--border)"}}>{h}</th>)}</tr></thead>
-          <tbody>{st.entries.map((e,i)=><tr key={i} className="fadeup border-b" style={{borderColor:"var(--border)"}}>
-            <td className="px-3 py-1.5 font-mono" style={{color:"var(--mut)"}}>#{e.row}</td>
-            <td className="px-3 py-1.5"><Pill color={COL.blue}>{e.platform}</Pill></td>
-            <td className="px-3 py-1.5 font-mono"><a href={e.url} target="_blank" style={{color:"var(--blue)"}}>{trunc(e.url)}</a></td>
-            <td className="px-3 py-1.5 font-mono">{e.currency}</td>
-            <td className="px-3 py-1.5 font-mono text-right">{e.price}</td>
-            <td className="px-3 py-1.5" style={{color:statusColor(e)}}>{e.status==="Fetch Error"?(e.msg||"Fetch Error"):e.status}</td></tr>)}
-          {!st.entries.length&&<tr><td colSpan="6" className="text-center py-12" style={{color:"var(--mut)"}}>No log entries yet — hit Run from Start.</td></tr>}
-          </tbody></table>
-      </div>
-      <div className="text-[10.5px] mt-2 tracking-wider" style={{color:"var(--mut)"}}>• {st.message} • SUPABASE-BACKED • API V2.4.0</div>
+      <div className="grid grid-cols-6 gap-2.5 mb-4">{tiles.map(([k,v,c])=>
+        <div key={k} className="tile px-3 py-3"><div className="lbl" style={{fontSize:9.5}}>{k}</div>
+          <div className="mono mt-1.5" style={{fontSize:20,fontWeight:600,color:c}}>{v}</div></div>)}</div>
+      <div className="flex items-center justify-between mb-1.5"><div className="lbl">Stream Console</div>
+        <div className="flex items-center gap-2"><Pill c={COL.primary}>{st.running?"LIVE":"IDLE"}</Pill>
+          <button onClick={()=>{setRows([]);apiJSON("/api/pipe/clear_log",{});}} style={{color:"var(--outline)"}}><Icon n="trash" s={14}/></button></div></div>
+      <div className="flex justify-between lbl mb-1" style={{fontSize:10}}><span>row {fmtInt(st.current_row)} / {fmtInt(st.total_rows)}</span><span>{pct.toFixed(1)}%</span></div>
+      <div className="h-1.5 rounded mb-2 relative overflow-hidden" style={{background:"var(--c-high)"}}><div className="h-full relative" style={{width:pct+"%",background:"var(--primary)"}}>{st.running&&<span className="shine"/>}</div></div>
+      <div ref={logRef} className="flex-1 min-h-0 overflow-y-auto card mono" style={{fontSize:11.5,background:"var(--c-lowest,#0e0e10)"}}>
+        <table className="w-full"><tbody>{rows.map((e,i)=>{const[t,c]=tag(e);return(
+          <tr key={i} className="fadeup" style={{borderBottom:"1px solid var(--c-low)"}}>
+            <td className="px-3 py-1.5" style={{color:"var(--outline)",width:78}}>{e.t}</td>
+            <td className="px-2 py-1.5" style={{color:"var(--primary2)",width:120}}>[{(e.domain||"?").replace(/^www\./,"").toUpperCase().slice(0,12)}]</td>
+            <td className="px-2 py-1.5" style={{color:"var(--on-var)"}}>{trunc(e.url,46)}</td>
+            <td className="px-3 py-1.5 text-right" style={{width:62}}><span style={{color:c,fontWeight:600}}>{t}</span></td></tr>);})}
+          {!rows.length&&<tr><td className="text-center py-12" style={{color:"var(--outline)"}}>Stream idle — hit Run from Start.</td></tr>}
+        </tbody></table></div>
+      <div className="lbl mt-2" style={{fontSize:10}}>· {st.message} · SUPABASE-BACKED · TERMINAL V2.4</div>
     </div>
   </div>;
 }
 
 /* ===================== REVIEW ===================== */
-function Review({onMeta,admin}){
-  const [tab,setTab]=useState("mismatch");
-  const [vendors,setVendors]=useState([]);
-  const [vsel,setVsel]=useState([]);          // selected vendors (Excel filter)
-  const [items,setItems]=useState([]);
-  const [counts,setCounts]=useState({});
-  const [busy,setBusy]=useState(false);
-  const [gMarkup,setGMarkup]=useState(0);     // ONE global markup for all
-  const [gConvert,setGConvert]=useState(true);// ONE global FX convert for all
-  const [fxr,setFxr]=useState({USD:0,CAD:0,INR:1});
-  const load=useCallback(async()=>{setBusy(true);
-    const d=await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(vsel.join(","))}`);
-    setItems(d.items||[]);setCounts(d.counts||{});setBusy(false);onMeta&&onMeta();},[tab,vsel]);
+function Review({admin}){
+  const [tab,setTab]=useState("mismatch");const [items,setItems]=useState([]);const [counts,setCounts]=useState({});
+  const [sel,setSel]=useState(()=>new Set());const [fxr,setFxr]=useState({USD:0,CAD:0,INR:1});const [busy,setBusy]=useState(false);
+  const load=useCallback(async()=>{setBusy(true);const d=await api(`/api/review/items?kind=${tab}`);
+    setItems((d.items||[]).map(it=>({...it,_m:it.markup_pct||0})));setCounts(d.counts||{});setSel(new Set());setBusy(false);},[tab]);
   useEffect(()=>{load()},[load]);
-  useEffect(()=>{api(`/api/vendors?kind=${tab}`).then(d=>setVendors(d.vendors||[]))},[tab]);
   useEffect(()=>{api("/api/fx").then(d=>d.rates&&setFxr(d.rates))},[]);
-
-  // convert the raw live price to INR at the CURRENT rate (robust for old rows)
-  const liveInr=it=>{if(it.live_price==null)return null;const c=(it.currency||"INR").toUpperCase();
-    const r=(c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1);return it.live_price*r;};
-  const dInr=it=>{const li=liveInr(it);return (li!=null&&it.base_price!=null)?li-it.base_price:null;};
-  const projFinal=it=>{const r=gConvert?liveInr(it):it.live_price;return r==null?null:r*(1+(+gMarkup||0)/100)};
-  const decide=async(it,decision)=>{const r=await apiJSON("/api/review/decide",
-    {row:it.id,decision,ref:"live",markup_pct:gMarkup,convert:gConvert});
-    if(r.ok){toast(decision==="approved"?`Approved → ₹${fmt(r.final_price)}`:"Rejected","ok");load()}else toast(r.error||"Failed","err")};
-  const approveAll=async()=>{
-    if(!confirm(`Approve ALL ${items.length} ${tab} item(s) with +${gMarkup}% markup${gConvert?" and USD/CAD→INR conversion":""}? (Nothing is pushed to any store — approval only.)`))return;
-    const r=await apiJSON("/api/review/approve_all",{markup_pct:gMarkup,convert:gConvert,ref:"live",kind:tab,brands:vsel});
-    r.ok?toast(`Approved ${r.approved} item(s) at +${r.markup}%`,"ok"):toast(r.error||"Failed","err");load();};
-  const push=async(it)=>{toast("Pushing to store…");const r=await apiJSON("/api/review/push",{row:it.id});toast(r.status||"done",r.ok?"ok":"err");load()};
-  const rerun=async()=>{const r=await apiJSON("/api/review/rerun",{});r.ok?toast(`Re-running ${r.total} errors…`):toast(r.error,"err")};
-  const emailMismatch=async()=>{const to=prompt("Recipient email (leave blank for the default):","");if(to===null)return;
-    toast("Sending mismatch sheet…");const r=await apiJSON("/api/alerts/email_mismatch",to.trim()?{to:to.trim()}:{});
-    toast(r.ok?`Emailed ${r.count} mismatches → ${r.to}`:(r.error||"Send failed"),r.ok?"ok":"err")};
-  const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error,"var(--red)"],["resolved","Resolved",counts.matched,"var(--emerald)"]];
-
-  return <div className="h-full min-h-0 flex flex-col">
-    <div className="grid grid-cols-6 gap-2.5 mb-4">
-      <Stat k="TOTAL" v={fmtInt(counts.total)}/><Stat k="MATCHED" v={fmtInt(counts.matched)} color="var(--emerald)"/>
-      <Stat k="MISMATCH" v={fmtInt(counts.mismatch)} color="var(--amber)"/><Stat k="ERRORS" v={fmtInt(counts.error)} color="var(--red)"/>
-      <Stat k="APPROVED" v={fmtInt(counts.approved)} color="var(--blue)"/><Stat k="AWAITING" v={fmtInt(counts.awaiting)} color="var(--amber)"/>
+  const liveInr=it=>{if(it.live_price==null)return null;const c=(it.currency||"INR").toUpperCase();return it.live_price*((c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1));};
+  const diffPct=it=>{const li=liveInr(it);return(li!=null&&it.base_price)?((li-it.base_price)/it.base_price*100):null;};
+  const finalOf=it=>{if(it.final_price!=null)return it.final_price;const li=liveInr(it);return li==null?null:li*(1+(+it._m||0)/100);};
+  const setM=(id,v)=>setItems(x=>x.map(it=>it.id===id?{...it,_m:v}:it));
+  const decide=async(it,dec)=>{if(!admin)return toast("Admin only","err");const r=await apiJSON("/api/review/decide",{row:it.id,decision:dec,ref:"live",markup_pct:it._m,convert:true});
+    r.ok?toast(dec==="approved"?`Approved → ${inr(r.final_price)}`:"Flagged","ok"):toast(r.error||"Failed","err");load();};
+  const approveSelected=async()=>{if(!admin)return toast("Admin only","err");const ids=[...sel];if(!ids.length)return toast("Select rows first","err");
+    for(const it of items.filter(x=>sel.has(x.id)))await apiJSON("/api/review/decide",{row:it.id,decision:"approved",ref:"live",markup_pct:it._m,convert:true});
+    toast(`Approved ${ids.length} item(s)`,"ok");load();};
+  const toggle=id=>setSel(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});
+  const allSel=items.length&&sel.size===items.length;
+  const tabs=[["mismatch","Mismatches",counts.awaiting,COL.primary],["error","Errors",counts.error,COL.err],["resolved","Resolved",counts.matched,COL.sec]];
+  const matchRate=counts.total?Math.round((counts.matched/counts.total)*100):0;
+  return <div className="h-full min-h-0 flex flex-col overflow-auto">
+    <div className="flex items-start justify-between mb-4">
+      <div><h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.02em"}}>Review &amp; Approval Queue</h1>
+        <div className="text-[13px] mt-1" style={{color:"var(--on-var)"}}>Audit algorithmic price shifts and finalize valuations.</div></div>
+      <div className="flex gap-2.5">
+        <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13}/>Refresh Data</Btn>
+        <Btn kind="ghost" sm onClick={()=>window.location=`/api/export?kind=${tab==="resolved"?"all":tab}&fmt=csv`}><Icon n="dl" s={13}/>Export CSV</Btn>
+        <Btn kind="primary" sm onClick={approveSelected} disabled={!admin}><Icon n="check" s={13}/>Approve Selected</Btn></div>
     </div>
-
-    {/* ONE global control: markup + FX conversion applied to everything */}
-    <div className="flex items-center gap-3 mb-3 px-3.5 py-2.5 rounded-xl border flex-wrap"
-      style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-      <span className="text-[11px] tracking-wider" style={{color:"var(--mut)"}}>GLOBAL PRICING</span>
-      <div className="flex items-center gap-2">
-        <span className="text-[12px]" style={{color:"var(--mut)"}}>Markup</span>
-        <input type="number" value={gMarkup} onChange={e=>setGMarkup(e.target.value)}
-          className="w-20 rounded px-2 py-1.5 text-[12.5px] font-mono text-right"
-          style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/>
-        <span className="text-[12px]" style={{color:"var(--mut)"}}>%</span>
-      </div>
-      <div className="flex items-center gap-2">
-        <Toggle on={gConvert} onChange={setGConvert}/>
-        <span className="text-[12px]">Convert USD/CAD → INR</span>
-      </div>
-      <span className="text-[11px] font-mono" style={{color:"var(--mut)"}}>
-        FX: USD ₹{fmt(fxr.USD)} · CAD ₹{fmt(fxr.CAD)}</span>
-      <div className="ml-auto flex gap-2 items-center">
-        <ExcelFilter label="Vendor" selected={vsel} onChange={setVsel}
-          options={vendors.map(v=>({value:v.vendor,count:v.count}))}/>
-        <Btn kind="emerald" onClick={approveAll} disabled={!items.length||!admin} title={admin?"":"admin only"}>
-          <Icon n="check" s={13}/>Apply &amp; Approve all ({items.length})</Btn>
-      </div>
-    </div>
-
-    <div className="flex gap-1.5 mb-3 items-center">
-      {tabs.map(([k,lbl,n,c])=><button key={k} onClick={()=>{setTab(k);setVsel([])}} className="px-4 py-2 rounded-t-lg text-[13px] font-semibold border-b-2 navi"
-        style={{background:tab===k?"var(--panel2)":"transparent",borderColor:tab===k?c:"transparent",color:tab===k?"#fff":"var(--mut)"}}>
-        {lbl} <span className="font-mono text-[11px]" style={{color:c}}>{fmtInt(n)}</span></button>)}
-      <div className="ml-auto flex gap-2 items-center">
-        {tab==="error"&&<Btn kind="ghost" sm onClick={rerun}><Icon n="refresh" s={12}/>Re-run errors</Btn>}
-        {tab==="mismatch"&&<Btn kind="amber" sm onClick={emailMismatch}><Icon n="mail" s={12}/>Email sheet</Btn>}
-        <Btn kind="emerald" sm onClick={()=>window.location=`/api/export?kind=${tab==="resolved"?"all":tab}&fmt=xlsx`}><Icon n="dl" s={12}/>Export</Btn>
-      </div>
-    </div>
-    <div className="flex-1 min-h-0 overflow-auto rounded-xl border" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-      <table className="w-full text-[12px]"><thead className="sticky top-0" style={{background:"var(--panel)"}}>
-        <tr style={{color:"var(--mut)"}}>{["PRODUCT","VENDOR","BASE ₹","LIVE (site)","≈ ₹ LIVE","Δ ₹","FINAL ₹","ACTIONS"].map(h=>
-          <th key={h} className="text-left font-semibold px-3 py-2 text-[10px] tracking-wider border-b whitespace-nowrap" style={{borderColor:"var(--border)"}}>{h}</th>)}</tr></thead>
-        <tbody>{items.map(it=>{const li=liveInr(it);const dl=dInr(it);const up=(dl||0)>0;const pf=it.final_price!=null?it.final_price:projFinal(it);return <tr key={it.id} className="border-b" style={{borderColor:"var(--border)"}}>
-          <td className="px-3 py-2 font-mono"><a href={it.url} target="_blank" style={{color:"var(--blue)"}}>{trunc(it.url,34)}</a></td>
-          <td className="px-3 py-2 font-mono text-[11px]">{it.brand}</td>
-          <td className="px-3 py-2 font-mono text-right">{fmt(it.base_price)}</td>
-          <td className="px-3 py-2 font-mono text-right">{fmt(it.live_price)} <span style={{color:"var(--mut)"}}>{it.currency}</span></td>
-          <td className="px-3 py-2 font-mono text-right">{fmt(li)}</td>
-          <td className="px-3 py-2 font-mono text-right" style={{color:up?"var(--red)":"var(--emerald)"}}>{dl!=null?(up?"+":"")+fmt(dl):"—"}</td>
-          <td className="px-3 py-2 font-mono text-right font-bold" style={{color:it.final_price!=null?"var(--emerald)":"var(--mut)"}}>{pf!=null?fmt(pf):"—"}</td>
-          <td className="px-3 py-2"><div className="flex gap-1.5 items-center">
-            {it.decision==="approved"?<Pill color={COL.emerald}>approved</Pill>:it.decision==="rejected"?<Pill color={COL.red}>rejected</Pill>:
-              <><Btn kind="emerald" sm onClick={()=>decide(it,"approved")} disabled={!admin} title={admin?"Approve at global markup":"admin only"}><Icon n="check" s={11}/></Btn>
-                <Btn kind="red" sm onClick={()=>decide(it,"rejected")} disabled={!admin}><Icon n="x" s={11}/></Btn></>}
-            <Btn kind="blue" sm onClick={()=>push(it)} disabled={it.decision!=="approved"||!admin} title="Push to Store"><Icon n="cloud" s={12}/></Btn>
-          </div></td></tr>})}
-        {!items.length&&<tr><td colSpan="8" className="text-center py-12" style={{color:"var(--mut)"}}>{busy?"Loading…":"Nothing here."}</td></tr>}
-        </tbody></table>
+    <div className="flex gap-1.5 mb-3">{tabs.map(([k,l,n,c])=>
+      <button key={k} onClick={()=>setTab(k)} className="navi flex items-center gap-2 px-4 py-2 rounded-md text-[13px] font-semibold"
+        style={{background:tab===k?COL.primary:"var(--c-low)",color:tab===k?"#fff":"var(--on-var)",border:"1px solid "+(tab===k?COL.primary:"var(--ov)")}}>
+        {l}<span className="mono" style={{fontSize:10,padding:"1px 6px",borderRadius:4,background:tab===k?"rgba(255,255,255,.2)":c+"22",color:tab===k?"#fff":c}}>{fmtInt(n)}</span></button>)}</div>
+    <div className="card overflow-auto">
+      <table className="w-full text-[12.5px]"><thead><tr className="lbl" style={{background:"var(--surface)"}}>
+        <th className="px-3 py-2.5 text-left"><span onClick={()=>setSel(allSel?new Set():new Set(items.map(i=>i.id)))} className="inline-flex cursor-pointer" style={{width:15,height:15,borderRadius:3,border:"1px solid var(--outline)",background:allSel?COL.primary:"transparent"}}>{allSel&&<Icon n="check" s={11} c="#fff"/>}</span></th>
+        {["Brand","Product ID","Base","Live (site)","≈₹ Live","Diff %","Markup %","Final ₹","Status","Actions"].map(h=>
+          <th key={h} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
+        <tbody>{items.map(it=>{const li=liveInr(it),dp=diffPct(it),up=(dp||0)>0,f=finalOf(it);const status=it.decision==="approved"?["APPROVED",COL.sec]:it.decision==="rejected"?["FLAGGED",COL.ter]:["NEEDS REVIEW",COL.ter];return(
+          <tr key={it.id} style={{borderTop:"1px solid var(--c-low)"}}>
+            <td className="px-3 py-2.5"><span onClick={()=>toggle(it.id)} className="inline-flex cursor-pointer" style={{width:15,height:15,borderRadius:3,border:"1px solid var(--outline)",background:sel.has(it.id)?COL.primary:"transparent"}}>{sel.has(it.id)&&<Icon n="check" s={11} c="#fff"/>}</span></td>
+            <td className="px-3 py-2.5"><div className="flex items-center gap-2"><BrandDot b={it.brand}/><span className="text-[12px]">{it.brand.replace(/^www\./,"")}</span></div></td>
+            <td className="px-3 py-2.5 mono" style={{color:"var(--outline)",fontSize:11}}>{pid(it.url)}</td>
+            <td className="px-3 py-2.5 mono text-right">{inr(it.base_price)}</td>
+            <td className="px-3 py-2.5 mono text-right">{fmt(it.live_price)} <span style={{color:"var(--outline)",fontSize:10}}>{it.currency}</span></td>
+            <td className="px-3 py-2.5 mono text-right">{inr(li)}</td>
+            <td className="px-3 py-2.5 mono text-right" style={{color:up?COL.err:COL.sec}}>{dp!=null?(up?"+":"")+dp.toFixed(1)+"%":"—"}</td>
+            <td className="px-3 py-2.5"><input type="number" value={it._m} onChange={e=>setM(it.id,e.target.value)} className="inp mono text-right" style={{width:64,padding:"5px 7px"}}/></td>
+            <td className="px-3 py-2.5 mono text-right font-semibold" style={{color:it.final_price!=null?COL.sec:"var(--on)"}}>{inr(f)}</td>
+            <td className="px-3 py-2.5"><Pill c={status[1]}>{status[0]}</Pill></td>
+            <td className="px-3 py-2.5"><div className="flex gap-2 items-center">
+              <button onClick={()=>decide(it,"approved")} title="Approve" style={{color:COL.sec}}><Icon n="check" s={16}/></button>
+              <button onClick={()=>decide(it,"rejected")} title="Flag" style={{color:COL.ter}}><Icon n="flag" s={15}/></button></div></td></tr>);})}
+          {!items.length&&<tr><td colSpan="11" className="text-center py-12" style={{color:"var(--outline)"}}>{busy?"Loading…":"Nothing here."}</td></tr>}
+        </tbody></table></div>
+    <div className="grid grid-cols-3 gap-3 mt-4">
+      <div className="card p-4"><div className="lbl">Queue Velocity</div><div style={{fontSize:24,fontWeight:600,color:COL.sec,marginTop:6}}>{matchRate}% Match Rate</div></div>
+      <div className="card p-4"><div className="lbl">Awaiting Approval</div><div style={{fontSize:24,fontWeight:600,marginTop:6}}>{fmtInt(counts.awaiting)} items</div></div>
+      <div className="p-4 rounded-lg" style={{background:COL.primary}}><div className="lbl" style={{color:"rgba(255,255,255,.7)"}}>Auto-Approval Safe Zone</div>
+        <div style={{fontSize:24,fontWeight:700,color:"#fff",marginTop:6}}>{matchRate}%</div>
+        <div className="text-[11px] mt-1" style={{color:"rgba(255,255,255,.8)"}}>{fmtInt(counts.matched)} matched of {fmtInt(counts.total)}</div></div>
     </div>
   </div>;
 }
 
 /* ===================== ALERTS ===================== */
 function Alerts(){
-  const [thr,setThr]=useState(5);const [dir,setDir]=useState("all");const [brand,setBrand]=useState("");
-  const [brands,setBrands]=useState([]);const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
-  const load=useCallback(async()=>{const r=await api(`/api/alerts?threshold=${thr}&direction=${dir}&brand=${encodeURIComponent(brand)}`);setD(r);},[thr,dir,brand]);
+  const [thr,setThr]=useState(15);const [dir,setDir]=useState("all");const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
+  const load=useCallback(async()=>{const r=await api(`/api/alerts?threshold=${thr}&direction=${dir}`);setD(r);},[thr,dir]);
   useEffect(()=>{load()},[load]);
-  useEffect(()=>{api("/api/alerts/brands").then(r=>setBrands(r.brands||[]))},[]);
-  const seg=[["all","All Movements"],["drop","Price Drops"],["spike","Spikes"]];
-  return <div className="h-full min-h-0 flex flex-col">
-    <div className="flex items-end gap-3 mb-4 flex-wrap">
-      <div><div className="text-[10px] mb-1" style={{color:"var(--mut)"}}>THRESHOLD %</div>
-        <input type="number" value={thr} onChange={e=>setThr(e.target.value)} className="w-24 rounded-lg px-2.5 py-1.5 text-[12.5px] font-mono"
-          style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/></div>
-      <div><div className="text-[10px] mb-1" style={{color:"var(--mut)"}}>DIRECTION</div>
-        <div className="flex rounded-lg overflow-hidden border" style={{borderColor:"var(--border)"}}>
-          {seg.map(([k,l])=><button key={k} onClick={()=>setDir(k)} className="px-3.5 py-1.5 text-[12px] font-semibold navi"
-            style={{background:dir===k?"var(--blue)":"var(--panel2)",color:dir===k?"#fff":"var(--mut)"}}>{l}</button>)}</div></div>
-      <div><div className="text-[10px] mb-1" style={{color:"var(--mut)"}}>BRAND</div>
-        <select value={brand} onChange={e=>setBrand(e.target.value)} className="rounded-lg px-2.5 py-1.5 text-[12px] w-52"
-          style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}>
-          <option value="">All brands</option>{brands.map(b=><option key={b.brand} value={b.brand}>{b.brand} ({b.count})</option>)}</select></div>
-      <Btn kind="blue" sm onClick={load}><Icon n="refresh" s={12}/>Refresh</Btn>
+  const seg=[["all","All Movements"],["drop","Drops"],["spike","Spikes"]];
+  // velocity: bucket by hour-of-day from created_at
+  const buckets={};(d.items||[]).forEach(it=>{const h=(it.created_at||"").slice(11,13)||"--";buckets[h]=(buckets[h]||0)+1;});
+  const vlabels=Object.keys(buckets).sort().slice(-8);const vdata=vlabels.map(h=>buckets[h]);
+  // distribution: share by brand
+  const bd={};(d.items||[]).forEach(it=>{const b=(it.brand||"?").replace(/^www\./,"");bd[b]=(bd[b]||0)+1;});
+  const dist=Object.entries(bd).sort((a,b)=>b[1]-a[1]).slice(0,4);const dtot=(d.items||[]).length||1;
+  const dc=[COL.sec,COL.ter,COL.primary,COL.out];
+  return <div className="h-full min-h-0 overflow-auto">
+    <h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.02em"}}>Price Movement Alerts</h1>
+    <div className="text-[13px] mt-1 mb-5" style={{color:"var(--on-var)"}}>Real-time volatility monitoring across designer domains.</div>
+    <div className="card p-4 flex items-end gap-6 flex-wrap mb-5">
+      <div><div className="lbl mb-1.5">Movement Threshold</div>
+        <div className="flex items-center gap-2"><input type="number" className="inp mono" style={{width:90}} value={thr} onChange={e=>setThr(e.target.value)}/><span className="lbl">%</span></div></div>
+      <div><div className="lbl mb-1.5">Filter Type</div>
+        <div className="flex rounded-md overflow-hidden" style={{border:"1px solid var(--ov)"}}>{seg.map(([k,l])=>
+          <button key={k} onClick={()=>setDir(k)} className="navi px-4 py-2 text-[12.5px] font-semibold"
+            style={{background:dir===k?COL.primary:"var(--c-low)",color:dir===k?"#fff":"var(--on-var)"}}>{l}</button>)}</div></div>
+      <div className="ml-auto"><div className="lbl mb-1.5">Time Window</div>
+        <div className="flex items-center gap-2"><span className="inp flex items-center gap-2" style={{width:160}}><Icon n="clock" s={13} c="var(--outline)"/>Latest run</span>
+          <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13}/></Btn></div></div>
     </div>
-    <div className="grid grid-cols-4 gap-2.5 mb-4">
-      <Stat k="ALERTS" v={fmtInt(d.total)}/><Stat k="DROPS" v={fmtInt(d.drops)} color="var(--emerald)"/>
-      <Stat k="SPIKES" v={fmtInt(d.spikes)} color="var(--red)"/><Stat k="THRESHOLD" v={`≥ ${thr}%`} color="var(--blue)"/>
-    </div>
-    <div className="flex-1 min-h-0 overflow-auto rounded-xl border" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-      <table className="w-full text-[12px]"><thead className="sticky top-0" style={{background:"var(--panel)"}}>
-        <tr style={{color:"var(--mut)"}}>{["PRODUCT","BRAND","DIR","PREV","NOW","Δ","CHANGE %","LAST SEEN"].map(h=>
-          <th key={h} className="text-left font-semibold px-3 py-2 text-[10px] tracking-wider border-b whitespace-nowrap" style={{borderColor:"var(--border)"}}>{h}</th>)}</tr></thead>
-        <tbody>{(d.items||[]).map((it,i)=>{const up=it.direction==="spike";const c=up?"var(--red)":"var(--emerald)";return<tr key={i} className="border-b" style={{borderColor:"var(--border)"}}>
-          <td className="px-3 py-2 font-mono"><a href={it.url} target="_blank" style={{color:"var(--blue)"}}>{trunc(it.url,38)}</a></td>
-          <td className="px-3 py-2 font-mono text-[11px]">{it.brand}</td>
-          <td className="px-3 py-2"><span className="inline-flex items-center gap-1 font-bold text-[11px]" style={{color:c}}><Icon n={up?"up":"down"} s={13}/>{up?"SPIKE":"DROP"}</span></td>
-          <td className="px-3 py-2 font-mono text-right">{fmt(it.prev)}</td>
-          <td className="px-3 py-2 font-mono text-right">{fmt(it.live_price)}</td>
-          <td className="px-3 py-2 font-mono text-right" style={{color:c}}>{fmt(it.abs_change)}</td>
-          <td className="px-3 py-2 font-mono text-right font-bold" style={{color:c}}>{it.pct>0?"+":""}{it.pct}%</td>
-          <td className="px-3 py-2 text-[11px]" style={{color:"var(--mut)"}}>{(it.created_at||"").slice(0,19).replace("T"," ")}</td></tr>})}
-        {!(d.items||[]).length&&<tr><td colSpan="8" className="text-center py-12" style={{color:"var(--mut)"}}>No movements ≥ {thr}% — run the pipeline twice to compare.</td></tr>}
-        </tbody></table>
+    <div className="card overflow-auto mb-5">
+      <table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Timestamp","Brand","Product ID","Previous","New Price","Movement","Action"].map(h=>
+        <th key={h} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
+        <tbody>{(d.items||[]).slice(0,40).map((it,i)=>{const up=it.direction==="spike",c=up?COL.err:COL.sec;return(
+          <tr key={i} style={{borderTop:"1px solid var(--c-low)"}}>
+            <td className="px-3 py-2.5 mono" style={{color:"var(--outline)",fontSize:11}}>{(it.created_at||"").slice(0,19).replace("T"," ")}</td>
+            <td className="px-3 py-2.5"><div className="flex items-center gap-2"><BrandDot b={it.brand}/><span className="text-[12px]">{(it.brand||"").replace(/^www\./,"")}</span></div></td>
+            <td className="px-3 py-2.5 mono" style={{color:"var(--primary2)",fontSize:11}}>{pid(it.url)}</td>
+            <td className="px-3 py-2.5 mono text-right">{inr(it.prev)}</td>
+            <td className="px-3 py-2.5 mono text-right">{inr(it.live_price)}</td>
+            <td className="px-3 py-2.5"><span className="inline-flex items-center gap-1 mono font-semibold" style={{color:c}}><Icon n={up?"up":"down"} s={13}/>{it.pct>0?"+":""}{it.pct}%</span></td>
+            <td className="px-3 py-2.5"><Btn kind="ghost" sm onClick={()=>window.open(it.url,"_blank")}>Quick View</Btn></td></tr>);})}
+          {!(d.items||[]).length&&<tr><td colSpan="7" className="text-center py-12" style={{color:"var(--outline)"}}>No movements ≥ {thr}% — run the pipeline twice to compare.</td></tr>}
+        </tbody></table></div>
+    <div className="grid grid-cols-2 gap-3">
+      <div className="card p-4"><div className="lbl mb-3">Alert Velocity (by hour)</div>
+        <ChartBox type="bar" h={180} labels={vlabels.map(h=>h+":00")} datasets={[{data:vdata,backgroundColor:COL.sec+"cc",borderRadius:4}]}/></div>
+      <div className="card p-4"><div className="lbl mb-3">Volatility Distribution</div>
+        <div className="space-y-3 pt-1">{dist.map(([b,n],i)=>{const p=Math.round(n/dtot*100);return(
+          <div key={b}><div className="flex justify-between text-[12px] mb-1"><span>{b}</span><span className="mono" style={{color:dc[i]}}>{p}%</span></div>
+            <div className="h-1.5 rounded" style={{background:"var(--c-high)"}}><div className="h-full rounded" style={{width:p+"%",background:dc[i]}}/></div></div>);})}
+          {!dist.length&&<div className="lbl">no data yet</div>}</div></div>
     </div>
   </div>;
 }
 
-/* ===================== INTEGRATIONS ===================== */
+/* ===================== INTEGRATIONS (single store + live brands) ===================== */
 function Integrations({admin}){
-  const [rows,setRows]=useState([]);
-  const load=async()=>{const d=await api("/api/integrations");setRows(d.brands||[])};
-  useEffect(()=>{load()},[]);
-  const set=(b,k,v)=>setRows(x=>x.map(r=>r.brand===b?{...r,[k]:v}:r));
-  const save=async(r)=>{const d=await apiJSON("/api/integrations/save",{brand:r.brand,shop_domain:r.shop_domain,access_token:r._token||"",api_version:r.api_version||"2024-10",dry_run:r.dry_run});
-    d.ok?toast("Saved "+r.brand,"ok"):toast("Save failed","err");load()};
-  const verify=async(r)=>{set(r.brand,"_v","…");const d=await apiJSON("/api/integrations/verify",{brand:r.brand});set(r.brand,"_v",d.status);toast(d.status,d.ok?"ok":"err")};
-  const del=async(r)=>{await apiJSON("/api/integrations/delete",{brand:r.brand});toast("Cleared "+r.brand);load()};
+  const [cfg,setCfg]=useState({shop_domain:"",api_version:"2024-10",dry_run:true,has_token:false});
+  const [token,setToken]=useState("");const [vstatus,setVstatus]=useState("");const [brands,setBrands]=useState([]);
+  const loadCfg=()=>api("/api/integration").then(d=>setCfg(d));
+  const loadBrands=()=>api("/api/integrations").then(d=>setBrands(d.brands||[]));
+  useEffect(()=>{loadCfg();loadBrands();const t=setInterval(loadBrands,5000);return()=>clearInterval(t)},[]);
+  const save=async()=>{if(!admin)return toast("Admin only","err");const d=await apiJSON("/api/integration/save",{shop_domain:cfg.shop_domain,access_token:token,api_version:cfg.api_version,dry_run:cfg.dry_run});
+    d.ok?toast("Store saved","ok"):toast("Save failed","err");setToken("");loadCfg();};
+  const verify=async()=>{setVstatus("checking…");const d=await apiJSON("/api/integration/verify",{});setVstatus(d.status);toast(d.status,d.ok?"ok":"err");};
   return <div className="h-full min-h-0 overflow-auto">
-    <div className="rounded-xl border overflow-hidden" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-      <table className="w-full text-[12px]"><thead style={{background:"var(--panel)"}}>
-        <tr style={{color:"var(--mut)"}}>{["MERCHANT DOMAIN","PRODUCTS","STORE DOMAIN","ACCESS TOKEN","API","MODE","ACTIONS"].map(h=>
-          <th key={h} className="text-left font-semibold px-3 py-2.5 text-[10px] tracking-wider border-b" style={{borderColor:"var(--border)"}}>{h}</th>)}</tr></thead>
-        <tbody>{rows.map(r=><tr key={r.brand} className="border-b" style={{borderColor:"var(--border)"}}>
-          <td className="px-3 py-2.5 font-mono">{r.brand}<div className="text-[10px]" style={{color:"var(--mut)"}}>{r.mismatches} mismatches</div></td>
-          <td className="px-3 py-2.5 font-mono">{fmtInt(r.products)}</td>
-          <td className="px-3 py-2.5"><input defaultValue={r.shop_domain} placeholder="store.myshopify.com" onChange={e=>set(r.brand,"shop_domain",e.target.value)}
-            className="w-44 rounded px-2 py-1 text-[11.5px] font-mono" style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/></td>
-          <td className="px-3 py-2.5"><input type="password" placeholder={r.has_token?"••••••••":"shpat_…"} onChange={e=>set(r.brand,"_token",e.target.value)}
-            className="w-36 rounded px-2 py-1 text-[11.5px] font-mono" style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/></td>
-          <td className="px-3 py-2.5"><input defaultValue={r.api_version} onChange={e=>set(r.brand,"api_version",e.target.value)}
-            className="w-20 rounded px-2 py-1 text-[11.5px] font-mono" style={{background:"var(--panel2)",border:"1px solid var(--border)",color:"#e4e4e7"}}/></td>
-          <td className="px-3 py-2.5"><div className="flex items-center gap-2"><Toggle on={!r.dry_run} onChange={v=>set(r.brand,"dry_run",!v)}/>
-            <span className="text-[10.5px]" style={{color:r.dry_run?"var(--amber)":"var(--emerald)"}}>{r.dry_run?"Dry Run":"Live"}</span></div></td>
-          <td className="px-3 py-2.5"><div className="flex gap-1.5">
-            <Btn kind="blue" sm onClick={()=>save(r)} disabled={!admin} title={admin?"":"admin only"}><Icon n="check" s={11}/>Save</Btn>
-            <Btn kind="ghost" sm onClick={()=>verify(r)} disabled={!admin}><Icon n="plug" s={11}/>Verify</Btn>
-            <Btn kind="red" sm onClick={()=>del(r)} disabled={!admin}><Icon n="x" s={11}/></Btn></div>
-            {r._v&&<div className="text-[10px] mt-1" style={{color:"var(--mut)"}}>{r._v}</div>}</td></tr>)}
-        {!rows.length&&<tr><td colSpan="7" className="text-center py-12" style={{color:"var(--mut)"}}>No brands yet — import a catalog or run the pipeline.</td></tr>}
-        </tbody></table>
+    <h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.02em"}}>Integrations</h1>
+    <div className="text-[13px] mt-1 mb-5" style={{color:"var(--on-var)"}}>One Shopify store · brands sync live from the database.</div>
+    <div className="grid grid-cols-[420px_1fr] gap-5">
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-4"><div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background:"#5a3fe0"}}><Icon n="bolt" s={16} c="#fff"/></div>
+          <div><div className="font-semibold text-[14px]">Shopify Store</div><div className="lbl" style={{fontSize:10}}>{cfg.has_token?"connected":"not connected"}</div></div>
+          <span className="ml-auto"><Pill c={cfg.dry_run?COL.ter:COL.sec}>{cfg.dry_run?"DRY RUN":"LIVE"}</Pill></span></div>
+        <div className="lbl mb-1.5">Store Domain</div>
+        <input className="inp mono mb-3" placeholder="your-store.myshopify.com" value={cfg.shop_domain||""} onChange={e=>setCfg({...cfg,shop_domain:e.target.value})}/>
+        <div className="lbl mb-1.5">Admin API Access Token</div>
+        <input type="password" className="inp mono mb-3" placeholder={cfg.has_token?"•••••••• (saved)":"shpat_…"} value={token} onChange={e=>setToken(e.target.value)}/>
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div><div className="lbl mb-1.5">API Version</div><input className="inp mono" value={cfg.api_version||""} onChange={e=>setCfg({...cfg,api_version:e.target.value})}/></div>
+          <div className="flex items-end gap-2 pb-1"><Toggle on={!cfg.dry_run} onChange={v=>setCfg({...cfg,dry_run:!v})}/><span className="text-[12px]" style={{color:cfg.dry_run?COL.ter:COL.sec}}>{cfg.dry_run?"Dry run":"Live push"}</span></div></div>
+        <div className="flex gap-2"><Btn kind="primary" onClick={save} disabled={!admin}><Icon n="check" s={13}/>Save</Btn>
+          <Btn kind="ghost" onClick={verify}><Icon n="share" s={13}/>Verify</Btn></div>
+        {vstatus&&<div className="lbl mt-3" style={{fontSize:10,color:"var(--on-var)"}}>{vstatus}</div>}
+        <div className="lbl mt-4" style={{fontSize:10,lineHeight:1.6}}>Approved prices for every brand push to this one store. Tokens are encrypted at rest.</div>
+      </div>
+      <div className="card overflow-auto">
+        <div className="flex items-center justify-between px-4 py-3" style={{borderBottom:"1px solid var(--ov)"}}>
+          <div className="lbl">Brands · live from Supabase</div><span className="flex items-center gap-2 lbl" style={{fontSize:10}}><span className="w-1.5 h-1.5 rounded-full pdot" style={{background:COL.sec}}/>auto-refresh</span></div>
+        <table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Brand","Products","Mismatches"].map(h=>
+          <th key={h} className="px-4 py-2.5 text-left">{h}</th>)}</tr></thead>
+          <tbody>{brands.map(b=>(
+            <tr key={b.brand} style={{borderTop:"1px solid var(--c-low)"}}>
+              <td className="px-4 py-2.5"><div className="flex items-center gap-2"><BrandDot b={b.brand}/><span>{b.brand.replace(/^www\./,"")}</span></div></td>
+              <td className="px-4 py-2.5 mono">{fmtInt(b.products)}</td>
+              <td className="px-4 py-2.5 mono" style={{color:b.mismatches?COL.ter:"var(--outline)"}}>{fmtInt(b.mismatches)}</td></tr>))}
+            {!brands.length&&<tr><td colSpan="3" className="text-center py-10" style={{color:"var(--outline)"}}>No brands yet.</td></tr>}
+          </tbody></table></div>
     </div>
+  </div>;
+}
+
+/* ===================== SETTINGS / OWNER CONSOLE ===================== */
+function Settings({me}){
+  const owner=me&&me.role==="owner";
+  const [sessions,setSessions]=useState([]);const [users,setUsers]=useState([]);
+  const load=()=>{if(!owner)return;api("/api/admin/sessions").then(d=>setSessions(d.sessions||[]));api("/api/admin/users").then(d=>setUsers(d.users||[]));};
+  useEffect(()=>{load();if(owner){const t=setInterval(()=>api("/api/admin/sessions").then(d=>setSessions(d.sessions||[])),5000);return()=>clearInterval(t);}},[owner]);
+  const setRole=async(email,role)=>{await apiJSON("/api/admin/users/role",{email,role});toast("Role updated","ok");load();};
+  const del=async(email)=>{if(!confirm("Delete "+email+"?"))return;const r=await apiJSON("/api/admin/users/delete",{email});r.ok?toast("Deleted","ok"):toast(r.error,"err");load();};
+  if(!owner) return <div className="h-full overflow-auto">
+    <h1 style={{fontSize:30,fontWeight:600}}>Settings</h1>
+    <div className="card p-5 mt-4 max-w-md"><div className="lbl mb-2">Account</div>
+      <div className="text-[14px]">{me&&me.email}</div><div className="lbl mt-1">{me&&me.role}</div>
+      <a href="/logout" className="inline-flex items-center gap-1.5 mt-4 font-semibold rounded-md navi" style={{padding:"9px 15px",fontSize:13,background:"var(--c-low)",border:"1px solid var(--ov)",color:"var(--on)"}}><Icon n="logout" s={14}/>Sign out</a></div>
+    <div className="lbl mt-4">The owner console (live sessions &amp; user management) is visible to the owner only.</div></div>;
+  return <div className="h-full overflow-auto">
+    <h1 style={{fontSize:30,fontWeight:600,letterSpacing:"-.02em"}}>Owner Console</h1>
+    <div className="text-[13px] mt-1 mb-5" style={{color:"var(--on-var)"}}>Live sessions and user management · owner-only.</div>
+    <div className="card overflow-auto mb-5">
+      <div className="flex items-center gap-2 px-4 py-3 lbl" style={{borderBottom:"1px solid var(--ov)"}}><Icon n="users" s={14}/>Active Sessions
+        <span className="ml-2 mono" style={{color:COL.sec}}>{sessions.filter(s=>s.active).length} live</span></div>
+      <table className="w-full text-[12.5px]"><thead><tr className="lbl">{["User","Role","IP","Status","Idle","Session age"].map(h=><th key={h} className="px-4 py-2.5 text-left">{h}</th>)}</tr></thead>
+        <tbody>{sessions.map((s,i)=>(<tr key={i} style={{borderTop:"1px solid var(--c-low)"}}>
+          <td className="px-4 py-2.5">{s.email}</td><td className="px-4 py-2.5"><Pill c={s.role==="owner"?COL.primary:s.role==="admin"?COL.sec:COL.out}>{s.role}</Pill></td>
+          <td className="px-4 py-2.5 mono" style={{color:"var(--outline)"}}>{s.ip}</td>
+          <td className="px-4 py-2.5">{s.active?<span style={{color:COL.sec}}>● active</span>:<span style={{color:"var(--outline)"}}>idle</span>}</td>
+          <td className="px-4 py-2.5 mono">{s.idle_s}s</td><td className="px-4 py-2.5 mono">{Math.floor(s.age_s/60)}m</td></tr>))}
+          {!sessions.length&&<tr><td colSpan="6" className="text-center py-8" style={{color:"var(--outline)"}}>No active sessions.</td></tr>}
+        </tbody></table></div>
+    <div className="card overflow-auto">
+      <div className="flex items-center gap-2 px-4 py-3 lbl" style={{borderBottom:"1px solid var(--ov)"}}><Icon n="users" s={14}/>Users ({users.length})</div>
+      <table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Email","Role","Created","Actions"].map(h=><th key={h} className="px-4 py-2.5 text-left">{h}</th>)}</tr></thead>
+        <tbody>{users.map(u=>(<tr key={u.id} style={{borderTop:"1px solid var(--c-low)"}}>
+          <td className="px-4 py-2.5">{u.email}</td>
+          <td className="px-4 py-2.5"><select className="inp" style={{width:110,padding:"5px 7px"}} value={u.role} onChange={e=>setRole(u.email,e.target.value)}>
+            <option value="owner">owner</option><option value="admin">admin</option><option value="viewer">viewer</option></select></td>
+          <td className="px-4 py-2.5 mono" style={{color:"var(--outline)",fontSize:11}}>{(u.created_at||"").slice(0,10)}</td>
+          <td className="px-4 py-2.5">{u.email!==(me&&me.email)&&<button onClick={()=>del(u.email)} style={{color:COL.err}}><Icon n="trash" s={15}/></button>}</td></tr>))}
+        </tbody></table></div>
   </div>;
 }
 
 /* ===================== SHELL ===================== */
 function App(){
-  const [view,setView]=useState("home");
-  const [meta,setMeta]=useState({counts:{},alerts:0});
-  const [run,setRun]=useState({running:false,phase:"idle"});
-  const [me,setMe]=useState(null);
-  const admin=!!(me&&me.role==="admin");
+  const [view,setView]=useState("pipeline");
+  const [me,setMe]=useState(null);const [run,setRun]=useState({running:false});
+  const admin=!!(me&&(me.role==="admin"||me.role==="owner"));
   useEffect(()=>{api("/api/me").then(d=>{if(d.email)setMe(d)})},[]);
-  const loadMeta=useCallback(async()=>{const d=await api("/api/meta");if(d.counts)setMeta(d)},[]);
-  useEffect(()=>{loadMeta();const t=setInterval(loadMeta,6000);return()=>clearInterval(t)},[loadMeta]);
-  useEffect(()=>{const t=setInterval(async()=>{const d=await api("/api/pipe/status?cursor=999999999");if(d.running!==undefined)setRun(d)},4000);return()=>clearInterval(t)},[]);
-  const nav=[["home","Home","home",null],["pipeline","Pipeline","play",null],
-    ["review","Review & Approve","check",meta.counts.awaiting],
-    ["alerts","Alerts","bell",meta.alerts],["integrations","Integrations","plug",null]];
-  const titles={home:"Insights",pipeline:"Pipeline",review:"Review & Approve",alerts:"Alerts",integrations:"Integrations"};
-  const runPill=run.running?`Run: ${run.phase==="safe_retry"?"Safe-retry…":"Processing…"}`:"Idle";
-
+  useEffect(()=>{const t=setInterval(async()=>{const d=await api("/api/pipe/status?cursor=999999999");if(d.running!==undefined)setRun(d)},5000);return()=>clearInterval(t)},[]);
+  const nav=[["pipeline","Pipeline","pipeline"],["review","Review","review"],["alerts","Alerts","alerts"],["integrations","Integrations","integrations"]];
   return <div className="flex h-screen" style={{background:"var(--bg)"}}>
     <Toaster/>
-    {/* rail */}
-    <nav className="w-[220px] shrink-0 flex flex-col p-3 border-r" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-      <div className="flex items-center gap-2.5 px-2 py-2 mb-4">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background:"linear-gradient(135deg,var(--blue),var(--emerald))"}}><Icon n="zap" s={17} c="#fff"/></div>
-        <div><div className="font-extrabold tracking-tight">PriceSync</div><div className="text-[10px]" style={{color:"var(--mut)"}}>v2.4.0</div></div>
-      </div>
-      {nav.map(([k,lbl,ic,n])=><button key={k} onClick={()=>setView(k)} className="navi flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[13px] font-semibold mb-1 relative"
-        style={{background:view===k?hexA(COL.emerald,.12):"transparent",color:view===k?"#fff":"var(--mut)",
-          borderLeft:"2px solid "+(view===k?"var(--emerald)":"transparent")}}>
-        <Icon n={ic} s={16}/><span>{lbl}</span>
-        {n>0&&<Badge color={k==="alerts"?COL.red:COL.amber}>{n}</Badge>}</button>)}
-      <button className="navi flex items-center gap-2 px-3 py-2.5 rounded-lg text-[13px] font-semibold mt-2 justify-center" style={{background:"var(--blue)",color:"#fff"}}
-        onClick={()=>{setView("pipeline");toast("Drop a sheet in the Pipeline panel to add products")}}><Icon n="plus" s={15}/>New Import</button>
-      <div className="mt-auto pt-3 border-t flex items-center justify-between" style={{borderColor:"var(--border)"}}>
-        <div className="flex items-center gap-2 text-[11px]" style={{color:"var(--mut)"}}>
-          <span className="w-2 h-2 rounded-full pdot" style={{background:"var(--emerald)"}}/>DB: Connected</div>
-        <button style={{color:"var(--mut)"}}><Icon n="gear" s={15}/></button></div>
+    <nav className="shrink-0 flex flex-col p-3" style={{width:220,background:"var(--surface)",borderRight:"1px solid var(--ov)"}}>
+      <div className="flex items-center gap-2.5 px-2 py-2 mb-5">
+        <div style={{width:30,height:30,borderRadius:7,background:"var(--primary)"}}/>
+        <div><div style={{fontWeight:700,fontSize:15}}>MBO Tracker</div><div className="lbl" style={{fontSize:9.5}}>Terminal v2.4</div></div></div>
+      {nav.map(([k,l,ic])=><button key={k} onClick={()=>setView(k)} className="navi flex items-center gap-3 px-3 py-2.5 rounded-md text-[13.5px] font-semibold mb-1"
+        style={{background:view===k?"var(--c)":"transparent",color:view===k?"var(--on)":"var(--on-var)",borderLeft:"2px solid "+(view===k?"var(--primary)":"transparent")}}>
+        <Icon n={ic} s={17}/>{l}</button>)}
+      <div className="mt-auto pt-3" style={{borderTop:"1px solid var(--ov)"}}>
+        <button onClick={()=>setView("settings")} className="navi flex items-center gap-3 px-3 py-2.5 rounded-md text-[13px] font-semibold w-full" style={{color:view==="settings"?"var(--on)":"var(--on-var)",background:view==="settings"?"var(--c)":"transparent"}}><Icon n="settings" s={16}/>Settings</button>
+        <button className="navi flex items-center gap-3 px-3 py-2.5 rounded-md text-[13px] font-semibold w-full" style={{color:"var(--on-var)"}}><Icon n="support" s={16}/>Support</button></div>
     </nav>
-    {/* main */}
     <div className="flex-1 flex flex-col min-w-0">
-      <div className="flex items-center justify-between px-5 py-3 border-b" style={{background:"var(--panel)",borderColor:"var(--border)"}}>
-        <div className="flex items-center gap-3">
-          <h1 className="text-[15px] font-bold">{titles[view]}</h1>
-          <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{background:run.running?hexA(COL.amber,.12):"var(--panel2)",color:run.running?"var(--amber)":"var(--mut)"}}>{runPill}</span>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg" style={{background:"var(--panel2)",border:"1px solid var(--border)"}}>
-            <Icon n="search" s={14} c="var(--mut)"/><input placeholder="Search logs…" className="bg-transparent text-[12px] w-36" style={{color:"#e4e4e7"}}/></div>
-          <button style={{color:"var(--mut)"}}><Icon n="bell" s={17}/></button>
-          {me&&<div className="flex items-center gap-2">
-            <div className="text-right leading-tight">
-              <div className="text-[12px] font-semibold">{me.email}</div>
-              <div className="text-[10px]" style={{color:admin?"var(--emerald)":"var(--mut)"}}>{me.role}</div></div>
-            <div className="w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold" style={{background:"var(--blue)",color:"#fff"}}>
-              {(me.email||"?")[0].toUpperCase()}</div>
-            <a href="/logout" title="Sign out" className="navi px-2 py-1.5 rounded-lg" style={{color:"var(--mut)",border:"1px solid var(--border)"}}><Icon n="x" s={14}/></a>
-          </div>}
-        </div>
-      </div>
-      <div className="flex-1 min-h-0 p-5">
-        {view==="home"&&<Home go={setView}/>}
-        {view==="pipeline"&&<Pipeline onMeta={loadMeta} admin={admin}/>}
-        {view==="review"&&<Review onMeta={loadMeta} admin={admin}/>}
+      <div className="flex items-center gap-4 px-5 py-3" style={{background:"var(--surface)",borderBottom:"1px solid var(--ov)"}}>
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg flex-1 max-w-md" style={{background:"var(--c-low)",border:"1px solid var(--ov)"}}>
+          <Icon n="search" s={14} c="var(--outline)"/><input className="bg-transparent text-[13px] w-full" style={{color:"var(--on)"}} placeholder="Search MBO pricing terminal…"/></div>
+        {run.running&&<span className="flex items-center gap-2 lbl" style={{color:COL.ter}}><span className="w-2 h-2 rounded-full pdot" style={{background:COL.ter}}/>Run active</span>}
+        <div className="ml-auto flex items-center gap-3">
+          <button style={{color:"var(--outline)"}}><Icon n="share" s={17}/></button>
+          <button style={{color:"var(--outline)"}}><Icon n="card" s={17}/></button>
+          {me&&<><div className="text-right leading-tight"><div className="text-[12.5px] mono">{me.email.split("@")[0]}</div>
+            <div className="lbl" style={{fontSize:9,color:me.role==="owner"?COL.primary:me.role==="admin"?COL.sec:COL.out}}>{me.role.toUpperCase()}</div></div>
+            <div className="flex items-center justify-center" style={{width:32,height:32,borderRadius:"50%",background:"var(--primary)",color:"#fff",fontWeight:700,fontSize:13}}>{(me.email||"?")[0].toUpperCase()}</div>
+            <a href="/logout" title="Sign out" style={{color:"var(--outline)"}}><Icon n="logout" s={16}/></a></>}
+        </div></div>
+      <div className="flex-1 min-h-0 p-6">
+        {view==="pipeline"&&<Pipeline admin={admin}/>}
+        {view==="review"&&<Review admin={admin}/>}
         {view==="alerts"&&<Alerts/>}
         {view==="integrations"&&<Integrations admin={admin}/>}
-      </div>
-    </div>
+        {view==="settings"&&<Settings me={me}/>}
+      </div></div>
   </div>;
 }
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);

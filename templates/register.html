@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in · MBO Tracker</title>
+<title>Create account · MBO Tracker</title>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
   :root{--bg:#0e0e10;--panel:#131315;--panel2:#1c1b1d;--border:#424754;
@@ -21,37 +21,37 @@
   input{width:100%;background:var(--panel2);border:1px solid var(--border);color:#e4e4e7;border-radius:8px;
     padding:11px 12px;font-size:14px;outline:none}
   input:focus{border-color:var(--blue)}
-  button{width:100%;margin-top:20px;background:var(--blue);border:none;color:#fff;font-weight:700;font-size:14px;
+  button{width:100%;margin-top:20px;background:var(--emerald);border:none;color:#04140d;font-weight:700;font-size:14px;
     padding:11px;border-radius:8px;cursor:pointer}
   button:disabled{opacity:.6;cursor:not-allowed}
   .err{margin-top:14px;font-size:12.5px;color:var(--red);min-height:16px}
-  .hint{margin-top:16px;font-size:11px;color:var(--mut);text-align:center}
+  .hint{margin-top:16px;font-size:12px;color:var(--mut);text-align:center}
+  .hint a{color:var(--blue);text-decoration:none}
 </style>
 </head>
 <body>
   <form class="card" id="f">
-    <div class="brand"><span class="logo">⚡</span><div><b>MBO Tracker</b><span>sign in to continue</span></div></div>
+    <div class="brand"><span class="logo">⚡</span><div><b>MBO Tracker</b><span>create your account</span></div></div>
     <label>EMAIL</label>
     <input type="email" id="email" autocomplete="username" required autofocus>
-    <label>PASSWORD</label>
-    <input type="password" id="password" autocomplete="current-password" required>
-    <button type="submit" id="btn">Sign in</button>
+    <label>PASSWORD <span style="color:var(--mut)">(min 6 chars)</span></label>
+    <input type="password" id="password" autocomplete="new-password" required>
+    <button type="submit" id="btn">Create account</button>
     <div class="err" id="err"></div>
-    <div class="hint" style="color:var(--mut)">No account? <a href="/register" style="color:var(--blue);text-decoration:none">Create one</a></div>
+    <div class="hint">Already have an account? <a href="/login">Sign in</a></div>
   </form>
 <script>
-  const f=document.getElementById("f");
-  f.onsubmit=async(e)=>{
+  document.getElementById("f").onsubmit=async(e)=>{
     e.preventDefault();
     const btn=document.getElementById("btn"),err=document.getElementById("err");
-    btn.disabled=true;btn.textContent="Signing in…";err.textContent="";
+    btn.disabled=true;btn.textContent="Creating…";err.textContent="";
     try{
-      const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+      const r=await fetch("/api/register",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({email:document.getElementById("email").value,password:document.getElementById("password").value})});
       const d=await r.json();
       if(d.ok){window.location="/";}
-      else{err.textContent=d.error||"Login failed";btn.disabled=false;btn.textContent="Sign in";}
-    }catch(_){err.textContent="Network error";btn.disabled=false;btn.textContent="Sign in";}
+      else{err.textContent=d.error||"Registration failed";btn.disabled=false;btn.textContent="Create account";}
+    }catch(_){err.textContent="Network error";btn.disabled=false;btn.textContent="Create account";}
   };
 </script>
 </body>

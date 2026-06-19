@@ -44,6 +44,20 @@ def set_password(email, password_hash):
     con.close()
 
 
+def set_role(email, role):
+    con = store.connect()
+    con.execute("UPDATE users SET role=%s WHERE email=%s", (role, email.lower().strip()))
+    con.commit()
+    con.close()
+
+
+def delete(email):
+    con = store.connect()
+    con.execute("DELETE FROM users WHERE email=%s", (email.lower().strip(),))
+    con.commit()
+    con.close()
+
+
 def count():
     con = store.connect()
     n = con.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]

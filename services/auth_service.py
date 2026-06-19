@@ -22,9 +22,27 @@ def register(email, password, role="viewer"):
     return users_repo.create(email, security.hash_password(password), role)
 
 
-def seed_admin(email, password):
-    """Create the first admin if the users table is empty."""
-    if users_repo.count() == 0:
-        users_repo.create(email, security.hash_password(password), "admin")
-        return email
+def ensure_owner(email, password):
+    """Guarantee the configured owner exists with role 'owner' (super-admin)."""
+    user = users_repo.get_by_email(email)
+    if not user:
+        users_repo.create(email, security.hash_password(password), "owner")
+        return email + " (created)"
+    if user["role"] != "owner":
+        users_repo.set_role(email, "owner")
+        return email + " (promoted)"
     return None
+
+
+def set_role(email, role):
+    if role not in ("owner", "admin", "viewer"):
+        raise ValueError("invalid role")
+    users_repo.set_role(email, role)
+
+
+def delete_user(email):
+    users_repo.delete(email)
+
+
+def list_users():
+    return users_repo.list_all()
