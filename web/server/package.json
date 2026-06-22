@@ -1,0 +1,24 @@
+{
+  "name": "mbo-tracker-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MBO Tracker — Node/Express backend (Supabase-backed price tracker)",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.0",
+    "express-session": "^1.18.1",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^6.9.15",
+    "p-limit": "^6.1.0",
+    "pg": "^8.13.0",
+    "xlsx": "^0.18.5"
+  }
+}
