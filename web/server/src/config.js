@@ -17,8 +17,13 @@ export const config = {
   secret: e.SECRET_KEY || "dev-insecure-change-me",
   adminEmail: (e.ADMIN_EMAIL || "admin@pricesync.local").toLowerCase(),
   adminPassword: e.ADMIN_PASSWORD || "admin",
-  host: e.HOST === "0.0.0.0" ? "0.0.0.0" : (e.NODE_HOST || "127.0.0.1"),
-  port: parseInt(e.NODE_PORT || "8090", 10),   // 8090 so it can run beside Flask (8080)
+  // Render/Heroku-style hosts inject PORT and require binding 0.0.0.0. Honor that
+  // automatically so cloud deploys pass the health check (otherwise the new build
+  // fails and the platform keeps serving the previous, stale deploy). NODE_PORT
+  // wins locally (PORT=8080 in .env belongs to the Python/Flask app); PORT is used
+  // only on cloud where NODE_PORT isn't set.
+  host: e.NODE_HOST || ((e.PORT && !e.NODE_PORT) || e.HOST === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1"),
+  port: parseInt(e.NODE_PORT || e.PORT || "8090", 10),
   smtp: {
     host: e.SMTP_HOST || "smtp.gmail.com",
     port: parseInt(e.SMTP_PORT || "587", 10),
