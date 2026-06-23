@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+:root{
+  --bg:#0e0e10; --surface:#131315; --c-low:#1c1b1d; --c:#201f22; --c-high:#2a2a2c;
+  --border:#424754; --on:#e5e1e4; --on-var:#c2c6d6; --outline:#8c909f;
+  --primary:#3b82f6; --primary2:#4d8eff; --sec:#4ae176; --ter:#ffb95f; --err:#ff6b6b;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body,#root{height:100%}
+body{background:var(--bg);color:var(--on);font-family:Geist,"Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.mono{font-family:"JetBrains Mono",Consolas,monospace}
+.lbl{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--outline)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px}
+.inp{background:var(--c-low);border:1px solid var(--border);color:var(--on);border-radius:8px;padding:8px 10px;font-size:13px;outline:none}
+.inp:focus{border-color:var(--primary)}
+*::-webkit-scrollbar{width:8px;height:8px}
+*::-webkit-scrollbar-thumb{background:#3f3f46;border-radius:8px}
+*::-webkit-scrollbar-track{background:transparent}
+@keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+.shine::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.3),transparent);animation:shimmer 1.6s infinite}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.fadeup{animation:fadeUp .25s ease both}
+@keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+.toastin{animation:slideIn .3s ease both}
+@keyframes pulseDot{0%{box-shadow:0 0 0 0 rgba(74,225,118,.5)}70%{box-shadow:0 0 0 6px rgba(74,225,118,0)}100%{box-shadow:0 0 0 0 rgba(74,225,118,0)}}
+.pdot{animation:pulseDot 2s infinite}
+.navi{transition:background .15s,color .15s}

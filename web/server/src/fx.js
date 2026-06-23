@@ -5,6 +5,19 @@ const TTL = 6 * 3600 * 1000;
 let cache = { at: 0, rates: {} };
 const FALLBACK = { INR: 1, USD: 83, CAD: 61, EUR: 90, GBP: 105, AUD: 55, AED: 22.6 };
 
+// Manual rate overrides (e.g. USD/CAD set from the Review page). When present they
+// take precedence over the live feed everywhere (rateOf / toInr / snapshot).
+let overrides = {};
+export function setOverrides(o = {}) {
+  const next = {};
+  for (const [k, v] of Object.entries(o)) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) next[String(k).toUpperCase()] = n;
+  }
+  overrides = next;
+}
+export function getOverrides() { return { ...overrides }; }
+
 async function fetchRates() {
   const r = await axios.get("https://open.er-api.com/v6/latest/INR", { timeout: 10000 });
   const rates = (r.data && r.data.rates) || {};
@@ -20,7 +33,7 @@ export async function rates() {
     try { cache = { at: Date.now(), rates: await fetchRates() }; }
     catch { if (!Object.keys(cache.rates).length) cache = { at: Date.now(), rates: { ...FALLBACK } }; }
   }
-  return cache.rates;
+  return { ...cache.rates, ...overrides };
 }
 
 export async function rateOf(cur) {

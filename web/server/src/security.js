@@ -1,4 +1,5 @@
 // Auth: users, bcrypt, sessions registry, rate-limit, guards (port of core/security.py).
+import crypto from 'node:crypto';
 import bcrypt from "bcryptjs";
 import { q, one } from "./db.js";
 
@@ -27,9 +28,34 @@ export const setRole = (email, role) => q("UPDATE users SET role=$1 WHERE email=
 export const deleteUser = (email) => q("DELETE FROM users WHERE email=$1", [email.toLowerCase().trim()]);
 export const listUsers = () => q("SELECT id,email,role,created_at FROM users ORDER BY id");
 export async function countUsers() { return Number((await one("SELECT COUNT(*) c FROM users")).c); }
+export function verifyWerkzeug(password, encoded) {
+  const [method, salt, expectedHex] = String(encoded || '').split('$');
+  if (!method || !salt || !expectedHex) return false;
+  let actual;
+  if (method.startsWith('pbkdf2:')) {
+    const [, digest = 'sha256', iterations = '260000'] = method.split(':');
+    actual = crypto.pbkdf2Sync(String(password || ''), salt,
+      Number(iterations), expectedHex.length / 2, digest);
+  } else if (method.startsWith('scrypt:')) {
+    const [, n = '32768', r = '8', p = '1'] = method.split(':');
+    actual = crypto.scryptSync(String(password || ''), salt, expectedHex.length / 2, {
+      N: Number(n), r: Number(r), p: Number(p), maxmem: 128 * 1024 * 1024,
+    });
+  } else {
+    return false;
+  }
+  const expected = Buffer.from(expectedHex, 'hex');
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
 export async function verify(email, password) {
   const u = await getUser(email);
-  if (u && await bcrypt.compare(password, u.password_hash)) return u;
+  if (!u) return null;
+  const hash = String(u.password_hash || '');
+  const valid = hash.startsWith('$2')
+    ? await bcrypt.compare(password, hash)
+    : verifyWerkzeug(password, hash);
+  if (valid) return u;
   return null;
 }
 export async function seedOwner(email, password) {
@@ -38,13 +64,7 @@ export async function seedOwner(email, password) {
   if (!u) { await createUser(email, password, "owner"); return email + " (created)"; }
   let changed = false;
   if (u.role !== "owner") { await setRole(email, "owner"); changed = true; }
-  // Migrate non-bcrypt (werkzeug pbkdf2 from the Python app) -> bcrypt.
-  if (!String(u.password_hash || "").startsWith("$2")) {
-    const hash = await bcrypt.hash(password, 10);
-    await q("UPDATE users SET password_hash=$1 WHERE email=$2", [hash, email.toLowerCase().trim()]);
-    changed = true;
-  }
-  return changed ? email + " (updated)" : null;
+  return changed ? email + ' (updated)' : null;
 }
 
 // ---- rate limit ----

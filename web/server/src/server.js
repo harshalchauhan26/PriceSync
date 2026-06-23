@@ -12,15 +12,17 @@ import { q, one, ping } from "./db.js";
 import * as sec from "./security.js";
 import * as store from "./store.js";
 import { encrypt } from "./crypto.js";
-import { snapshot, rates } from "./fx.js";
+import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
 import { sendMismatchReport } from "./mailer.js";
 import { pushPrice, verifyStore } from "./shopify.js";
+import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.resolve(__dirname, "../../client/dist");
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
+const pendingUploads = new Map();
 
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "2mb" }));
@@ -61,10 +63,30 @@ app.get("/api/logout", (req, res) => { sec.logoutUser(req); res.json({ ok: true 
 // ---------- meta / fx / insights ----------
 app.get("/api/meta", wrap(async (req, res) => {
   res.json({ counts: await store.counts(), alerts: await store.alertCount(5),
+    imported_count: await store.countImported(),
     last_import: await store.getMeta("last_import"), last_import_rows: await store.getMeta("last_import_rows") });
 }));
-app.get("/api/fx", wrap(async (req, res) => res.json({ rates: await snapshot() })));
-app.get("/api/vendors", wrap(async (req, res) => res.json({ vendors: await store.vendors(req.query.kind) })));
+async function fxState() {
+  return { rates: await snapshot(), overrides: getOverrides(),
+    markup: Number(await store.getMeta("default_markup", 0)) || 0 };
+}
+app.get("/api/fx", wrap(async (req, res) => res.json(await fxState())));
+// Set manual USD/CAD rates and the global default markup (admin only via guard).
+app.post("/api/fx/override", wrap(async (req, res) => {
+  const norm = (v) => {
+    const n = v === "" || v == null ? null : Number(v);
+    return n != null && Number.isFinite(n) && n > 0 ? String(n) : "";
+  };
+  await store.setMeta("fx_override_usd", norm(req.body.usd));
+  await store.setMeta("fx_override_cad", norm(req.body.cad));
+  if (req.body.markup !== undefined)
+    await store.setMeta("default_markup", String(Number(req.body.markup) || 0));
+  setOverrides({ USD: await store.getMeta("fx_override_usd"), CAD: await store.getMeta("fx_override_cad") });
+  res.json({ ok: true, ...(await fxState()) });
+}));
+app.get("/api/vendors", wrap(async (req, res) => res.json({
+  vendors: await store.vendors(req.query.kind, req.query.source),
+})));
 
 app.get("/api/insights", wrap(async (req, res) => {
   const c = await store.counts();
@@ -83,10 +105,24 @@ app.get("/api/insights", wrap(async (req, res) => {
 }));
 
 // ---------- pipeline ----------
-app.post("/api/pipe/config", (req, res) => { Object.assign(pipe.CONFIG, req.body || {}); res.json({ ok: true, config: pipe.CONFIG }); });
+app.post("/api/pipe/config", wrap(async (req, res) => {
+  const next = req.body || {};
+  if (next.data_source && !['database', 'imported'].includes(next.data_source)) {
+    return res.status(400).json({ ok: false, error: 'invalid pipeline data source' });
+  }
+  Object.assign(pipe.CONFIG, next);
+  if (next.data_source) await store.setMeta('pipeline_data_source', next.data_source);
+  res.json({ ok: true, config: pipe.CONFIG });
+}));
 app.post("/api/pipe/start", wrap(async (req, res) => {
   if (pipe.STATE.running) return res.status(409).json({ error: "already running" });
-  if ((await store.counts()).total === 0) return res.status(400).json({ error: "no products — import a sheet" });
+  const source = pipe.CONFIG.data_source === 'imported' ? 'imported' : 'database';
+  const sourceCount = source === 'imported' ? await store.countImported() : (await store.counts()).total;
+  if (sourceCount === 0) {
+    return res.status(400).json({ error: source === 'imported'
+      ? "no uploaded sheet products - upload a sheet or turn the source toggle off"
+      : "no products in Supabase database" });
+  }
   Object.assign(pipe.STATE, { running: true, abort: false, phase: "main", completed: 0, matched: 0,
     mismatch: 0, errors: 0, retry_total: 0, retry_completed: 0, retry_recovered: 0, started_at: Date.now() });
   pipe.LOG.length = 0; pipe.LOGMETA.offset = 0;
@@ -111,14 +147,27 @@ app.get("/api/pipe/status", (req, res) => {
 // ---------- import ----------
 app.post("/api/import/preview", upload.single("file"), wrap(async (req, res) => {
   if (!req.file) return res.status(400).json({ ok: false, error: "no file" });
-  global.__lastUpload = req.file.buffer;
+  const pending = { buffer: req.file.buffer, at: Date.now() };
+  pendingUploads.set(req.sessionID, pending);
+  setTimeout(() => {
+    if (pendingUploads.get(req.sessionID) === pending) pendingUploads.delete(req.sessionID);
+  }, 15 * 60 * 1000).unref();
   try { const p = store.previewSheet(req.file.buffer); res.json({ ok: true, path: "uploaded", ...p }); }
   catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 }));
 app.post("/api/import", upload.single("file"), wrap(async (req, res) => {
-  const buf = req.file ? req.file.buffer : global.__lastUpload;
+  const pending = pendingUploads.get(req.sessionID);
+  const buf = req.file ? req.file.buffer : pending?.buffer;
   if (!buf) return res.status(400).json({ ok: false, error: "no file" });
-  try { const r = await store.importSheet(buf, { replace: true }); res.json({ ok: true, ...r, counts: await store.counts() }); }
+  const domains = Array.isArray(req.body.domains) ? req.body.domains :
+    String(req.body.domains || '').split(',').filter(Boolean);
+  try {
+    const r = await store.importSheet(buf, {
+      replace: req.body.mode !== 'add', contains: req.body.contains || '', domains,
+    });
+    pendingUploads.delete(req.sessionID);
+    res.json({ ok: true, ...r, counts: await store.counts(), imported_count: await store.countImported() });
+  }
   catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 }));
 
@@ -132,11 +181,35 @@ app.get("/api/review/brands", wrap(async (req, res) => res.json({ brands: (await
 async function approveOne(client, prow, body) {
   const markup = body.markup_pct === "" || body.markup_pct == null ? 0 : Number(body.markup_pct);
   const custom = body.custom_price === "" || body.custom_price == null ? null : Number(body.custom_price);
-  const ref = body.ref || "live", convert = body.convert !== false;
-  const rate = convert ? (await rates())[(prow.currency || "INR").toUpperCase()] || 1 : 1;
-  const final = store.computeFinal(prow.base_price, prow.live_price, prow.currency, ref, markup, custom, convert, rate);
-  await store.archiveApproved(client, prow, final, markup, ref, body.note || "", body._by);
-  return final;
+  const amount = body.price_amount === "" || body.price_amount == null ? null : Number(body.price_amount);
+  const amountCurrency = String(body.price_currency || prow.currency || "INR").trim().toUpperCase();
+  const fx = await rates();
+  const amountRate = ["INR", "UNKNOWN", ""].includes(amountCurrency) ? 1 : (fx[amountCurrency] || 1);
+  const hasAmount = amount != null && Number.isFinite(amount) && amount > 0;
+  const ref = hasAmount ? `amount:${amountCurrency}` : (body.ref || "live");
+  const convert = body.convert !== false;
+  const rate = convert ? fx[(prow.currency || "INR").toUpperCase()] || 1 : 1;
+  const final = hasAmount
+    ? Math.round(amount * amountRate * 100) / 100
+    : store.computeFinal(prow.base_price, prow.live_price, prow.currency, ref, markup, custom, convert, rate);
+  const archived = await store.archiveApproved(client, prow, final, markup, ref, body.note || "", body._by);
+  // On a resolved mismatch the freshly-fetched live price becomes the new baseline
+  // in DB, so future runs compare against it (converted to INR to match base units).
+  if (prow.state === "mismatch" && prow.live_price != null) {
+    const liveInr = await toInr(prow.live_price, prow.currency);
+    if (liveInr != null)
+      await client.query("UPDATE products SET base_price=$1 WHERE id=$2", [liveInr, prow.id]);
+  }
+  return { final, archived };
+}
+async function pushApprovedToStore(archived) {
+  const result = await pushRowPrice(archived, archived.final_price);
+  const at = new Date().toISOString();
+  await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
+    [result.status, at, archived.id]);
+  await q("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE key=$3",
+    [result.status, at, archived.key]);
+  return result;
 }
 app.post("/api/review/decide", wrap(async (req, res) => {
   const it = await one("SELECT * FROM products WHERE id=$1", [req.body.row]);
@@ -144,8 +217,11 @@ app.post("/api/review/decide", wrap(async (req, res) => {
   const by = sec.currentUser(req)?.email;
   if (req.body.decision === "approved") {
     const client = await (await import("./db.js")).pool.connect();
-    try { const final = await approveOne(client, it, { ...req.body, _by: by }); res.json({ ok: true, final_price: final, archived: true }); }
+    let approved;
+    try { approved = await approveOne(client, it, { ...req.body, _by: by }); }
     finally { client.release(); }
+    const shopify = await pushApprovedToStore(approved.archived);
+    res.json({ ok: true, final_price: approved.final, archived: true, shopify });
   } else {
     await q("UPDATE products SET decision=$1,note=$2,decided_at=$3 WHERE id=$4",
       [req.body.decision, req.body.note || "", new Date().toISOString(), req.body.row]);
@@ -156,17 +232,25 @@ app.post("/api/review/approve_all", wrap(async (req, res) => {
   const kind = req.body.kind || "mismatch";
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
   const brands = (req.body.brands || []).filter(Boolean);
-  let where = "state=$1"; const p = [state];
+  let where = "state=$1 AND decision='pending'"; const p = [state];
   if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands); }
   const rows = await q(`SELECT * FROM products WHERE ${where}`, p);
   const by = sec.currentUser(req)?.email;
   const { pool } = await import("./db.js"); const client = await pool.connect();
-  let n = 0;
+  let n = 0; const archived = [];
   try { await client.query("BEGIN");
-    for (const r of rows) { await approveOne(client, r, { ...req.body, custom_price: null, _by: by }); n++; }
+    for (const r of rows) {
+      const approved = await approveOne(client, r, { ...req.body, custom_price: null, _by: by });
+      archived.push(approved.archived); n++;
+    }
     await client.query("COMMIT");
   } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
-  res.json({ ok: true, approved: n });
+  let pushed = 0, failed = 0;
+  for (const item of archived) {
+    const result = await pushApprovedToStore(item);
+    result.ok ? pushed++ : failed++;
+  }
+  res.json({ ok: true, approved: n, pushed, failed });
 }));
 
 // ---------- history ----------
@@ -174,7 +258,7 @@ app.get("/api/history", wrap(async (req, res) => res.json(await store.historyLis
 app.post("/api/history/push", wrap(async (req, res) => {
   const it = await one("SELECT * FROM review_history WHERE id=$1", [req.body.row]);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
-  const r = await pushPrice(it.url, it.final_price);
+  const r = await pushRowPrice(it, it.final_price);
   await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
     [r.status, new Date().toISOString(), it.id]);
   res.json({ ok: r.ok, status: r.status });
@@ -182,7 +266,7 @@ app.post("/api/history/push", wrap(async (req, res) => {
 app.post("/api/history/push_all", wrap(async (req, res) => {
   const rows = await q("SELECT * FROM review_history WHERE shopify_status IS NULL ORDER BY approved_at LIMIT 500");
   let ok = 0, fail = 0;
-  for (const it of rows) { const r = await pushPrice(it.url, it.final_price);
+  for (const it of rows) { const r = await pushRowPrice(it, it.final_price);
     await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3", [r.status, new Date().toISOString(), it.id]);
     r.ok ? ok++ : fail++; }
   res.json({ ok: true, pushed: ok, failed: fail });
@@ -229,7 +313,8 @@ app.post("/api/alerts/email_mismatch", wrap(async (req, res) => {
 app.get("/api/integration", wrap(async (req, res) => {
   const c = await store.getStoreIntegration();
   res.json({ shop_domain: c?.shop_domain || "", api_version: c?.api_version || "2024-10",
-    dry_run: !!(c?.dry_run), has_token: !!(c?.access_token) });
+    dry_run: c ? !!(c.dry_run) : true, has_token: !!(c?.access_token),
+    price_url_source: await getPriceUrlSource() });
 }));
 app.post("/api/integration/save", wrap(async (req, res) => {
   const d = req.body || {};
@@ -240,10 +325,21 @@ app.post("/api/integration/save", wrap(async (req, res) => {
       access_token=excluded.access_token, api_version=excluded.api_version, dry_run=excluded.dry_run, updated_at=excluded.updated_at`,
     [store.STORE_KEY, (d.shop_domain || "").trim(), token, (d.api_version || "2024-10").trim(),
       d.dry_run ? 1 : 0, new Date().toISOString()]);
+  if (d.price_url_source) await setPriceUrlSource(d.price_url_source);
   res.json({ ok: true });
 }));
 app.post("/api/integration/verify", wrap(async (req, res) => res.json(await verifyStore())));
 app.get("/api/integrations", wrap(async (req, res) => res.json({ brands: await store.integrationBrands() })));
+app.post("/api/shopify/update_price", wrap(async (req, res) => {
+  const productUrl = String(req.body.product_url || "").trim();
+  const newPrice = req.body.new_price;
+  if (!productUrl) return res.status(400).json({ ok: false, error: "product_url required" });
+  if (newPrice === "" || newPrice == null || Number.isNaN(Number(newPrice))) {
+    return res.status(400).json({ ok: false, error: "valid new_price required" });
+  }
+  const result = await pushPrice(productUrl, Number(newPrice));
+  res.status(result.ok ? 200 : 404).json(result);
+}));
 
 // ---------- export ----------
 async function sendXlsx(res, name, rows) {
@@ -288,6 +384,18 @@ if (fs.existsSync(CLIENT_DIST)) {
 // ---------- boot ----------
 const p = await ping();
 if (!p.ok) { console.error("[MBO] Supabase FAILED:", p.msg); process.exit(1); }
+await store.initStore();
+pipe.CONFIG.data_source = await store.getMeta('pipeline_data_source', 'database');
+setOverrides({ USD: await store.getMeta('fx_override_usd'), CAD: await store.getMeta('fx_override_cad') });
 const seeded = await sec.seedOwner(config.adminEmail, config.adminPassword);
 if (seeded) console.log("[MBO] Owner:", seeded);
-app.listen(config.port, config.host, () => console.log(`[MBO] http://${config.host}:${config.port}`));
+const server = app.listen(config.port, config.host,
+  () => console.log(`[MBO] http://${config.host}:${config.port}`));
+server.on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`[MBO] Port ${config.port} is already in use. Stop the old server or set NODE_PORT.`);
+  } else {
+    console.error('[MBO] Server failed:', error);
+  }
+  process.exit(1);
+});

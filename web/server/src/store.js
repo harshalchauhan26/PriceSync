@@ -5,7 +5,62 @@ import { toInr } from "./fx.js";
 
 const REQUIRED = ["MBO Product URL", "Designer Product URL", "Platform Type",
   "Custom Regex", "Studio East Price"];
-const STORE_KEY = "__store__";   // single global Shopify integration
+const STORE_KEY = '__store__';   // single global Shopify integration
+
+const SCHEMA = [
+  'CREATE TABLE IF NOT EXISTS products (' +
+    'id BIGSERIAL PRIMARY KEY, key TEXT UNIQUE, mbo_url TEXT, url TEXT,' +
+    'platform TEXT, custom_regex TEXT, brand TEXT, base_price DOUBLE PRECISION,' +
+    'live_price DOUBLE PRECISION, currency TEXT, status TEXT DEFAULT \'\',' +
+    'state TEXT DEFAULT \'pending\', delta DOUBLE PRECISION,' +
+    'decision TEXT DEFAULT \'pending\', markup_pct DOUBLE PRECISION,' +
+    'custom_price DOUBLE PRECISION, ref TEXT DEFAULT \'live\',' +
+    'final_price DOUBLE PRECISION, note TEXT, decided_at TEXT,' +
+    'shopify_status TEXT, shopify_at TEXT, rerun_status TEXT,' +
+    'rerun_at TEXT, updated_at TEXT)',
+  'CREATE INDEX IF NOT EXISTS ix_products_state ON products(state)',
+  'CREATE INDEX IF NOT EXISTS ix_products_brand ON products(brand)',
+  'CREATE TABLE IF NOT EXISTS import_catalog (' +
+    'key TEXT PRIMARY KEY, mbo_url TEXT, url TEXT, platform TEXT,' +
+    'custom_regex TEXT, brand TEXT, base_price DOUBLE PRECISION, imported_at TEXT)',
+  'CREATE INDEX IF NOT EXISTS ix_import_catalog_brand ON import_catalog(brand)',
+  'CREATE TABLE IF NOT EXISTS price_history (' +
+    'id BIGSERIAL PRIMARY KEY, key TEXT, url TEXT, brand TEXT,' +
+    'base_price DOUBLE PRECISION, live_price DOUBLE PRECISION,' +
+    'delta DOUBLE PRECISION, state TEXT, status TEXT, run_id TEXT,' +
+    'created_at TIMESTAMPTZ DEFAULT now())',
+  'CREATE INDEX IF NOT EXISTS ix_price_history_key ON price_history(key, created_at)',
+  'CREATE TABLE IF NOT EXISTS review_history (' +
+    'id BIGSERIAL PRIMARY KEY, key TEXT, mbo_url TEXT, url TEXT,' +
+    'platform TEXT, brand TEXT, base_price DOUBLE PRECISION,' +
+    'live_price DOUBLE PRECISION, currency TEXT, delta DOUBLE PRECISION,' +
+    'status TEXT, markup_pct DOUBLE PRECISION, ref TEXT,' +
+    'final_price DOUBLE PRECISION, note TEXT, approved_by TEXT,' +
+    'approved_at TIMESTAMPTZ DEFAULT now(), shopify_status TEXT, shopify_at TEXT)',
+  'CREATE INDEX IF NOT EXISTS ix_review_history_brand ON review_history(brand)',
+  'CREATE TABLE IF NOT EXISTS integrations (' +
+    'brand TEXT PRIMARY KEY, shop_domain TEXT, access_token TEXT,' +
+    'api_version TEXT DEFAULT \'2024-10\', dry_run INTEGER DEFAULT 0, updated_at TEXT)',
+  'CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)',
+];
+
+export async function initStore() {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const client = await pool.connect();
+    try {
+      await client.query(`SELECT pg_advisory_lock(hashtext('mbo_tracker_schema_v1'))`);
+      for (const sql of SCHEMA) await client.query(sql);
+      return;
+    } catch (error) {
+      if (error.code !== '40P01' || attempt === 3) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+    } finally {
+      await client.query(`SELECT pg_advisory_unlock(hashtext('mbo_tracker_schema_v1'))`)
+        .catch(() => {});
+      client.release();
+    }
+  }
+}
 
 export function brandOf(url) {
   try { const h = new URL(String(url || "")).host.toLowerCase();
@@ -62,7 +117,12 @@ export async function alertCount(threshold = 5) {
 }
 
 // ---- vendors ----
-export async function vendors(kind) {
+export async function vendors(kind, source = 'database') {
+  if (source === 'imported' && !kind) {
+    const rows = await q(`SELECT brand, COUNT(*) c FROM import_catalog
+      WHERE brand<>'' GROUP BY brand ORDER BY brand`);
+    return rows.map((r) => ({ vendor: r.brand, count: num(r.c) }));
+  }
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind];
   const rows = state
     ? await q("SELECT brand, COUNT(*) c FROM products WHERE brand<>'' AND state=$1 GROUP BY brand ORDER BY brand", [state])
@@ -89,22 +149,47 @@ export async function countProducts(vendorList = null) {
   }
   return num((await one("SELECT COUNT(*) c FROM products")).c);
 }
-export async function workRows(mode = "fresh", vendorList = null) {
-  return dbProducts(mode, vendorList);   // permanent DB is the source
+
+export async function importedProducts(mode = 'fresh', vendorList = null) {
+  const clauses = []; const params = [];
+  if (vendorList && vendorList.length) {
+    clauses.push(`c.brand IN (${vendorList.map((_, i) => `$${i + 1}`).join(',')})`);
+    params.push(...vendorList);
+  }
+  if (mode !== 'fresh') clauses.push(`COALESCE(p.state, 'pending') IN ('pending','error')`);
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  return q(`SELECT c.key,c.mbo_url,c.url,c.platform,c.custom_regex,c.brand,c.base_price,
+      COALESCE(p.state,'pending') state
+    FROM import_catalog c LEFT JOIN products p ON p.key=c.key
+    ${where} ORDER BY c.key`, params);
+}
+
+export async function countImported(vendorList = null) {
+  if (vendorList && vendorList.length) {
+    const placeholders = vendorList.map((_, i) => `$${i + 1}`).join(',');
+    return num((await one(`SELECT COUNT(*) c FROM import_catalog
+      WHERE brand IN (${placeholders})`, vendorList)).c);
+  }
+  return num((await one('SELECT COUNT(*) c FROM import_catalog')).c);
+}
+
+export async function workRows(mode = "fresh", vendorList = null, source = 'database') {
+  return source === 'imported'
+    ? importedProducts(mode, vendorList)
+    : dbProducts(mode, vendorList);
 }
 
 // ---- pipeline result write (+ history snapshot) ----
+// Products are a FIXED catalog: new rows enter ONLY through importSheet (the sheet).
+// A scrape run may refresh price/state on an existing product but must never create
+// (or delete) one — so this is an UPDATE, never an INSERT, against products.
 export async function saveResult(prod, status, live, cur, state, runId) {
   const base = prod.base_price;
   const delta = (live != null && base != null) ? (await toInr(live, cur)) - base : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  await q(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,
-      live_price,currency,status,state,delta,updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-    ON CONFLICT(key) DO UPDATE SET live_price=excluded.live_price,currency=excluded.currency,
-      status=excluded.status,state=excluded.state,delta=excluded.delta,updated_at=excluded.updated_at`,
-    [prod.key, prod.mbo_url || "", prod.url, prod.platform, prod.custom_regex, prod.brand,
-      base, live, cur, status, state, delta, now]);
+  await q(`UPDATE products SET live_price=$2,currency=$3,status=$4,state=$5,
+      delta=$6,updated_at=$7 WHERE key=$1`,
+    [prod.key, live, cur, status, state, delta, now]);
   await q(`INSERT INTO price_history(key,url,brand,base_price,live_price,delta,state,status,run_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
     [prod.key, prod.url, prod.brand, base, live, delta, state, status, runId]);
@@ -114,7 +199,7 @@ export async function saveResult(prod, status, live, cur, state, runId) {
 // ---- review ----
 export async function reviewItems(kind, brands) {
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
-  let where = "state=$1"; const p = [state];
+  let where = "state=$1 AND decision='pending'"; const p = [state];
   if (brands && brands.length) {
     where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands);
   }
@@ -137,11 +222,15 @@ const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
 export async function archiveApproved(client, prow, final, markup, ref, note, by) {
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  await client.query(`INSERT INTO review_history (${HIST_COLS})
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+  const inserted = await client.query(`INSERT INTO review_history (${HIST_COLS})
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+    RETURNING *`,
     [prow.key, prow.mbo_url, prow.url, prow.platform, prow.brand, prow.base_price,
       prow.live_price, prow.currency, prow.delta, prow.status, markup, ref, final, note, by, now]);
-  await client.query("DELETE FROM products WHERE id=$1", [prow.id]);
+  await client.query(`UPDATE products SET decision=$1,markup_pct=$2,ref=$3,
+    final_price=$4,note=$5,decided_at=$6,shopify_status=NULL,shopify_at=NULL
+    WHERE id=$7`, ['approved', markup, ref, final, note, now, prow.id]);
+  return inserted.rows[0];
 }
 
 // ---- history ----
@@ -172,8 +261,13 @@ function rowToProduct(r, idx) {
   const key = `${String(idx).padStart(5, "0")}|${(url || mbo).slice(0, 280)}`;
   let regex = r["Custom Regex"]; regex = regex == null ? "" : String(regex).trim();
   const base = sanitizeNum(r["Studio East Price"]);
+  const live = sanitizeNum(r["Live Price"]);
+  const currency = String(r["Detected Currency"] || "").trim();
+  const status = String(r.Status || "").trim();
   return { key, mbo_url: mbo, url, platform: String(r["Platform Type"] || "").trim(),
-    custom_regex: regex, brand: brandOf(url), base_price: base };
+    custom_regex: regex, brand: brandOf(url), base_price: base,
+    live_price: live, currency, status, state: stateOf(status),
+    delta: live != null && base != null ? live - base : null };
 }
 function sanitizeNum(v) {
   if (v == null || v === "") return null;
@@ -185,6 +279,8 @@ export function previewSheet(buf) {
   const wb = XLSX.read(buf, { type: "buffer" });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  const hasLive = rows.length > 0 && Object.hasOwn(rows[0], "Live Price");
+  const hasStatus = rows.length > 0 && Object.hasOwn(rows[0], "Status");
   const cols = rows.length ? Object.keys(rows[0]) : [];
   const missing = REQUIRED.filter((c) => !cols.includes(c));
   if (missing.length) throw new Error("missing required columns: " + missing.join(", "));
@@ -193,46 +289,74 @@ export function previewSheet(buf) {
     total++; byDom[p.brand] = (byDom[p.brand] || 0) + 1; });
   const domains = Object.entries(byDom).map(([d, c]) => ({ domain: d || "(none)", count: c }))
     .sort((a, b) => b.count - a.count);
-  return { rows: total, domains };
+  return { rows: total, domains,
+    has_results: cols.includes('Live Price') || cols.includes('Status') };
 }
-export async function importSheet(buf, { replace = true } = {}) {
+export async function importSheet(buf, { replace = true, contains = '', domains = [] } = {}) {
   const wb = XLSX.read(buf, { type: "buffer" });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-  const prods = rows.map((r, i) => rowToProduct(r, i + 1)).filter(Boolean);
+  const hasLive = rows.length > 0 && Object.hasOwn(rows[0], "Live Price");
+  const hasStatus = rows.length > 0 && Object.hasOwn(rows[0], "Status");
+  const needle = String(contains || '').trim().toLowerCase();
+  const domainSet = new Set((domains || []).filter(Boolean));
+  const prods = rows.map((r, i) => rowToProduct(r, i + 1)).filter((p) => p &&
+    (!needle || p.url.toLowerCase().includes(needle)) &&
+    (!domainSet.size || domainSet.has(p.brand)));
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const client = await pool.connect();
   let n = 0, removed = 0;
   try {
     await client.query("BEGIN");
-    await client.query("CREATE TEMP TABLE _keep(key TEXT PRIMARY KEY) ON COMMIT DROP");
+    // `replace` only clears the import staging view. The products catalog is FIXED:
+    // it is never deleted here (or anywhere) — the sheet can only ADD / refresh rows.
+    if (replace) {
+      const r = await client.query("DELETE FROM import_catalog");
+      removed = r.rowCount;
+    }
     const CH = 500;
     for (let s = 0; s < prods.length; s += CH) {
       const chunk = prods.slice(s, s + CH);
-      const vals = []; const ph = [];
+      const importVals = []; const importPh = [];
       chunk.forEach((p, j) => {
         const b = j * 8;
-        ph.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`);
-        vals.push(p.key, p.mbo_url, p.url, p.platform, p.custom_regex, p.brand, p.base_price, now);
+        importPh.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`);
+        importVals.push(p.key, p.mbo_url, p.url, p.platform, p.custom_regex,
+          p.brand, p.base_price, now);
       });
-      await client.query(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,updated_at)
-        VALUES ${ph.join(",")}
+      await client.query(`INSERT INTO import_catalog
+        (key,mbo_url,url,platform,custom_regex,brand,base_price,imported_at)
+        VALUES ${importPh.join(',')}
         ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
-          platform=excluded.platform,custom_regex=excluded.custom_regex,brand=excluded.brand,
-          base_price=excluded.base_price,updated_at=excluded.updated_at`, vals);
-      const kph = chunk.map((_, j) => `($${j + 1})`).join(",");
-      await client.query(`INSERT INTO _keep VALUES ${kph} ON CONFLICT DO NOTHING`, chunk.map((p) => p.key));
+          platform=excluded.platform,custom_regex=excluded.custom_regex,
+          brand=excluded.brand,base_price=excluded.base_price,
+          imported_at=excluded.imported_at`, importVals);
+
+      // The sheet is the ONLY way products enter the catalog. Add new products and
+      // refresh catalog fields on existing ones; live_price / state / decision /
+      // final_price are preserved, and no row is ever removed.
+      const prodVals = []; const prodPh = [];
+      chunk.forEach((p, j) => {
+        const b = j * 7;
+        prodPh.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7})`);
+        prodVals.push(p.key, p.mbo_url, p.url, p.platform, p.custom_regex,
+          p.brand, p.base_price);
+      });
+      await client.query(`INSERT INTO products
+        (key,mbo_url,url,platform,custom_regex,brand,base_price)
+        VALUES ${prodPh.join(',')}
+        ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
+          platform=excluded.platform,custom_regex=excluded.custom_regex,
+          brand=excluded.brand,base_price=excluded.base_price`, prodVals);
       n += chunk.length;
-    }
-    if (replace) {
-      const r = await client.query("DELETE FROM products WHERE key NOT IN (SELECT key FROM _keep)");
-      removed = r.rowCount;
     }
     await client.query("COMMIT");
   } catch (e) { await client.query("ROLLBACK"); throw e; }
   finally { client.release(); }
   await setMeta("last_import", now);
   await setMeta("last_import_rows", String(n));
+  await setMeta('last_import_contains', needle);
+  await setMeta('last_import_domains', [...domainSet].join(','));
   return { rows: n, removed, at: now };
 }
 

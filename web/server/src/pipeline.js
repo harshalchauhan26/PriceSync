@@ -4,11 +4,14 @@ import { Fetcher, extractRow } from "./engine.js";
 import { toInr } from "./fx.js";
 import * as store from "./store.js";
 const engTol = store.matchTol;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const CONFIG = {
   concurrency: 8, timeout_ms: 12000, batch_size: 500, rest_between: 2,
   simulation: false, fresh_start: true, retry_errors: false,
-  safe_retry: true, safe_concurrency: 1, vendors: [],
+  safe_retry: true, safe_concurrency: 1, safe_cooldown_min: 4,
+  safe_cooldown_max: 8, safe_rest_between: 30, safe_batch_size: 25,
+  data_source: 'database', vendors: [],
 };
 export const STATE = {
   running: false, abort: false, phase: "idle", total_rows: 0, pre_done: 0,
@@ -30,6 +33,26 @@ async function processOne(fetcher, prod, runId) {
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
   let live, currency;
+  if (CONFIG.simulation) {
+    await sleep(30 + Math.random() * 90);
+    const roll = Math.random();
+    if (roll < 0.05 || base == null) {
+      log({ row: tag, domain: brand, url, currency: '-', price: '-',
+        status: 'Fetch Error', msg: 'simulated failure' });
+      await store.saveResult(prod, 'Fetch Error', null, null, 'error', runId);
+      return 'error';
+    }
+    live = roll > 0.12 ? base :
+      Math.round(base * (Math.random() > 0.5 ? 1.1 : 0.9) * 100) / 100;
+    currency = brand?.endsWith('.in') ? 'INR' : 'USD';
+    const liveInr = await toInr(live, currency);
+    const state = Math.abs(liveInr - base) <= engTol(base, currency) ? 'matched' : 'mismatch';
+    const status = state === 'matched' ? 'Price Matched (simulation)' : 'Price Mismatch! (simulation)';
+    log({ row: tag, domain: brand, url, currency, price: liveInr.toFixed(2),
+      status: state === 'matched' ? 'Price Matched' : 'Price Mismatch!', msg: 'simulation' });
+    await store.saveResult(prod, status, live, currency, state, runId);
+    return state;
+  }
   try {
     [live, currency] = await extractRow(fetcher, url, (prod.platform || "").trim(), prod.custom_regex || null);
     if (live == null) throw new Error("price not found");
@@ -58,12 +81,27 @@ async function processOne(fetcher, prod, runId) {
 }
 
 async function runPass(rows, workers, fetcher, runId, onDone) {
-  const limit = pLimit(Math.max(1, workers));
-  await Promise.all(rows.map((p) => limit(async () => {
-    if (STATE.abort) return;
-    const st = await processOne(fetcher, p, runId);
-    onDone(st);
-  })));
+  const safe = STATE.phase === 'safe_retry';
+  const batchSize = Math.max(1, Number(safe ? CONFIG.safe_batch_size : CONFIG.batch_size) || rows.length || 1);
+  const restSeconds = Math.max(0, Number(safe ? CONFIG.safe_rest_between : CONFIG.rest_between) || 0);
+  for (let start = 0; start < rows.length && !STATE.abort; start += batchSize) {
+    const limit = pLimit(Math.max(1, workers));
+    const batch = rows.slice(start, start + batchSize);
+    await Promise.all(batch.map((p) => limit(async () => {
+      if (STATE.abort) return;
+      const st = await processOne(fetcher, p, runId);
+      onDone(st);
+    })));
+    if (!STATE.abort && start + batchSize < rows.length && restSeconds > 0) {
+      const label = safe ? 'Safe-retry' : 'Main pass';
+      STATE.message = label + ' - resting ' + restSeconds + 's...';
+      const until = Date.now() + restSeconds * 1000;
+      while (!STATE.abort && Date.now() < until) {
+        await sleep(Math.min(500, Math.max(0, until - Date.now())));
+      }
+      STATE.message = label;
+    }
+  }
 }
 
 export async function startPipeline() {
@@ -71,10 +109,13 @@ export async function startPipeline() {
   const mode = CONFIG.fresh_start ? "fresh" : "update";
   const vendors = (CONFIG.vendors && CONFIG.vendors.length) ? CONFIG.vendors : null;
   try {
-    const rows = await store.workRows(mode, vendors);
-    const total = await store.countProducts(vendors);
+    const source = CONFIG.data_source === 'imported' ? 'imported' : 'database';
+    const rows = await store.workRows(mode, vendors, source);
+    const total = source === 'imported'
+      ? await store.countImported(vendors)
+      : await store.countProducts(vendors);
     Object.assign(STATE, { total_rows: total, pre_done: Math.max(0, total - rows.length),
-      phase: "main", message: `Main pass — ${rows.length} product(s)` });
+      phase: "main", message: `Main pass — ${rows.length} product(s) from ${source}` });
     const fetcher = new Fetcher({ timeout: CONFIG.timeout_ms });
     await runPass(rows, Math.min(25, Math.max(1, CONFIG.concurrency)), fetcher, runId, (st) => {
       STATE.completed++; STATE[st === "matched" ? "matched" : st === "mismatch" ? "mismatch" : "errors"]++;
@@ -85,7 +126,10 @@ export async function startPipeline() {
       const err = rows.filter((p) => errKeys.has(p.key));
       STATE.phase = "safe_retry"; STATE.retry_total = err.length; STATE.retry_completed = 0; STATE.retry_recovered = 0;
       STATE.message = `Safe-retry — ${err.length} errors, gently`;
-      const slow = new Fetcher({ timeout: 15000, cooldown: [4000, 8000] });
+      const slow = new Fetcher({ timeout: 15000, cooldown: [
+        Number(CONFIG.safe_cooldown_min) * 1000,
+        Number(CONFIG.safe_cooldown_max) * 1000,
+      ] });
       await runPass(err, CONFIG.safe_concurrency, slow, runId, (st) => {
         STATE.retry_completed++;
         if (st !== "error") { STATE.retry_recovered++; STATE.errors = Math.max(0, STATE.errors - 1);
