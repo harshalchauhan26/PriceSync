@@ -188,19 +188,22 @@ function Pipeline({ admin }) {
 /* ===================== REVIEW ===================== */
 function Review({ admin }) {
   const [tab, setTab] = useState("mismatch"); const [items, setItems] = useState([]); const [counts, setCounts] = useState({});
-  const [brand, setBrand] = useState(""); const [sel, setSel] = useState(() => new Set()); const [gm, setGm] = useState(0); const [conv, setConv] = useState(true); const [fxr, setFxr] = useState({});
+  const [brand, setBrand] = useState(""); const [sel, setSel] = useState(() => new Set()); const [gm, setGm] = useState(0); const [convCur, setConvCur] = useState("USD"); const [fxr, setFxr] = useState({});
   const [usd, setUsd] = useState(""); const [cad, setCad] = useState("");
+  const convOn = convCur !== "off";
   const load = useCallback(async () => { const d = await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(brand)}`); setItems((d.items || []).map((it) => ({ ...it, _m: it.markup_pct || gm, _amt: "", _cur: (it.currency || "INR").toUpperCase() }))); setCounts(d.counts || {}); setSel(new Set()); }, [tab, brand]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api("/api/fx").then((d) => { if (d.rates) setFxr(d.rates); if (d.markup != null) setGm(d.markup); setUsd(d.overrides?.USD ?? ""); setCad(d.overrides?.CAD ?? ""); }); }, []);
   const saveFx = async () => { const r = await aj("/api/fx/override", { usd, cad, markup: gm }); if (r.rates) setFxr(r.rates); if (r.overrides) { setUsd(r.overrides.USD ?? ""); setCad(r.overrides.CAD ?? ""); } toast(r.ok ? "Rates & markup saved · applies to all" : "Save failed", r.ok ? "ok" : "err"); };
-  const liveInr = (it) => { if (it.live_price == null) return null; const c = (it.currency || "INR").toUpperCase(); const r = (c === "INR" || c === "UNKNOWN") ? 1 : (fxr[c] || 1); return it.live_price * r; };
+  // Conversion currency is chosen at the top (USD/CAD/off) and forced on every
+  // non-INR live price, so all foreign prices convert the same agreed way.
+  const liveInr = (it) => { if (it.live_price == null) return null; const c = (it.currency || "INR").toUpperCase(); if (!convOn || c === "INR") return it.live_price; return it.live_price * (fxr[convCur] || 1); };
   const dInr = (it) => { const li = liveInr(it); return li != null && it.base_price != null ? li - it.base_price : null; };
   const amtInr = (amount, currency) => { const n = Number(amount); if (!Number.isFinite(n) || n <= 0) return null; const c = (currency || "INR").toUpperCase(); const r = (c === "INR" || c === "UNKNOWN") ? 1 : (fxr[c] || 1); return Math.round(n * r * 100) / 100; };
-  const previewFinal = (it) => { const manual = amtInr(it._amt, it._cur); if (manual != null) return manual; const ref = conv ? liveInr(it) : it.live_price; const base = ref == null ? it.base_price : ref; return base == null ? null : Math.round(base * (1 + Number(it._m || 0) / 100) * 100) / 100; };
-  const decide = async (it, decision) => { const r = await aj("/api/review/decide", { row: it.id, decision, markup_pct: it._m, price_amount: it._amt, price_currency: it._cur, convert: conv }); r.ok ? toast(decision === "approved" ? `Approved ${inr(r.final_price)} · ${r.shopify?.status || "queued"}` : "Rejected", r.shopify && !r.shopify.ok ? "err" : "ok") : toast(r.error, "err"); load(); };
-  const approveSel = async () => { if (!sel.size) return toast("Select rows first", "err"); let pushed = 0, failed = 0; for (const id of sel) { const it = items.find((x) => x.id === id); const r = await aj("/api/review/decide", { row: id, decision: "approved", markup_pct: it._m, price_amount: it._amt, price_currency: it._cur, convert: conv }); r.shopify?.ok ? pushed++ : failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed ? `, ${failed} failed` : ""}`, failed ? "err" : "ok"); load(); };
-  const approveAll = async () => { if (!confirm(`Approve ALL ${items.length} ${tab} with +${gm}%?`)) return; const r = await aj("/api/review/approve_all", { markup_pct: gm, convert: conv, kind: tab, brands: brand ? [brand] : [] }); r.ok ? toast(`Approved ${r.approved} · Shopify ${r.pushed || 0} ok${r.failed ? `, ${r.failed} failed` : ""}`, r.failed ? "err" : "ok") : toast(r.error, "err"); load(); };
+  const previewFinal = (it) => { const manual = amtInr(it._amt, it._cur); if (manual != null) return manual; const ref = liveInr(it); const base = ref == null ? it.base_price : ref; return base == null ? null : Math.round(base * (1 + Number(it._m || 0) / 100) * 100) / 100; };
+  const decide = async (it, decision) => { const r = await aj("/api/review/decide", { row: it.id, decision, markup_pct: it._m, price_amount: it._amt, price_currency: it._cur, convert: convOn, convert_currency: convOn ? convCur : "" }); r.ok ? toast(decision === "approved" ? `Approved ${inr(r.final_price)} · ${r.shopify?.status || "queued"}` : "Rejected", r.shopify && !r.shopify.ok ? "err" : "ok") : toast(r.error, "err"); load(); };
+  const approveSel = async () => { if (!sel.size) return toast("Select rows first", "err"); let pushed = 0, failed = 0; for (const id of sel) { const it = items.find((x) => x.id === id); const r = await aj("/api/review/decide", { row: id, decision: "approved", markup_pct: it._m, price_amount: it._amt, price_currency: it._cur, convert: convOn, convert_currency: convOn ? convCur : "" }); r.shopify?.ok ? pushed++ : failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed ? `, ${failed} failed` : ""}`, failed ? "err" : "ok"); load(); };
+  const approveAll = async () => { if (!confirm(`Approve ALL ${items.length} ${tab} with +${gm}%?`)) return; const r = await aj("/api/review/approve_all", { markup_pct: gm, convert: convOn, convert_currency: convOn ? convCur : "", kind: tab, brands: brand ? [brand] : [] }); r.ok ? toast(`Approved ${r.approved} · Shopify ${r.pushed || 0} ok${r.failed ? `, ${r.failed} failed` : ""}`, r.failed ? "err" : "ok") : toast(r.error, "err"); load(); };
   const tabs = [["mismatch", "Mismatches", counts.awaiting, COL.ter], ["error", "Errors", counts.error, COL.err], ["resolved", "Resolved", counts.matched, COL.sec]];
   const tog = (id) => { const n = new Set(sel); n.has(id) ? n.delete(id) : n.add(id); setSel(n); };
   return <div className="h-full min-h-0 flex flex-col">
@@ -218,7 +221,10 @@ function Review({ admin }) {
       <span className="text-[12px]" style={{ color: COL.mut }}>CAD→₹</span><input type="number" step="0.01" className="inp mono" style={{ width: 84 }} placeholder={fmt(fxr.CAD)} value={cad} onChange={(e) => setCad(e.target.value)} />
       <Btn kind="ghost" sm onClick={saveFx} disabled={!admin}><Icon n="check" s={13} />Save rates</Btn>
       <span className="w-px h-5" style={{ background: "var(--border)" }} />
-      <Toggle on={conv} onChange={setConv} /><span className="text-[12px]">Convert USD/CAD→INR</span>
+      <span className="text-[12px]" style={{ color: COL.mut }}>Apply conversion</span>
+      <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
+        {[["off", "No conv"], ["USD", "USD→₹"], ["CAD", "CAD→₹"]].map(([k, l]) => <button key={k} onClick={() => setConvCur(k)} className="px-3 py-1.5 text-[12px] font-semibold navi" style={{ background: convCur === k ? COL.primary : "var(--c-low)", color: convCur === k ? "#fff" : COL.mut }}>{l}</button>)}
+      </div>
       <Btn kind="sec" sm onClick={approveAll} disabled={!admin || !items.length}><Icon n="check" s={13} />Apply &amp; Approve all ({items.length})</Btn></div>
     <div className="flex gap-1.5 mb-3">{tabs.map(([k, l, n, c]) => <button key={k} onClick={() => { setTab(k); setBrand(""); }} className="px-4 py-2 rounded-lg text-[13px] font-semibold navi" style={{ background: tab === k ? "var(--c)" : "transparent", color: tab === k ? "#fff" : COL.mut, border: "1px solid " + (tab === k ? "var(--border)" : "transparent") }}>{l} <span className="mono" style={{ color: c }}>{fmtInt(n)}</span></button>)}</div>
     <div className="card flex-1 min-h-0 overflow-auto">

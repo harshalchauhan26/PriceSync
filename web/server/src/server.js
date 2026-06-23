@@ -195,7 +195,12 @@ async function approveOne(client, prow, body) {
   const hasAmount = amount != null && Number.isFinite(amount) && amount > 0;
   const ref = hasAmount ? `amount:${amountCurrency}` : (body.ref || "live");
   const convert = body.convert !== false;
-  const rate = convert ? fx[(prow.currency || "INR").toUpperCase()] || 1 : 1;
+  // The Review page picks the conversion currency (USD/CAD). Force that rate on any
+  // non-INR live price so it matches the on-screen preview; INR prices stay as-is.
+  const prodCur = (prow.currency || "INR").toUpperCase();
+  const forcedCur = String(body.convert_currency || "").toUpperCase();
+  const useCur = (forcedCur === "USD" || forcedCur === "CAD") ? forcedCur : prodCur;
+  const rate = (convert && prodCur !== "INR" && prodCur !== "") ? (fx[useCur] || 1) : 1;
   const final = hasAmount
     ? Math.round(amount * amountRate * 100) / 100
     : store.computeFinal(prow.base_price, prow.live_price, prow.currency, ref, markup, custom, convert, rate);
