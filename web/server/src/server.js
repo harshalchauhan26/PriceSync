@@ -172,6 +172,11 @@ app.post("/api/import", upload.single("file"), wrap(async (req, res) => {
   }
   catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 }));
+// Promote staged sheet products into the fixed products DB (add-only).
+app.post("/api/import/commit", wrap(async (req, res) => {
+  const r = await store.commitImportToProducts();
+  res.json({ ok: true, ...r, counts: await store.counts() });
+}));
 
 // ---------- review ----------
 app.get("/api/review/items", wrap(async (req, res) => {
@@ -272,6 +277,10 @@ app.post("/api/history/push_all", wrap(async (req, res) => {
     await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3", [r.status, new Date().toISOString(), it.id]);
     r.ok ? ok++ : fail++; }
   res.json({ ok: true, pushed: ok, failed: fail });
+}));
+app.post("/api/history/clear", wrap(async (req, res) => {
+  const removed = await store.clearHistory();
+  res.json({ ok: true, removed });
 }));
 app.get("/api/history/export", wrap(async (req, res) => {
   const rows = await q(`SELECT brand,url,base_price,live_price,currency,markup_pct,final_price,

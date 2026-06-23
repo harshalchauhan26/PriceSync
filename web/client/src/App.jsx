@@ -130,7 +130,9 @@ function Pipeline({ admin }) {
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [st.entries.length]);
   const send = (extra) => aj("/api/pipe/config", { ...cfg, ...extra });
   const run = async (mode) => { await send({ fresh_start: mode === "fresh", retry_errors: mode === "update", vendors: vsel }); const d = await aj("/api/pipe/start", {}); d.error ? toast(d.error, "err") : toast("Run started", "ok"); setSt((s) => ({ ...s, entries: [] })); cursor.current = 0; };
-  const onFile = async (f) => { if (!f || !admin) return; const fd = new FormData(); fd.append("file", f); toast("Reading " + f.name + "..."); const p = await api("/api/import/preview", { method: "POST", body: fd }); if (!p.ok) return toast(p.error || "Preview failed", "err"); const fd2 = new FormData(); const d = await api("/api/import", { method: "POST", body: fd2 }); d.ok ? toast(`Sheet catalog imported: ${d.rows} products`, "ok") : toast(d.error || "Import failed", "err"); api("/api/meta").then((x) => x.counts && setCat({ ...x.counts, imported: x.imported_count || 0 })); api("/api/vendors?source=" + cfg.data_source).then((x) => setVendors(x.vendors || [])); };
+  const onFile = async (f) => { if (!f || !admin) return; const fd = new FormData(); fd.append("file", f); toast("Reading " + f.name + "..."); const p = await api("/api/import/preview", { method: "POST", body: fd }); if (!p.ok) return toast(p.error || "Preview failed", "err"); const fd2 = new FormData(); const d = await api("/api/import", { method: "POST", body: fd2 }); d.ok ? toast(`Sheet staged: ${d.rows} products · click "Add to database" to save`, "ok") : toast(d.error || "Import failed", "err"); refreshCat(); };
+  const refreshCat = () => { api("/api/meta").then((x) => x.counts && setCat({ ...x.counts, imported: x.imported_count || 0 })); api("/api/vendors?source=" + cfg.data_source).then((x) => setVendors(x.vendors || [])); };
+  const commitSheet = async () => { if (!admin) return toast("Admin only", "err"); if (!cat.imported) return toast("Upload a sheet first", "err"); if (!confirm(`Sync the database to the sheet?\n\nThe products DB will become EXACTLY the ${fmtInt(cat.imported)} Shopify products in the sheet — new ones added, products no longer in the sheet removed. Approval history is kept.`)) return; toast("Syncing database to sheet…"); const r = await aj("/api/import/commit", {}); r.ok ? toast(`Synced → ${fmtInt(r.total)} in DB (${fmtInt(r.added)} added, ${fmtInt(r.removed)} removed)`, "ok") : toast(r.error || "Failed", "err"); refreshCat(); };
   const pct = st.total_rows ? Math.min(100, st.current_row / st.total_rows * 100) : 0;
   const sourceTotal = cfg.data_source === "imported" ? cat.imported : cat.total;
   const scope = vsel.length ? vendors.filter((v) => vsel.includes(v.vendor)).reduce((a, v) => a + v.count, 0) : sourceTotal;
@@ -142,13 +144,17 @@ function Pipeline({ admin }) {
         <input id="fi" type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => onFile(e.target.files[0])} />
         <div className="text-[11px] mt-2" style={{ color: COL.mut }}>{fmtInt(sourceTotal)} products in selected source</div>
         <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
-          <div><div className="text-[12px] font-semibold">Pipeline source</div>
-            <div className="text-[10px]" style={{ color: COL.mut }}>{cfg.data_source === "imported" ? "Latest imported catalog" : "Live products database"}</div></div>
+          <div><div className="text-[12px] font-semibold">{cfg.data_source === "imported" ? "Sheet products only" : "Database products"}</div>
+            <div className="text-[10px]" style={{ color: COL.mut }}>{cfg.data_source === "imported" ? "Scrape the uploaded sheet, not the DB" : "Scrape the permanent products database"}</div></div>
           <Toggle on={cfg.data_source === "imported"} onChange={(on) => {
             const data_source = on ? "imported" : "database";
             const next = { ...cfg, data_source, vendors: [] };
             setCfg(next); setVsel([]); aj("/api/pipe/config", next);
           }} />
+        </div>
+        <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
+          <Btn kind="primary" sm onClick={commitSheet} disabled={!admin || !cat.imported} style={{ width: "100%", justifyContent: "center" }}><Icon n="dl" s={13} />Sync database to sheet</Btn>
+          <div className="text-[10px] mt-1.5" style={{ color: COL.mut }}>Staged in sheet: <b style={{ color: "#fff" }}>{fmtInt(cat.imported)}</b> · DB becomes exactly the sheet's Shopify products</div>
         </div></div>
       <div className="card p-3"><div className="flex justify-between items-center mb-2"><span className="lbl">Designer Domain</span><span className="text-[10px]" style={{ color: COL.mut }}><a onClick={() => setVsel([])} style={{ cursor: "pointer" }}>clear</a></span></div>
         <div className="max-h-44 overflow-y-auto space-y-0.5">{vendors.map((v) => <label key={v.vendor} className="flex items-center gap-2 text-[12px] px-1 py-0.5 cursor-pointer"><input type="checkbox" checked={vsel.includes(v.vendor)} onChange={() => tv(v.vendor)} /><span className="flex-1 truncate">{v.vendor.replace(/^www\./, "")}</span><span style={{ color: COL.mut }}>{v.count}</span></label>)}</div>
@@ -241,9 +247,10 @@ function History({ admin }) {
   useEffect(() => { load(); }, [load]);
   const push = async (it) => { if (!admin) return toast("Admin only", "err"); toast("Pushing…"); const r = await aj("/api/history/push", { row: it.id }); toast(r.status || "done", r.ok ? "ok" : "err"); load(); };
   const pushAll = async () => { if (!admin || !confirm("Push all approved prices to store?")) return; toast("Pushing…"); const r = await aj("/api/history/push_all", {}); toast(`Pushed ${r.pushed}${r.failed ? ", " + r.failed + " failed" : ""}`, r.failed ? "err" : "ok"); load(); };
+  const clearDb = async () => { if (!admin) return toast("Admin only", "err"); if (!d.count) return toast("History already empty", "ok"); if (!confirm(`Permanently delete ALL ${fmtInt(d.count)} review history records?\n\nThis only clears the review/approval archive. Products are not affected.`)) return; toast("Clearing review history…"); const r = await aj("/api/history/clear", {}); r.ok ? toast(`Cleared ${fmtInt(r.removed)} review records`, "ok") : toast(r.error || "Failed", "err"); load(); };
   return <div className="h-full overflow-auto">
     <div className="flex items-start justify-between mb-4"><div><h1 style={{ fontSize: 28, fontWeight: 600 }}>Approval History</h1><div className="text-[13px]" style={{ color: COL.mut }}>Approved prices archived from review.</div></div>
-      <div className="flex gap-2.5 items-center"><VendorSelect value={brand} onChange={setBrand} /><Btn kind="ghost" sm onClick={() => window.location = "/api/history/export"}><Icon n="dl" s={13} />Export</Btn><Btn kind="primary" sm onClick={pushAll} disabled={!admin}><Icon n="share" s={13} />Push all</Btn></div></div>
+      <div className="flex gap-2.5 items-center"><VendorSelect value={brand} onChange={setBrand} /><Btn kind="ghost" sm onClick={() => window.location = "/api/history/export"}><Icon n="dl" s={13} />Export</Btn><Btn kind="primary" sm onClick={pushAll} disabled={!admin}><Icon n="share" s={13} />Push all</Btn><Btn kind="danger" sm onClick={clearDb} disabled={!admin || !d.count}><Icon n="x" s={13} />Clear DB</Btn></div></div>
     <div className="grid grid-cols-3 gap-3 mb-4"><Stat k="Approved" v={fmtInt(d.count)} /><Stat k="Total value" v={inr(d.value)} c={COL.sec} /><Stat k="Pushed" v={fmtInt(d.pushed) + "/" + fmtInt(d.count)} c={COL.primary} /></div>
     <div className="card overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Brand", "Product", "Base ₹", "Final ₹", "Markup", "By", "When", "Store", ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
       <tbody>{d.items.map((it) => <tr key={it.id} style={{ borderTop: "1px solid var(--c-low)" }}>

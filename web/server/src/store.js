@@ -251,6 +251,13 @@ export async function historyList(brand) {
   return { items: rows, count: num(s.c), value: Number(s.v) || 0, pushed: num(s.pushed) };
 }
 
+// Empty the review/approval archive (the "review DB"). Products are NOT touched.
+export async function clearHistory() {
+  const n = num((await one("SELECT COUNT(*) c FROM review_history")).c);
+  await q("DELETE FROM review_history");
+  return n;
+}
+
 // ---- integrations (single global store) ----
 export async function getStoreIntegration() {
   return one("SELECT * FROM integrations WHERE brand=$1", [STORE_KEY]);
@@ -316,8 +323,9 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
   let n = 0, removed = 0;
   try {
     await client.query("BEGIN");
-    // `replace` only clears the import staging view. The products catalog is FIXED:
-    // it is never deleted here (or anywhere) — the sheet can only ADD / refresh rows.
+    // Sheet upload only stages into import_catalog. Products enter the fixed
+    // catalog later, on demand, via commitImportToProducts(). `replace` clears
+    // the staging view only — the products table is never deleted here.
     if (replace) {
       const r = await client.query("DELETE FROM import_catalog");
       removed = r.rowCount;
@@ -339,23 +347,6 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
           platform=excluded.platform,custom_regex=excluded.custom_regex,
           brand=excluded.brand,base_price=excluded.base_price,
           imported_at=excluded.imported_at`, importVals);
-
-      // The sheet is the ONLY way products enter the catalog. Add new products and
-      // refresh catalog fields on existing ones; live_price / state / decision /
-      // final_price are preserved, and no row is ever removed.
-      const prodVals = []; const prodPh = [];
-      chunk.forEach((p, j) => {
-        const b = j * 7;
-        prodPh.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7})`);
-        prodVals.push(p.key, p.mbo_url, p.url, p.platform, p.custom_regex,
-          p.brand, p.base_price);
-      });
-      await client.query(`INSERT INTO products
-        (key,mbo_url,url,platform,custom_regex,brand,base_price)
-        VALUES ${prodPh.join(',')}
-        ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
-          platform=excluded.platform,custom_regex=excluded.custom_regex,
-          brand=excluded.brand,base_price=excluded.base_price`, prodVals);
       n += chunk.length;
     }
     await client.query("COMMIT");
@@ -366,6 +357,33 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
   await setMeta('last_import_contains', needle);
   await setMeta('last_import_domains', [...domainSet].join(','));
   return { rows: n, removed, at: now };
+}
+
+// Mirror the staged sheet (import_catalog) into the products table so the DB
+// holds EXACTLY the MBO Shopify products from the scraped xlsx:
+//   - add sheet products that are new
+//   - refresh catalog fields on ones that remain (live_price/state/decision kept)
+//   - drop products no longer present in the sheet
+// review_history is a separate archive and is never touched here. If the sheet is
+// empty we do nothing (so an accidental empty import can't wipe the catalog).
+export async function commitImportToProducts() {
+  const staged = num((await one("SELECT COUNT(*) c FROM import_catalog")).c);
+  if (!staged) return { added: 0, removed: 0, staged: 0, total: num((await one("SELECT COUNT(*) c FROM products")).c), skipped: true };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const before = num((await client.query("SELECT COUNT(*) c FROM products")).rows[0].c);
+    await client.query(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price)
+      SELECT key,mbo_url,url,platform,custom_regex,brand,base_price FROM import_catalog
+      ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
+        platform=excluded.platform,custom_regex=excluded.custom_regex,
+        brand=excluded.brand,base_price=excluded.base_price`);
+    const removed = (await client.query(`DELETE FROM products WHERE key NOT IN (SELECT key FROM import_catalog)`)).rowCount;
+    const after = num((await client.query("SELECT COUNT(*) c FROM products")).rows[0].c);
+    await client.query("COMMIT");
+    return { added: after - (before - removed), removed, staged, total: after };
+  } catch (e) { await client.query("ROLLBACK"); throw e; }
+  finally { client.release(); }
 }
 
 export { STORE_KEY };
