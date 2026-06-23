@@ -102,7 +102,13 @@ export async function counts() {
   const o = {}; for (const k of Object.keys(r)) o[k] = num(r[k]); return o;
 }
 
+// The badge count runs a window function over all of price_history, so it is
+// cached briefly — every connected client polls /api/meta and we don't want each
+// poll to re-run this heavy query against Supabase.
+let _alertCache = { at: 0, threshold: null, value: 0 };
 export async function alertCount(threshold = 5) {
+  const now = Date.now();
+  if (now - _alertCache.at < 60_000 && _alertCache.threshold === threshold) return _alertCache.value;
   try {
     const r = await one(`SELECT COUNT(*) c FROM (
       SELECT live_price, prev FROM (
@@ -112,7 +118,9 @@ export async function alertCount(threshold = 5) {
         FROM price_history WHERE live_price IS NOT NULL
       ) t WHERE rn=1 AND prev IS NOT NULL AND prev<>0
         AND ABS((live_price-prev)/prev*100) >= $1) z`, [Math.abs(threshold)]);
-    return num(r.c);
+    const value = num(r.c);
+    _alertCache = { at: now, threshold, value };
+    return value;
   } catch { return 0; }
 }
 

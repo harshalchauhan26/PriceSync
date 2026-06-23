@@ -54,14 +54,18 @@ function VendorSelect({ value, onChange, kind }) {
 }
 function ChartBox({ type, labels, datasets, options, h = 230 }) {
   const ref = useRef(null), inst = useRef(null);
+  // Only rebuild when the data/config actually changes — NOT on every parent
+  // re-render (the app polls /api/meta on a timer, which would otherwise destroy
+  // and recreate every chart repeatedly and make the UI lag/flicker).
+  const sig = JSON.stringify({ type, labels, datasets, options });
   useEffect(() => {
     if (!ref.current) return; if (inst.current) inst.current.destroy();
     inst.current = new Chart(ref.current.getContext("2d"), { type, data: { labels, datasets },
-      options: Object.assign({ responsive: true, maintainAspectRatio: false,
+      options: Object.assign({ responsive: true, maintainAspectRatio: false, animation: false,
         plugins: { legend: { labels: { color: "#a1a1aa", font: { size: 11 } } } },
         scales: (type === "doughnut") ? {} : { x: { ticks: { color: "#a1a1aa", font: { size: 10 } }, grid: { color: "#27272a" } }, y: { ticks: { color: "#a1a1aa", font: { size: 10 } }, grid: { color: "#27272a" } } } }, options || {}) });
     return () => inst.current && inst.current.destroy();
-  });
+  }, [sig, h]);
   return <div style={{ height: h }}><canvas ref={ref} /></div>;
 }
 
@@ -334,7 +338,7 @@ function Settings({ me }) {
 export default function App() {
   const [me, setMe] = useState(undefined); const [view, setView] = useState("home"); const [meta, setMeta] = useState({ counts: {}, alerts: 0 });
   useEffect(() => { api("/api/me").then((d) => setMe(d && d.email ? d : null)); }, []);
-  useEffect(() => { if (!me) return; const f = () => api("/api/meta").then((d) => d.counts && setMeta(d)); f(); const t = setInterval(f, 6000); return () => clearInterval(t); }, [me]);
+  useEffect(() => { if (!me) return; const f = () => api("/api/meta").then((d) => d.counts && setMeta((m) => JSON.stringify(m) === JSON.stringify(d) ? m : d)); f(); const t = setInterval(f, 15000); return () => clearInterval(t); }, [me]);
   if (me === undefined) return <div className="h-full flex items-center justify-center" style={{ color: COL.mut }}>Loading…</div>;
   if (!me) return <><Toaster /><Auth onIn={(d) => setMe(d)} /></>;
   const admin = me.role === "admin" || me.role === "owner";

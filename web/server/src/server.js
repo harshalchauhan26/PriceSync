@@ -1,5 +1,6 @@
 // MBO Tracker — Express server (Supabase-backed). Mirrors the Flask API surface.
 import express from "express";
+import compression from "compression";
 import session from "express-session";
 import multer from "multer";
 import ExcelJS from "exceljs";
@@ -25,6 +26,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 
 const pendingUploads = new Map();
 
 app.set("trust proxy", 1);
+app.use(compression());                 // gzip responses (bundle ~393KB -> ~128KB)
 app.use(express.json({ limit: "2mb" }));
 app.use(session({
   secret: config.secret, resave: false, saveUninitialized: false,
@@ -373,8 +375,18 @@ app.post("/api/admin/users/delete", sec.ownerOnly, wrap(async (req, res) => {
 
 // ---------- client (SPA) ----------
 if (fs.existsSync(CLIENT_DIST)) {
-  app.use(express.static(CLIENT_DIST));
-  app.get("*", (req, res) => res.sendFile(path.join(CLIENT_DIST, "index.html")));
+  // Hashed assets (index-*.js/css) are immutable -> cache hard. index.html is
+  // never cached so a new deploy is picked up immediately (no stale UI).
+  app.use(express.static(CLIENT_DIST, {
+    index: false, maxAge: "1y", immutable: true,
+    setHeaders: (res, p) => {
+      if (p.endsWith("index.html")) res.setHeader("Cache-Control", "no-cache");
+    },
+  }));
+  app.get("*", (req, res) => {
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(path.join(CLIENT_DIST, "index.html"));
+  });
 } else {
   app.get("/", (req, res) => res.type("html").send(
     "<h2 style='font-family:sans-serif'>MBO Tracker API (Node) is running.</h2>" +
