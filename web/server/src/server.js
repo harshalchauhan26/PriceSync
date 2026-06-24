@@ -186,6 +186,7 @@ app.get("/api/review/items", wrap(async (req, res) => {
 app.get("/api/review/brands", wrap(async (req, res) => res.json({ brands: (await store.vendors(req.query.kind)).map((v) => ({ brand: v.vendor, count: v.count })) })));
 
 async function approveOne(client, prow, body) {
+  // markup is now a flat AMOUNT in the chosen target currency (USD/CAD), not a percent.
   const markup = body.markup_pct === "" || body.markup_pct == null ? 0 : Number(body.markup_pct);
   const custom = body.custom_price === "" || body.custom_price == null ? null : Number(body.custom_price);
   const amount = body.price_amount === "" || body.price_amount == null ? null : Number(body.price_amount);
@@ -194,24 +195,23 @@ async function approveOne(client, prow, body) {
   const amountRate = ["INR", "UNKNOWN", ""].includes(amountCurrency) ? 1 : (fx[amountCurrency] || 1);
   const hasAmount = amount != null && Number.isFinite(amount) && amount > 0;
   const ref = hasAmount ? `amount:${amountCurrency}` : (body.ref || "live");
-  const convert = body.convert !== false;
-  // The Review page picks the conversion currency (USD/CAD). Force that rate on any
-  // non-INR live price so it matches the on-screen preview; INR prices stay as-is.
-  const prodCur = (prow.currency || "INR").toUpperCase();
+  // The Review page picks the OUTPUT currency (USD/CAD). Everything is expressed in INR
+  // first, then divided by the target rate (INR per 1 unit) to land in that currency.
   const forcedCur = String(body.convert_currency || "").toUpperCase();
-  const useCur = (forcedCur === "USD" || forcedCur === "CAD") ? forcedCur : prodCur;
-  const rate = (convert && prodCur !== "INR" && prodCur !== "") ? (fx[useCur] || 1) : 1;
+  const targetCur = (forcedCur === "USD" || forcedCur === "CAD") ? forcedCur : "INR";
+  const targetRate = targetCur === "INR" ? 1 : (fx[targetCur] || 1);
+  const convert = body.convert !== false && targetCur !== "INR";
+  const liveInr = await toInr(prow.live_price, prow.currency);
   const final = hasAmount
-    ? Math.round(amount * amountRate * 100) / 100
-    : store.computeFinal(prow.base_price, prow.live_price, prow.currency, ref, markup, custom, convert, rate);
+    ? Math.round((amount * amountRate / targetRate) * 100) / 100   // amount -> INR -> target
+    : store.computeFinal(prow.base_price, liveInr, ref, markup, custom, convert, targetRate);
   const archived = await store.archiveApproved(client, prow, final, markup, ref, body.note || "", body._by);
-  // On a resolved mismatch the freshly-fetched live price becomes the new baseline
-  // in DB, so future runs compare against it (converted to INR to match base units).
-  if (prow.state === "mismatch" && prow.live_price != null) {
-    const liveInr = await toInr(prow.live_price, prow.currency);
-    if (liveInr != null)
-      await client.query("UPDATE products SET base_price=$1 WHERE id=$2", [liveInr, prow.id]);
-  }
+  // Approved rows leave the working catalog: the approval is preserved in
+  // review_history (History page) and the product is removed from products + the
+  // staged sheet, so it no longer shows in Review. The Shopify push runs afterwards
+  // from the archived row, so deleting the product here doesn't affect it.
+  await client.query("DELETE FROM products WHERE id=$1", [prow.id]);
+  await client.query("DELETE FROM import_catalog WHERE key=$1", [prow.key]);
   return { final, archived };
 }
 async function pushApprovedToStore(archived) {
@@ -239,6 +239,15 @@ app.post("/api/review/decide", wrap(async (req, res) => {
       [req.body.decision, req.body.note || "", new Date().toISOString(), req.body.row]);
     res.json({ ok: true });
   }
+}));
+// Delete a product from the DB permanently (the ✗ button in Review). Removes it
+// from both products and the staged sheet so a later sync won't re-add it.
+app.post("/api/review/delete", wrap(async (req, res) => {
+  const it = await one("SELECT key FROM products WHERE id=$1", [req.body.row]);
+  if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
+  await q("DELETE FROM products WHERE id=$1", [req.body.row]);
+  await q("DELETE FROM import_catalog WHERE key=$1", [it.key]);
+  res.json({ ok: true, counts: await store.counts() });
 }));
 app.post("/api/review/approve_all", wrap(async (req, res) => {
   const kind = req.body.kind || "mismatch";

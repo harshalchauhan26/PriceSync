@@ -188,16 +188,23 @@ export async function workRows(mode = "fresh", vendorList = null, source = 'data
 }
 
 // ---- pipeline result write (+ history snapshot) ----
-// Products are a FIXED catalog: new rows enter ONLY through importSheet (the sheet).
-// A scrape run may refresh price/state on an existing product but must never create
-// (or delete) one — so this is an UPDATE, never an INSERT, against products.
+// Scrape results are UPSERTED into products so the rows being scraped (from the
+// sheet or the DB) always carry their live price + state — that's how a freshly
+// found mismatch reaches Review. The product source is always the sheet/DB, so
+// this never invents junk. decision is reset to pending so a row that flips back
+// to mismatch reappears in Review even if it was decided in a previous cycle.
 export async function saveResult(prod, status, live, cur, state, runId) {
   const base = prod.base_price;
   const delta = (live != null && base != null) ? (await toInr(live, cur)) - base : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  await q(`UPDATE products SET live_price=$2,currency=$3,status=$4,state=$5,
-      delta=$6,updated_at=$7 WHERE key=$1`,
-    [prod.key, live, cur, status, state, delta, now]);
+  await q(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,
+      live_price,currency,status,state,delta,decision,decided_at,updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',NULL,$13)
+    ON CONFLICT(key) DO UPDATE SET live_price=excluded.live_price,currency=excluded.currency,
+      status=excluded.status,state=excluded.state,delta=excluded.delta,
+      decision='pending',decided_at=NULL,updated_at=excluded.updated_at`,
+    [prod.key, prod.mbo_url || "", prod.url, prod.platform, prod.custom_regex, prod.brand,
+      base, live, cur, status, state, delta, now]);
   await q(`INSERT INTO price_history(key,url,brand,base_price,live_price,delta,state,status,run_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
     [prod.key, prod.url, prod.brand, base, live, delta, state, status, runId]);
@@ -216,14 +223,16 @@ export async function reviewItems(kind, brands) {
   return { items, counts: await counts() };
 }
 
-export function computeFinal(base, live, currency, ref, markup, custom, convert, rate) {
+// baseInr / liveInr are already in INR. `rate` is INR-per-1-unit of the target
+// currency (USD/CAD), so to express the price in that currency we DIVIDE. `markup`
+// is a flat amount in the target currency (not a percentage) added after conversion.
+export function computeFinal(baseInr, liveInr, ref, markup, custom, convert, rate) {
   if (custom != null && Number(custom) > 0) return Math.round(Number(custom) * 100) / 100;
-  let reference;
-  if (ref === "base") reference = base;
-  else reference = convert ? (live == null ? null : live * rate) : live;
-  if (reference == null) reference = base;
+  let reference = ref === "base" ? baseInr : liveInr;
+  if (reference == null) reference = baseInr;
   if (reference == null) return null;
-  return Math.round(reference * (1 + Number(markup || 0) / 100) * 100) / 100;
+  const converted = convert && rate ? reference / rate : reference;
+  return Math.round((converted + Number(markup || 0)) * 100) / 100;
 }
 
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
