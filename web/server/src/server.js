@@ -2,6 +2,7 @@
 import express from "express";
 import compression from "compression";
 import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
 import multer from "multer";
 import ExcelJS from "exceljs";
 import fs from "node:fs";
@@ -9,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { config } from "./config.js";
-import { q, one, ping } from "./db.js";
+import { q, one, ping, pool } from "./db.js";
 import * as sec from "./security.js";
 import * as store from "./store.js";
 import { encrypt } from "./crypto.js";
@@ -28,9 +29,14 @@ const pendingUploads = new Map();
 app.set("trust proxy", 1);
 app.use(compression());                 // gzip responses (bundle ~393KB -> ~128KB)
 app.use(express.json({ limit: "2mb" }));
+// Sessions live in Postgres (not in-memory) so concurrent users stay logged in
+// across server restarts/redeploys and across multiple cloud instances. The
+// session table is auto-created on boot. Secure cookies only on cloud (HTTPS);
+// `trust proxy` above lets express-session honor Render's X-Forwarded-Proto.
 app.use(session({
+  store: new (connectPgSimple(session))({ pool, createTableIfMissing: true }),
   secret: config.secret, resave: false, saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: "lax", maxAge: 12 * 3600 * 1000 },
+  cookie: { httpOnly: true, sameSite: "lax", secure: config.isCloud, maxAge: 12 * 3600 * 1000 },
 }));
 
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
@@ -390,10 +396,18 @@ app.get("/api/export", wrap(async (req, res) => {
 // ---------- owner console ----------
 app.get("/api/admin/sessions", sec.ownerOnly, (req, res) => res.json({ sessions: sec.activeSessions() }));
 app.get("/api/admin/users", sec.ownerOnly, wrap(async (req, res) => res.json({ users: (await sec.listUsers()).map((u) => ({ ...u, created_at: String(u.created_at) })) })));
-app.post("/api/admin/users/role", sec.ownerOnly, wrap(async (req, res) => { await sec.setRole(req.body.email, req.body.role); res.json({ ok: true }); }));
+app.post("/api/admin/users/role", sec.ownerOnly, wrap(async (req, res) => {
+  const role = String(req.body.role || "");
+  if (!sec.ROLES.has(role)) return res.status(400).json({ ok: false, error: "invalid role" });
+  await sec.setRole(req.body.email, role);
+  sec.clearRoleCache();                       // apply the new role on the user's next request
+  res.json({ ok: true });
+}));
 app.post("/api/admin/users/delete", sec.ownerOnly, wrap(async (req, res) => {
   if (req.body.email === sec.currentUser(req)?.email) return res.status(400).json({ ok: false, error: "can't delete yourself" });
-  await sec.deleteUser(req.body.email); res.json({ ok: true });
+  await sec.deleteUser(req.body.email);
+  sec.clearRoleCache();                        // revoke the deleted user's access immediately
+  res.json({ ok: true });
 }));
 
 // ---------- client (SPA) ----------

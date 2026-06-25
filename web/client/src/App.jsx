@@ -356,7 +356,12 @@ function Settings({ me }) {
 export default function App() {
   const [me, setMe] = useState(undefined); const [view, setView] = useState("home"); const [meta, setMeta] = useState({ counts: {}, alerts: 0 });
   useEffect(() => { api("/api/me").then((d) => setMe(d && d.email ? d : null)); }, []);
-  useEffect(() => { if (!me) return; const f = () => api("/api/meta").then((d) => d.counts && setMeta((m) => JSON.stringify(m) === JSON.stringify(d) ? m : d)); f(); const t = setInterval(f, 15000); return () => clearInterval(t); }, [me]);
+  useEffect(() => { if (!me) return; const f = () => {
+    api("/api/meta").then((d) => d.counts && setMeta((m) => JSON.stringify(m) === JSON.stringify(d) ? m : d));
+    // Re-poll identity so a role change (e.g. owner promotes/demotes this user) updates
+    // the UI gating without a manual reload. Drop to login if the session was revoked.
+    api("/api/me").then((d) => { if (!d || !d.email) setMe(null); else setMe((m) => m && m.role === d.role ? m : d); });
+  }; f(); const t = setInterval(f, 15000); return () => clearInterval(t); }, [me]);
   if (me === undefined) return <div className="h-full flex items-center justify-center" style={{ color: COL.mut }}>Loading…</div>;
   if (!me) return <><Toaster /><Auth onIn={(d) => setMe(d)} /></>;
   const admin = me.role === "admin" || me.role === "owner";

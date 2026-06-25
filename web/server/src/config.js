@@ -24,6 +24,10 @@ export const config = {
   // only on cloud where NODE_PORT isn't set.
   host: e.NODE_HOST || ((e.PORT && !e.NODE_PORT) || e.HOST === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1"),
   port: parseInt(e.NODE_PORT || e.PORT || "8090", 10),
+  // True on Render/Heroku-style hosts (PORT injected, NODE_PORT absent) or when
+  // NODE_ENV=production. Drives HTTPS-only "secure" session cookies — never on
+  // locally, where the browser would otherwise drop the cookie over plain http.
+  isCloud: ((!!e.PORT && !e.NODE_PORT) || e.NODE_ENV === "production"),
   smtp: {
     host: e.SMTP_HOST || "smtp.gmail.com",
     port: parseInt(e.SMTP_PORT || "587", 10),

@@ -6,10 +6,27 @@ import { q, one } from "./db.js";
 const WRITE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const PUBLIC = new Set(["/api/login", "/api/register", "/api/health"]);
 const ADMIN_ROLES = new Set(["admin", "owner"]);
+export const ROLES = new Set(["viewer", "admin", "owner"]);   // assignable roles
 
 export const SESSIONS = new Map();          // sid -> {uid,email,role,ip,ua,login_at,last_seen}
 const ACTIVE_WINDOW = 300_000;
 const FAILS = new Map(); const MAX_FAILS = 5; const LOCK_WINDOW = 600_000;
+
+// Live-role cache: guard reads the CURRENT role from the DB (not the stale copy
+// frozen in the session at login) so promotions/demotions/deletions take effect
+// without forcing a re-login. Cached briefly per-uid to avoid a query per request;
+// role changes clear the cache so they apply instantly.
+const ROLE_CACHE = new Map();               // uid -> { role, exp }
+const ROLE_TTL = 10_000;
+export async function liveRole(uid) {
+  const c = ROLE_CACHE.get(uid);
+  if (c && c.exp > Date.now()) return c.role;
+  const u = await one("SELECT role FROM users WHERE id=$1", [uid]);
+  const role = u ? u.role : null;           // null => user no longer exists
+  ROLE_CACHE.set(uid, { role, exp: Date.now() + ROLE_TTL });
+  return role;
+}
+export const clearRoleCache = () => ROLE_CACHE.clear();
 
 // ---- users repo ----
 export async function ensureUsers() {
@@ -108,10 +125,16 @@ export const isAdmin = (req) => ADMIN_ROLES.has(req.session.role);
 export const isOwner = (req) => req.session.role === "owner";
 
 // ---- middleware ----
-export function guard(req, res, next) {
+export async function guard(req, res, next) {
   const p = req.path;
   if (PUBLIC.has(p)) return next();
   if (!req.session.uid) return res.status(401).json({ error: "authentication required" });
+  try {
+    // Pull the up-to-date role from the DB so role changes apply without re-login.
+    const role = await liveRole(req.session.uid);
+    if (role == null) { logoutUser(req); return res.status(401).json({ error: "authentication required" }); }
+    if (req.session.role !== role) req.session.role = role;   // only write session when it actually changed
+  } catch (e) { return res.status(500).json({ error: "auth check failed" }); }
   touch(req);
   if (WRITE.has(req.method) && !isAdmin(req)) return res.status(403).json({ error: "admin role required" });
   next();
