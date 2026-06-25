@@ -223,12 +223,16 @@ async function approveOne(client, prow, body) {
     ? Math.round((amount * amountRate / targetRate) * 100) / 100   // amount -> INR -> target
     : store.computeFinal(prow.base_price, liveInr, ref, markup, custom, convert, targetRate);
   const archived = await store.archiveApproved(client, prow, final, markup, ref, body.note || "", body._by);
-  // Approved rows leave the working catalog: the approval is preserved in
-  // review_history (History page) and the product is removed from products + the
-  // staged sheet, so it no longer shows in Review. The Shopify push runs afterwards
-  // from the archived row, so deleting the product here doesn't affect it.
-  await client.query("DELETE FROM products WHERE id=$1", [prow.id]);
-  await client.query("DELETE FROM import_catalog WHERE key=$1", [prow.key]);
+  // The approved live price (raw INR, before markup/conversion) becomes this
+  // product's new baseline. Persist it in BOTH products and the staged sheet
+  // (import_catalog) so a later sync won't overwrite it back. The product stays in
+  // the catalog and now reads as matched; it leaves Review because decision is now
+  // 'approved' (set by archiveApproved). The approval is also kept in review_history.
+  if (liveInr != null && Number.isFinite(liveInr) && liveInr > 0) {
+    await client.query(`UPDATE products SET base_price=$1, state='matched',
+      status='Price Matched (INR)', delta=0 WHERE id=$2`, [liveInr, prow.id]);
+    await client.query("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [liveInr, prow.key]);
+  }
   return { final, archived };
 }
 async function pushApprovedToStore(archived) {
