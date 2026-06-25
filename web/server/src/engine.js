@@ -117,6 +117,10 @@ export function detectCurrency(text) {
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   m = text.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Z]{3})["']/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
+  // Shopify storefronts expose the shop's ACTIVE currency authoritatively:
+  //   Shopify.currency = {"active":"CAD","rate":"1.0"}
+  m = text.match(/Shopify\.currency\s*=\s*\{[^}]*?["']active["']\s*:\s*["']([A-Z]{3})["']/);
+  if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   if (text.includes("₹") || /\bRs\.?\s*\d/i.test(text)) return "INR";
   if (/\bC\$|\bCAD\b/.test(text)) return "CAD";
   if (/\bUSD\b/.test(text) || text.includes("$")) return "USD";
@@ -167,7 +171,11 @@ export async function extractShopify(fetcher, url) {
     let price;
     if (typeof raw === "number" && Number.isInteger(raw)) price = raw / 100;
     else price = descaleIfCents(sanitizePrice(raw));
-    let currency = detectCurrency(resp.data) || DOMAIN_CURRENCY.get(domain) || null;
+    // Shopify .js carries NO currency, and guessing from the product JSON text
+    // risks a false "$"->USD on a CAD/INR store. Resolve the shop's authoritative
+    // currency from the storefront HTML (Shopify.currency.active / og:price:currency)
+    // once per domain and cache it.
+    let currency = DOMAIN_CURRENCY.get(domain) || null;
     if (price != null && !currency) {
       try { currency = detectCurrency((await fetcher.get(url)).data); } catch { /* ignore */ }
     }
