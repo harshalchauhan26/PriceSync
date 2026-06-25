@@ -190,7 +190,7 @@ function Review({ admin }) {
   const [tab, setTab] = useState("mismatch"); const [items, setItems] = useState([]); const [counts, setCounts] = useState({});
   const [brand, setBrand] = useState(""); const [sel, setSel] = useState(() => new Set()); const [gm, setGm] = useState(0); const [convCur, setConvCur] = useState("USD"); const [fxr, setFxr] = useState({});
   const [usd, setUsd] = useState(""); const [cad, setCad] = useState("");
-  const convOn = convCur !== "off";
+  const convOn = convCur !== "INR";
   const load = useCallback(async () => { const d = await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(brand)}`); setItems((d.items || []).map((it) => ({ ...it, _m: it.markup_pct || gm, _amt: "", _cur: (it.currency || "INR").toUpperCase() }))); setCounts(d.counts || {}); setSel(new Set()); }, [tab, brand]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api("/api/fx").then((d) => { if (d.rates) setFxr(d.rates); if (d.markup != null) setGm(d.markup); setUsd(d.overrides?.USD ?? ""); setCad(d.overrides?.CAD ?? ""); }); }, []);
@@ -201,7 +201,7 @@ function Review({ admin }) {
   const liveInr = (it) => { if (it.live_price == null) return null; const c = (it.currency || "INR").toUpperCase(); if (c === "INR") return it.live_price; return it.live_price * (fxr[c] || 1); };
   const dInr = (it) => { const li = liveInr(it); return li != null && it.base_price != null ? li - it.base_price : null; };
   // Output currency chosen at the top. Final = INR reference / targetRate + flat markup amount.
-  const targetCur = convOn ? convCur : "INR";
+  const targetCur = convCur;   // INR | USD | CAD chosen in the top toggle
   const targetRate = targetCur === "INR" ? 1 : (fxr[targetCur] || 1);
   const amtInr = (amount, currency) => { const n = Number(amount); if (!Number.isFinite(n) || n <= 0) return null; const c = (currency || "INR").toUpperCase(); const r = (c === "INR" || c === "UNKNOWN") ? 1 : (fxr[c] || 1); return Math.round(n * r * 100) / 100; };
   const previewFinal = (it) => { const manual = amtInr(it._amt, it._cur); if (manual != null) return Math.round(manual / targetRate * 100) / 100; const refInr = liveInr(it) ?? it.base_price; if (refInr == null) return null; return Math.round((refInr / targetRate + Number(it._m || 0)) * 100) / 100; };
@@ -209,6 +209,7 @@ function Review({ admin }) {
   const del = async (it) => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Reject and remove this product from the database?\n\n${trunc(it.url, 56)}`)) return; const r = await aj("/api/review/delete", { row: it.id }); r.ok ? toast("Rejected · removed from database", "ok") : toast(r.error || "Failed", "err"); load(); };
   const approveSel = async () => { if (!sel.size) return toast("Select rows first", "err"); let pushed = 0, failed = 0; for (const id of sel) { const it = items.find((x) => x.id === id); const r = await aj("/api/review/decide", { row: id, decision: "approved", markup_pct: it._m, price_amount: it._amt, price_currency: it._cur, convert: convOn, convert_currency: convOn ? convCur : "" }); r.shopify?.ok ? pushed++ : failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed ? `, ${failed} failed` : ""}`, failed ? "err" : "ok"); load(); };
   const approveAll = async () => { if (!confirm(`Approve ALL ${items.length} ${tab} with +${gm} ${targetCur} markup?`)) return; const r = await aj("/api/review/approve_all", { markup_pct: gm, convert: convOn, convert_currency: convOn ? convCur : "", kind: tab, brands: brand ? [brand] : [] }); r.ok ? toast(`Approved ${r.approved} · Shopify ${r.pushed || 0} ok${r.failed ? `, ${r.failed} failed` : ""}`, r.failed ? "err" : "ok") : toast(r.error, "err"); load(); };
+  const rejectAll = async () => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Reject ALL ${items.length} ${tab} and permanently remove them from the database?\n\nThis cannot be undone.`)) return; const r = await aj("/api/review/reject_all", { kind: tab, brands: brand ? [brand] : [] }); r.ok ? toast(`Rejected ${r.rejected} · removed from database`, "ok") : toast(r.error || "Failed", "err"); load(); };
   const tabs = [["mismatch", "Mismatches", counts.awaiting, COL.ter], ["error", "Errors", counts.error, COL.err], ["resolved", "Resolved", counts.matched, COL.sec]];
   const tog = (id) => { const n = new Set(sel); n.has(id) ? n.delete(id) : n.add(id); setSel(n); };
   return <div className="h-full min-h-0 flex flex-col">
@@ -228,9 +229,10 @@ function Review({ admin }) {
       <span className="w-px h-5" style={{ background: "var(--border)" }} />
       <span className="text-[12px]" style={{ color: COL.mut }}>Apply conversion</span>
       <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
-        {[["off", "No conv"], ["USD", "USD→₹"], ["CAD", "CAD→₹"]].map(([k, l]) => <button key={k} onClick={() => setConvCur(k)} className="px-3 py-1.5 text-[12px] font-semibold navi" style={{ background: convCur === k ? COL.primary : "var(--c-low)", color: convCur === k ? "#fff" : COL.mut }}>{l}</button>)}
+        {[["INR", "INR"], ["USD", "USD→₹"], ["CAD", "CAD→₹"]].map(([k, l]) => <button key={k} onClick={() => setConvCur(k)} className="px-3 py-1.5 text-[12px] font-semibold navi" style={{ background: convCur === k ? COL.primary : "var(--c-low)", color: convCur === k ? "#fff" : COL.mut }}>{l}</button>)}
       </div>
-      <Btn kind="sec" sm onClick={approveAll} disabled={!admin || !items.length}><Icon n="check" s={13} />Apply &amp; Approve all ({items.length})</Btn></div>
+      <Btn kind="sec" sm onClick={approveAll} disabled={!admin || !items.length}><Icon n="check" s={13} />Apply &amp; Approve all ({items.length})</Btn>
+      <Btn kind="danger" sm onClick={rejectAll} disabled={!admin || !items.length}><Icon n="x" s={13} />Reject all ({items.length})</Btn></div>
     <div className="flex gap-1.5 mb-3">{tabs.map(([k, l, n, c]) => <button key={k} onClick={() => { setTab(k); setBrand(""); }} className="px-4 py-2 rounded-lg text-[13px] font-semibold navi" style={{ background: tab === k ? "var(--c)" : "transparent", color: tab === k ? "#fff" : COL.mut, border: "1px solid " + (tab === k ? "var(--border)" : "transparent") }}>{l} <span className="mono" style={{ color: c }}>{fmtInt(n)}</span></button>)}</div>
     <div className="card flex-1 min-h-0 overflow-auto">
       <table className="w-full text-[12.5px]"><thead><tr className="lbl">{["", "Brand", "Product", "Base ₹", "Live", "≈₹", "Δ₹", `Markup ${targetCur}`, "Amount", "Currency", `Final ${targetCur}`, ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>

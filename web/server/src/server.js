@@ -290,6 +290,28 @@ app.post("/api/review/approve_all", wrap(async (req, res) => {
   }
   res.json({ ok: true, approved: n, pushed, failed });
 }));
+// Reject ALL rows in the current Review view: permanently delete them from the DB
+// (products + staged sheet) so a later sync won't re-add them. Same filter as the
+// visible list (state + brands + pending). Nothing is pushed to Shopify.
+app.post("/api/review/reject_all", wrap(async (req, res) => {
+  const kind = req.body.kind || "mismatch";
+  const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
+  const brands = (req.body.brands || []).filter(Boolean);
+  let where = "state=$1 AND decision='pending'"; const p = [state];
+  if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands); }
+  const rows = await q(`SELECT id, key FROM products WHERE ${where}`, p);
+  const { pool } = await import("./db.js"); const client = await pool.connect();
+  let n = 0;
+  try { await client.query("BEGIN");
+    for (const r of rows) {
+      await client.query("DELETE FROM products WHERE id=$1", [r.id]);
+      await client.query("DELETE FROM import_catalog WHERE key=$1", [r.key]);
+      n++;
+    }
+    await client.query("COMMIT");
+  } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
+  res.json({ ok: true, rejected: n, counts: await store.counts() });
+}));
 
 // ---------- history ----------
 app.get("/api/history", wrap(async (req, res) => res.json(await store.historyList((req.query.brand || "").trim()))));
