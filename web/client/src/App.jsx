@@ -117,7 +117,7 @@ const Row = ({ l, v, c }) => <div className="flex justify-between py-1.5"><span 
 function Pipeline({ admin }) {
   const [st, setSt] = useState({ entries: [], matched: 0, mismatch: 0, errors: 0, total_rows: 0, current_row: 0, elapsed: 0, message: "Idle.", running: false, phase: "idle", log_total: 0 });
   const [cfg, setCfg] = useState({ concurrency: 8, timeout_ms: 12000, batch_size: 250, rest_between: 2, safe_retry: true, simulation: false, data_source: "database" });
-  const [vendors, setVendors] = useState([]); const [vsel, setVsel] = useState([]); const [cat, setCat] = useState({ total: 0 });
+  const [vendors, setVendors] = useState([]); const [vsel, setVsel] = useState([]); const [cat, setCat] = useState({ total: 0 }); const [curSel, setCurSel] = useState("INR");
   const cursor = useRef(0), logRef = useRef(null);
   useEffect(() => { api("/api/pipe/status?cursor=0").then((d) => d.config &&
     setCfg((current) => ({ ...current, ...d.config }))); }, []);
@@ -132,6 +132,7 @@ function Pipeline({ admin }) {
   const run = async (mode) => { await send({ fresh_start: mode === "fresh", retry_errors: mode === "update", vendors: vsel }); const d = await aj("/api/pipe/start", {}); d.error ? toast(d.error, "err") : toast("Run started", "ok"); setSt((s) => ({ ...s, entries: [] })); cursor.current = 0; };
   const onFile = async (f) => { if (!f || !admin) return; const fd = new FormData(); fd.append("file", f); toast("Reading " + f.name + "..."); const p = await api("/api/import/preview", { method: "POST", body: fd }); if (!p.ok) return toast(p.error || "Preview failed", "err"); const fd2 = new FormData(); const d = await api("/api/import", { method: "POST", body: fd2 }); d.ok ? toast(`Sheet staged: ${d.rows} products · click "Add to database" to save`, "ok") : toast(d.error || "Import failed", "err"); refreshCat(); };
   const refreshCat = () => { api("/api/meta").then((x) => x.counts && setCat({ ...x.counts, imported: x.imported_count || 0 })); api("/api/vendors?source=" + cfg.data_source).then((x) => setVendors(x.vendors || [])); };
+  const setCurrency = async () => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Set currency to ${curSel} for ${vsel.length ? "the selected" : "ALL"} products (${fmtInt(scope)})?\n\nThe price numbers are NOT changed — only the currency label and its ≈₹ comparison.`)) return; const r = await aj("/api/products/set_currency", { currency: curSel, vendors: vsel }); r.ok ? toast(`Currency set to ${r.currency} on ${fmtInt(r.updated)} products · prices unchanged`, "ok") : toast(r.error || "Failed", "err"); refreshCat(); };
   const commitSheet = async () => { if (!admin) return toast("Admin only", "err"); if (!cat.imported) return toast("Upload a sheet first", "err"); if (!confirm(`Sync the database to the sheet?\n\nThe products DB will become EXACTLY the ${fmtInt(cat.imported)} Shopify products in the sheet — new ones added, products no longer in the sheet removed. Approval history is kept.`)) return; toast("Syncing database to sheet…"); const r = await aj("/api/import/commit", {}); r.ok ? toast(`Synced → ${fmtInt(r.total)} in DB (${fmtInt(r.added)} added, ${fmtInt(r.removed)} removed)`, "ok") : toast(r.error || "Failed", "err"); refreshCat(); };
   const pct = st.total_rows ? Math.min(100, st.current_row / st.total_rows * 100) : 0;
   const sourceTotal = cfg.data_source === "imported" ? cat.imported : cat.total;
@@ -169,6 +170,12 @@ function Pipeline({ admin }) {
         <Btn kind="primary" onClick={() => run("fresh")} disabled={st.running || !admin}><Icon n="play" s={14} />Run from Start</Btn>
         <Btn kind="ghost" onClick={() => run("update")} disabled={st.running || !admin}><Icon n="refresh" s={14} />Check Updates</Btn>
         <Btn kind="danger" onClick={() => aj("/api/pipe/abort", {})} disabled={!st.running}><Icon n="stop" s={14} />Abort</Btn>
+        <span className="w-px h-5" style={{ background: "var(--border)" }} />
+        <span className="text-[11px]" style={{ color: COL.mut }}>Currency</span>
+        <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
+          {["INR", "USD", "CAD"].map((c) => <button key={c} onClick={() => setCurSel(c)} className="px-2.5 py-1.5 text-[12px] font-semibold navi" style={{ background: curSel === c ? COL.primary : "var(--c-low)", color: curSel === c ? "#fff" : COL.mut }}>{c}</button>)}
+        </div>
+        <Btn kind="ghost" sm onClick={setCurrency} disabled={!admin}><Icon n="check" s={13} />Set currency</Btn>
         <span className="ml-auto text-[11px] flex items-center gap-1.5" style={{ color: st.running ? COL.sec : COL.mut }}><span className="w-2 h-2 rounded-full pdot" style={{ background: st.running ? COL.sec : COL.mut }} />{st.running ? "ENGINE LIVE" : "IDLE"}</span></div>
       <div className="grid grid-cols-6 gap-2.5 mb-3"><Stat k="Total" v={fmtInt(st.total_rows)} /><Stat k="Done" v={fmtInt(st.current_row)} /><Stat k="Matched" v={fmtInt(st.matched)} c={COL.sec} /><Stat k="Mismatch" v={fmtInt(st.mismatch)} c={COL.ter} /><Stat k="Errors" v={fmtInt(st.errors)} c={COL.err} /><Stat k="Elapsed" v={elapsed(st.elapsed || 0)} /></div>
       {st.phase !== "idle" && <div className="mb-3 px-3.5 py-2 rounded-lg text-[12.5px] font-semibold" style={{ border: "1px solid " + COL.ter + "55", background: COL.ter + "18", color: COL.ter }}>Phase: {st.message}</div>}

@@ -126,6 +126,36 @@ app.post("/api/pipe/config", wrap(async (req, res) => {
   if (next.data_source) await store.setMeta('pipeline_data_source', next.data_source);
   res.json({ ok: true, config: eng.config });
 }));
+// Set the currency CODE on products without changing the scraped price number.
+// delta/state/status are recomputed from the existing live_price using the new
+// currency's FX rate so the comparison stays consistent. Error rows (no price)
+// are left untouched. Scope: all products, or brand IN vendors.
+app.post("/api/products/set_currency", wrap(async (req, res) => {
+  const cur = String(req.body.currency || "").trim().toUpperCase();
+  if (!["INR", "USD", "CAD"].includes(cur)) return res.status(400).json({ ok: false, error: "currency must be INR, USD or CAD" });
+  const rate = cur === "INR" ? 1 : ((await rates())[cur] || 1);
+  const brands = (req.body.vendors || []).filter(Boolean);
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const params = [cur, rate, now];
+  let brandFilter = "";
+  if (brands.length) { brandFilter = ` AND brand IN (${brands.map((_, i) => `$${i + 4}`).join(",")})`; params.push(...brands); }
+  const rows = await q(`
+    WITH scope AS (
+      SELECT id, (CASE WHEN $1='INR' THEN live_price ELSE live_price * $2 END) AS live_inr, base_price AS base
+      FROM products
+      WHERE live_price IS NOT NULL AND base_price IS NOT NULL AND state <> 'error'${brandFilter}
+    )
+    UPDATE products p SET
+      currency = $1,
+      delta = s.live_inr - s.base,
+      state = CASE WHEN ABS(s.live_inr - s.base) <= GREATEST(1.0, CASE WHEN $1='INR' THEN 1.0 ELSE 0.005*ABS(s.base) END) THEN 'matched' ELSE 'mismatch' END,
+      status = CASE WHEN ABS(s.live_inr - s.base) <= GREATEST(1.0, CASE WHEN $1='INR' THEN 1.0 ELSE 0.005*ABS(s.base) END)
+                 THEN 'Price Matched (' || $1 || ')' ELSE 'Price Mismatch! (' || $1 || ')' END,
+      updated_at = $3
+    FROM scope s WHERE p.id = s.id
+    RETURNING p.id`, params);
+  res.json({ ok: true, updated: rows.length, currency: cur });
+}));
 app.post("/api/pipe/start", wrap(async (req, res) => {
   const eng = pipe.getEngine(req.session.uid);
   if (eng.state.running) return res.status(409).json({ error: "already running" });
