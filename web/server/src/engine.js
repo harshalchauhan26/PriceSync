@@ -153,28 +153,20 @@ function shopifyJsUrl(url) {
 
 const DOMAIN_CURRENCY = new Map();
 
-// Shopify .js prices are integer cents (e.g. 4950000 -> 49500.00). compare_at_price
-// is the REGULAR ("was") price and is set only while the item is on sale; null/0
-// otherwise. We want the regular price, not the discounted one.
-function shopifyToPrice(raw) {
-  if (raw == null) return null;
-  if (typeof raw === "number" && Number.isInteger(raw)) return raw / 100;
-  return descaleIfCents(sanitizePrice(raw));
-}
-
+// Shopify .js prices are integer cents (e.g. 4950000 -> 49500.00). We record the
+// displayed selling price (variants[0].price) — the price the customer actually
+// pays, i.e. the discounted price while on sale. compare_at_price (the slashed
+// "was" price) is intentionally ignored.
 export async function extractShopify(fetcher, url) {
   const domain = new URL(url).host;
   try {
     const resp = await fetcher.get(shopifyJsUrl(url));
     const data = JSON.parse(resp.data);
     const variants = data.variants || [];
-    const v = variants.length ? variants[0] : data;
-    // current (possibly discounted) price, and the regular/compare-at price
-    const current = shopifyToPrice(v.price != null ? v.price : data.price);
-    const regular = shopifyToPrice(v.compare_at_price != null ? v.compare_at_price : data.compare_at_price);
-    // On sale -> compare_at_price exceeds the live price: report the REGULAR price.
-    // Not on sale -> compare_at_price is null/0/<=price: report the current price.
-    let price = (regular != null && current != null && regular > current) ? regular : current;
+    let raw = variants.length ? variants[0].price : data.price;
+    let price;
+    if (typeof raw === "number" && Number.isInteger(raw)) price = raw / 100;
+    else price = descaleIfCents(sanitizePrice(raw));
     let currency = detectCurrency(resp.data) || DOMAIN_CURRENCY.get(domain) || null;
     if (price != null && !currency) {
       try { currency = detectCurrency((await fetcher.get(url)).data); } catch { /* ignore */ }
