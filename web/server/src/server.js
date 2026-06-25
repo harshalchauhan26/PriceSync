@@ -60,7 +60,7 @@ app.post("/api/register", wrap(async (req, res) => {
   const u = await sec.createUser(email, pw, "viewer"); sec.loginUser(req, u);
   res.json({ ok: true, email: u.email, role: u.role });
 }));
-app.get("/api/health", (req, res) => res.json({ ok: true, running: pipe.STATE.running, phase: pipe.STATE.phase }));
+app.get("/api/health", (req, res) => { const active = pipe.runningCount(); res.json({ ok: true, running: active > 0, active_runs: active }); });
 
 // gate everything else
 app.use("/api", sec.guard);
@@ -112,44 +112,55 @@ app.get("/api/insights", wrap(async (req, res) => {
     approved_value: Number(av.v), approved_count: Number(av.c), fx: await snapshot() });
 }));
 
-// ---------- pipeline ----------
+// ---------- pipeline (per-user: each admin drives their OWN engine) ----------
+// Cap simultaneous runs to protect the host; overridable via env.
+const MAX_CONCURRENT_RUNS = parseInt(process.env.MAX_CONCURRENT_RUNS || "3", 10);
 app.post("/api/pipe/config", wrap(async (req, res) => {
+  const eng = pipe.getEngine(req.session.uid);
   const next = req.body || {};
   if (next.data_source && !['database', 'imported'].includes(next.data_source)) {
     return res.status(400).json({ ok: false, error: 'invalid pipeline data source' });
   }
-  Object.assign(pipe.CONFIG, next);
+  Object.assign(eng.config, next);
+  // Persist data_source as the default seed for future engines (shared default).
   if (next.data_source) await store.setMeta('pipeline_data_source', next.data_source);
-  res.json({ ok: true, config: pipe.CONFIG });
+  res.json({ ok: true, config: eng.config });
 }));
 app.post("/api/pipe/start", wrap(async (req, res) => {
-  if (pipe.STATE.running) return res.status(409).json({ error: "already running" });
-  const source = pipe.CONFIG.data_source === 'imported' ? 'imported' : 'database';
+  const eng = pipe.getEngine(req.session.uid);
+  if (eng.state.running) return res.status(409).json({ error: "already running" });
+  if (pipe.runningCount() >= MAX_CONCURRENT_RUNS) {
+    return res.status(429).json({ error: `too many runs in progress (max ${MAX_CONCURRENT_RUNS}) — try again shortly` });
+  }
+  const source = eng.config.data_source === 'imported' ? 'imported' : 'database';
   const sourceCount = source === 'imported' ? await store.countImported() : (await store.counts()).total;
   if (sourceCount === 0) {
     return res.status(400).json({ error: source === 'imported'
       ? "no uploaded sheet products - upload a sheet or turn the source toggle off"
       : "no products in Supabase database" });
   }
-  Object.assign(pipe.STATE, { running: true, abort: false, phase: "main", completed: 0, matched: 0,
+  Object.assign(eng.state, { running: true, abort: false, phase: "main", completed: 0, matched: 0,
     mismatch: 0, errors: 0, retry_total: 0, retry_completed: 0, retry_recovered: 0, started_at: Date.now() });
-  pipe.LOG.length = 0; pipe.LOGMETA.offset = 0;
-  pipe.startPipeline();
+  eng.log.length = 0; eng.logmeta.offset = 0;
+  // Unique per concurrent run so two admins don't collide in price_history.run_id.
+  const runId = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 13) + "-" + req.session.uid;
+  pipe.startPipeline(eng, runId);
   res.json({ ok: true });
 }));
-app.post("/api/pipe/abort", (req, res) => { pipe.STATE.abort = true; res.json({ ok: true }); });
-app.post("/api/pipe/clear_log", (req, res) => { pipe.LOG.length = 0; pipe.LOGMETA.offset = 0; res.json({ ok: true }); });
+app.post("/api/pipe/abort", (req, res) => { pipe.getEngine(req.session.uid).state.abort = true; res.json({ ok: true }); });
+app.post("/api/pipe/clear_log", (req, res) => { const eng = pipe.getEngine(req.session.uid); eng.log.length = 0; eng.logmeta.offset = 0; res.json({ ok: true }); });
 app.get("/api/pipe/status", (req, res) => {
+  const eng = pipe.getEngine(req.session.uid);
   const cursor = parseInt(req.query.cursor || "0", 10);
-  const start = Math.max(0, cursor - pipe.LOGMETA.offset);
-  const entries = pipe.LOG.slice(start);
-  const total = pipe.LOGMETA.offset + pipe.LOG.length;
-  const s = pipe.STATE;
+  const start = Math.max(0, cursor - eng.logmeta.offset);
+  const entries = eng.log.slice(start);
+  const total = eng.logmeta.offset + eng.log.length;
+  const s = eng.state;
   res.json({ running: s.running, phase: s.phase, total_rows: s.total_rows, pre_done: s.pre_done,
     completed: s.completed, current_row: s.pre_done + s.completed, matched: s.matched,
     mismatch: s.mismatch, errors: s.errors, retry_total: s.retry_total, retry_completed: s.retry_completed,
     retry_recovered: s.retry_recovered, elapsed: s.started_at ? Math.floor((Date.now() - s.started_at) / 1000) : 0,
-    message: s.message, config: pipe.CONFIG, cursor: total, entries, log_total: total });
+    message: s.message, config: eng.config, cursor: total, entries, log_total: total });
 });
 
 // ---------- import ----------
@@ -434,7 +445,7 @@ if (fs.existsSync(CLIENT_DIST)) {
 const p = await ping();
 if (!p.ok) { console.error("[MBO] Supabase FAILED:", p.msg); process.exit(1); }
 await store.initStore();
-pipe.CONFIG.data_source = await store.getMeta('pipeline_data_source', 'database');
+pipe.setDefault('data_source', await store.getMeta('pipeline_data_source', 'database'));
 setOverrides({ USD: await store.getMeta('fx_override_usd'), CAD: await store.getMeta('fx_override_cad') });
 const seeded = await sec.seedOwner(config.adminEmail, config.adminPassword);
 if (seeded) console.log("[MBO] Owner:", seeded);
