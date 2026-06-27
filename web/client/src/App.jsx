@@ -6,6 +6,9 @@ const COL = { primary: "#3b82f6", sec: "#4ae176", ter: "#ffb95f", err: "#ff6b6b"
 const fmt = (n) => (n == null || n === "") ? "—" : Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const fmtInt = (n) => (n == null ? "0" : Number(n).toLocaleString());
 const inr = (n) => (n == null ? "—" : "₹" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 }));
+// Final-price rounding (mirrors store.roundFinal on the server): units digit
+// 0–2 → round down to …0, 3–5 → …5, 6–9 → round up to next …0.
+const roundFinal = (n) => { const v = Number(n); if (n == null || !Number.isFinite(v)) return n; const r = Math.round(v); const t = Math.floor(r / 10) * 10; const d = r - t; return d <= 2 ? t : d <= 5 ? t + 5 : t + 10; };
 const trunc = (u, n = 46) => { if (!u) return "—"; let l = u.replace(/^https?:\/\//, ""); return l.length > n ? l.slice(0, n - 1) + "…" : l; };
 const pid = (u) => { try { return new URL(u).pathname.split("/").filter(Boolean).pop() || "—"; } catch { return "—"; } };
 const elapsed = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}m ${String(s % 60).padStart(2, "0")}s`;
@@ -52,6 +55,32 @@ function VendorSelect({ value, onChange, kind }) {
     <option value="">All vendors ({vs.length})</option>
     {vs.map((v) => <option key={v.vendor} value={v.vendor}>{v.vendor.replace(/^www\./, "")} · {v.count}</option>)}</select>;
 }
+// Multi-select brand picker: pick any combination of brands, then bulk-apply a
+// rate/markup to all of them together. value/onChange use an array of brand names.
+function BrandMultiSelect({ value, onChange, kind }) {
+  const [vs, setVs] = useState([]); const [open, setOpen] = useState(false); const [q, setQ] = useState(""); const ref = useRef(null);
+  useEffect(() => { api("/api/vendors" + (kind ? "?kind=" + kind : "")).then((d) => setVs(d.vendors || [])); }, [kind]);
+  useEffect(() => { const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown", h); return () => document.removeEventListener("mousedown", h); }, []);
+  const sel = new Set(value);
+  const toggle = (v) => { const n = new Set(sel); n.has(v) ? n.delete(v) : n.add(v); onChange([...n]); };
+  const shown = vs.filter((v) => !q || v.vendor.toLowerCase().includes(q.toLowerCase()));
+  const label = value.length === 0 ? `All brands (${vs.length})` : `${value.length} brand${value.length > 1 ? "s" : ""} selected`;
+  return <div className="relative" ref={ref} style={{ width: 230 }}>
+    <button onClick={() => setOpen((o) => !o)} className="inp mono w-full text-left flex items-center justify-between" style={{ width: 230 }}>
+      <span className="truncate">{label}</span><Icon n="search" s={13} c={COL.mut} /></button>
+    {open && <div className="absolute z-40 mt-1 p-2 rounded-lg" style={{ width: 264, background: "var(--surface)", border: "1px solid var(--border)", boxShadow: "0 12px 30px rgba(0,0,0,.5)" }}>
+      <input className="inp w-full mb-2" placeholder="Search brands…" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+      <div className="flex justify-between mb-1.5 text-[11px]">
+        <a style={{ cursor: "pointer", color: COL.primary }} onClick={() => onChange([...new Set([...value, ...shown.map((v) => v.vendor)])])}>Select all</a>
+        <a style={{ cursor: "pointer", color: COL.mut }} onClick={() => onChange([])}>Clear</a></div>
+      <div className="max-h-56 overflow-y-auto space-y-0.5">
+        {shown.map((v) => <label key={v.vendor} className="flex items-center gap-2 text-[12px] px-1 py-0.5 cursor-pointer">
+          <input type="checkbox" checked={sel.has(v.vendor)} onChange={() => toggle(v.vendor)} />
+          <span className="flex-1 truncate">{v.vendor.replace(/^www\./, "")}</span><span style={{ color: COL.mut }}>{v.count}</span></label>)}
+        {!shown.length && <div className="text-center py-3 text-[12px]" style={{ color: COL.mut }}>No brands</div>}</div>
+    </div>}
+  </div>;
+}
 function ChartBox({ type, labels, datasets, options, h = 230 }) {
   const ref = useRef(null), inst = useRef(null);
   // Only rebuild when the data/config actually changes — NOT on every parent
@@ -89,12 +118,17 @@ function Auth({ onIn }) {
 
 /* ===================== HOME ===================== */
 function Home({ go }) {
-  const [d, setD] = useState(null);
-  useEffect(() => { api("/api/insights").then(setD); }, []);
-  if (!d) return <div className="text-center py-20" style={{ color: COL.mut }}>Loading insights…</div>;
+  const [d, setD] = useState(null); const [brand, setBrand] = useState("");
+  const load = useCallback(() => { setD(null); api("/api/insights?brand=" + encodeURIComponent(brand)).then(setD); }, [brand]);
+  useEffect(() => { load(); }, [load]);
+  const head = <div className="flex items-center justify-between mb-4">
+    <h1 style={{ fontSize: 28, fontWeight: 600 }}>Insights</h1>
+    <div className="flex gap-2.5 items-center"><VendorSelect value={brand} onChange={setBrand} />
+      <Btn kind="ghost" sm onClick={() => setBrand("")}><Icon n="x" s={13} />Clear</Btn></div></div>;
+  if (!d) return <div className="h-full overflow-auto pr-1">{head}<div className="text-center py-20" style={{ color: COL.mut }}>Loading insights…</div></div>;
   const c = d.counts || {}, ex = d.exposure || {}, fxr = d.fx || {};
   const k = [["Total Products", fmtInt(c.total), "#fff"], ["Matched", fmtInt(c.matched), COL.sec], ["Mismatches", fmtInt(c.mismatch), COL.ter], ["Errors", fmtInt(c.error), COL.err], ["Vendors", fmtInt(d.vendors), COL.primary], ["Awaiting", fmtInt(c.awaiting), COL.ter], ["Approved (archived)", fmtInt(d.approved_count), COL.sec], ["Overpriced ₹", inr(Math.round(ex.over || 0)), COL.err]];
-  return <div className="h-full overflow-auto pr-1">
+  return <div className="h-full overflow-auto pr-1">{head}
     <div className="grid grid-cols-4 gap-3 mb-4">{k.map(([a, b, c2]) => <Stat key={a} k={a} v={b} c={c2} />)}</div>
     <div className="grid grid-cols-3 gap-3 mb-4">
       <div className="card p-4"><div className="lbl mb-3">Catalog status</div><ChartBox type="doughnut" h={220} labels={["Matched", "Mismatch", "Error", "Pending"]} datasets={[{ data: [c.matched, c.mismatch, c.error, c.pending], backgroundColor: [COL.sec, COL.ter, COL.err, "#3f3f46"], borderWidth: 0 }]} options={{ plugins: { legend: { position: "bottom" } }, cutout: "62%" }} /></div>
@@ -170,6 +204,7 @@ function Pipeline({ admin }) {
         <Btn kind="primary" onClick={() => run("fresh")} disabled={st.running || !admin}><Icon n="play" s={14} />Run from Start</Btn>
         <Btn kind="ghost" onClick={() => run("update")} disabled={st.running || !admin}><Icon n="refresh" s={14} />Check Updates</Btn>
         <Btn kind="danger" onClick={() => aj("/api/pipe/abort", {})} disabled={!st.running}><Icon n="stop" s={14} />Abort</Btn>
+        <Btn kind="ghost" onClick={() => { setVsel([]); setSt((s) => ({ ...s, entries: [] })); }}><Icon n="x" s={14} />Clear</Btn>
         <span className="w-px h-5" style={{ background: "var(--border)" }} />
         <span className="text-[11px]" style={{ color: COL.mut }}>Currency</span>
         <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
@@ -195,10 +230,10 @@ function Pipeline({ admin }) {
 /* ===================== REVIEW ===================== */
 function Review({ admin }) {
   const [tab, setTab] = useState("mismatch"); const [items, setItems] = useState([]); const [counts, setCounts] = useState({});
-  const [brand, setBrand] = useState(""); const [sel, setSel] = useState(() => new Set()); const [gm, setGm] = useState(0); const [convCur, setConvCur] = useState("USD"); const [fxr, setFxr] = useState({});
+  const [brands, setBrands] = useState([]); const [sel, setSel] = useState(() => new Set()); const [gm, setGm] = useState(0); const [convCur, setConvCur] = useState("USD"); const [fxr, setFxr] = useState({});
   const [usd, setUsd] = useState(""); const [cad, setCad] = useState("");
   const convOn = convCur !== "INR";
-  const load = useCallback(async () => { const d = await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(brand)}`); setItems((d.items || []).map((it) => ({ ...it, _m: it.markup_pct || gm, _amt: "", _cur: (it.currency || "INR").toUpperCase() }))); setCounts(d.counts || {}); setSel(new Set()); }, [tab, brand]);
+  const load = useCallback(async () => { const d = await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(brands.join(","))}`); setItems((d.items || []).map((it) => ({ ...it, _m: it.markup_pct || gm, _amt: "", _cur: (it.currency || "INR").toUpperCase() }))); setCounts(d.counts || {}); setSel(new Set()); }, [tab, brands]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api("/api/fx").then((d) => { if (d.rates) setFxr(d.rates); if (d.markup != null) setGm(d.markup); setUsd(d.overrides?.USD ?? ""); setCad(d.overrides?.CAD ?? ""); }); }, []);
   const saveFx = async () => { const r = await aj("/api/fx/override", { usd, cad, markup: gm }); if (r.rates) setFxr(r.rates); if (r.overrides) { setUsd(r.overrides.USD ?? ""); setCad(r.overrides.CAD ?? ""); } toast(r.ok ? "Rates & markup saved · applies to all" : "Save failed", r.ok ? "ok" : "err"); };
@@ -214,19 +249,23 @@ function Review({ admin }) {
   // Master markup: the single top-level `gm` value (expressed in the active
   // conversion currency `targetCur`) drives every product. Per-row markup overrides
   // were removed so the top field applies to all rows uniformly.
-  const previewFinal = (it) => { const manual = amtInr(it._amt, it._cur); if (manual != null) return Math.round(manual / targetRate * 100) / 100; const refInr = liveInr(it) ?? it.base_price; if (refInr == null) return null; return Math.round((refInr / targetRate + Number(gm || 0)) * 100) / 100; };
-  const decide = async (it, decision) => { const r = await aj("/api/review/decide", { row: it.id, decision, markup_pct: gm, price_amount: it._amt, price_currency: it._cur, convert: convOn, convert_currency: convOn ? convCur : "" }); r.ok ? toast(decision === "approved" ? `Approved ${inr(r.final_price)} · ${r.shopify?.status || "queued"}` : "Rejected", r.shopify && !r.shopify.ok ? "err" : "ok") : toast(r.error, "err"); load(); };
-  const del = async (it) => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Reject and remove this product from the database?\n\n${trunc(it.url, 56)}`)) return; const r = await aj("/api/review/delete", { row: it.id }); r.ok ? toast("Rejected · removed from database", "ok") : toast(r.error || "Failed", "err"); load(); };
+  const previewFinal = (it) => { const manual = amtInr(it._amt, it._cur); if (manual != null) return roundFinal(manual / targetRate); const refInr = liveInr(it) ?? it.base_price; if (refInr == null) return null; return roundFinal(refInr / targetRate + Number(gm || 0)); };
+  // Optimistic: drop the row from the table immediately so the click feels instant,
+  // then fire the request. The trailing load() reconciles counts/items in the
+  // background (and restores the row if the server rejected the action).
+  const decide = async (it, decision) => { setItems((xs) => xs.filter((x) => x.id !== it.id)); const r = await aj("/api/review/decide", { row: it.id, decision, markup_pct: gm, price_amount: it._amt, price_currency: it._cur, convert: convOn, convert_currency: convOn ? convCur : "" }); r.ok ? toast(decision === "approved" ? `Approved ${fmt(r.final_price)} ${r.push_currency || ""} · ${r.shopify?.status || "queued"}` : "Rejected", r.shopify && !r.shopify.ok ? "err" : "ok") : toast(r.error, "err"); load(); };
+  const del = async (it) => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Reject and remove this product from the database?\n\n${trunc(it.url, 56)}`)) return; setItems((xs) => xs.filter((x) => x.id !== it.id)); const r = await aj("/api/review/delete", { row: it.id }); r.ok ? toast("Rejected · removed from database", "ok") : toast(r.error || "Failed", "err"); load(); };
   const approveSel = async () => { if (!sel.size) return toast("Select rows first", "err"); let pushed = 0, failed = 0; for (const id of sel) { const it = items.find((x) => x.id === id); const r = await aj("/api/review/decide", { row: id, decision: "approved", markup_pct: gm, price_amount: it._amt, price_currency: it._cur, convert: convOn, convert_currency: convOn ? convCur : "" }); r.shopify?.ok ? pushed++ : failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed ? `, ${failed} failed` : ""}`, failed ? "err" : "ok"); load(); };
-  const approveAll = async () => { if (!confirm(`Approve ALL ${items.length} ${tab} with +${gm} ${targetCur} markup?`)) return; const r = await aj("/api/review/approve_all", { markup_pct: gm, convert: convOn, convert_currency: convOn ? convCur : "", kind: tab, brands: brand ? [brand] : [] }); r.ok ? toast(`Approved ${r.approved} · Shopify ${r.pushed || 0} ok${r.failed ? `, ${r.failed} failed` : ""}`, r.failed ? "err" : "ok") : toast(r.error, "err"); load(); };
-  const rejectAll = async () => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Reject ALL ${items.length} ${tab} and clear them from the review queue?\n\nThe products stay in the database; they just leave Review.`)) return; const r = await aj("/api/review/reject_all", { kind: tab, brands: brand ? [brand] : [] }); r.ok ? toast(`Rejected ${r.rejected} · cleared from review`, "ok") : toast(r.error || "Failed", "err"); load(); };
+  const approveAll = async () => { if (!confirm(`Approve ALL ${items.length} ${tab} (${brands.length ? brands.length + " brand(s)" : "all brands"}) with +${gm} ${targetCur} markup?`)) return; setItems([]); const r = await aj("/api/review/approve_all", { markup_pct: gm, convert: convOn, convert_currency: convOn ? convCur : "", kind: tab, brands }); r.ok ? toast(`Approved ${r.approved} · pushing ${fmtInt(r.queued || 0)} to Shopify in background (3s/req)`, "ok") : toast(r.error, "err"); load(); };
+  const rejectAll = async () => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Reject ALL ${items.length} ${tab} (${brands.length ? brands.length + " brand(s)" : "all brands"}) and clear them from the review queue?\n\nThe products stay in the database; they just leave Review.`)) return; setItems([]); const r = await aj("/api/review/reject_all", { kind: tab, brands }); r.ok ? toast(`Rejected ${r.rejected} · cleared from review`, "ok") : toast(r.error || "Failed", "err"); load(); };
   const tabs = [["mismatch", "Mismatches", counts.awaiting, COL.ter], ["error", "Errors", counts.error, COL.err], ["resolved", "Resolved", counts.matched, COL.sec]];
   const tog = (id) => { const n = new Set(sel); n.has(id) ? n.delete(id) : n.add(id); setSel(n); };
   return <div className="h-full min-h-0 flex flex-col">
     <div className="flex items-start justify-between mb-3">
       <div><h1 style={{ fontSize: 28, fontWeight: 600 }}>Review &amp; Approval</h1><div className="text-[13px]" style={{ color: COL.mut }}>Approving archives the row and pushes the final price to Shopify using the selected MBO URL setting.</div></div>
-      <div className="flex gap-2.5 items-center"><VendorSelect value={brand} onChange={setBrand} kind={tab} />
+      <div className="flex gap-2.5 items-center"><BrandMultiSelect value={brands} onChange={setBrands} kind={tab} />
         <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13} />Refresh</Btn>
+        <Btn kind="ghost" sm onClick={() => { setBrands([]); setTab("mismatch"); setSel(new Set()); }}><Icon n="x" s={13} />Clear</Btn>
         <Btn kind="ghost" sm onClick={() => window.location = `/api/export?kind=${tab === "resolved" ? "all" : tab}`}><Icon n="dl" s={13} />Export</Btn>
         <Btn kind="primary" sm onClick={approveSel} disabled={!admin}><Icon n="check" s={13} />Approve Selected</Btn></div></div>
     <div className="card p-3 flex items-center gap-3 mb-3 flex-wrap">
@@ -243,7 +282,7 @@ function Review({ admin }) {
       </div>
       <Btn kind="sec" sm onClick={approveAll} disabled={!admin || !items.length}><Icon n="check" s={13} />Apply &amp; Approve all ({items.length})</Btn>
       <Btn kind="danger" sm onClick={rejectAll} disabled={!admin || !items.length}><Icon n="x" s={13} />Reject all ({items.length})</Btn></div>
-    <div className="flex gap-1.5 mb-3">{tabs.map(([k, l, n, c]) => <button key={k} onClick={() => { setTab(k); setBrand(""); }} className="px-4 py-2 rounded-lg text-[13px] font-semibold navi" style={{ background: tab === k ? "var(--c)" : "transparent", color: tab === k ? "#fff" : COL.mut, border: "1px solid " + (tab === k ? "var(--border)" : "transparent") }}>{l} <span className="mono" style={{ color: c }}>{fmtInt(n)}</span></button>)}</div>
+    <div className="flex gap-1.5 mb-3">{tabs.map(([k, l, n, c]) => <button key={k} onClick={() => { setTab(k); setBrands([]); }} className="px-4 py-2 rounded-lg text-[13px] font-semibold navi" style={{ background: tab === k ? "var(--c)" : "transparent", color: tab === k ? "#fff" : COL.mut, border: "1px solid " + (tab === k ? "var(--border)" : "transparent") }}>{l} <span className="mono" style={{ color: c }}>{fmtInt(n)}</span></button>)}</div>
     <div className="card flex-1 min-h-0 overflow-auto">
       <table className="w-full text-[12.5px]"><thead><tr className="lbl">{["", "Brand", "Product", "Base ₹", "Live", "≈₹", "Δ₹", `Markup ${targetCur}`, "Amount", "Currency", `Final ${targetCur}`, ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
         <tbody>{items.map((it) => { const li = liveInr(it), dl = dInr(it), up = (dl || 0) > 0; return <tr key={it.id} style={{ borderTop: "1px solid var(--c-low)" }}>
@@ -265,16 +304,22 @@ function Review({ admin }) {
 
 /* ===================== HISTORY ===================== */
 function History({ admin }) {
-  const [d, setD] = useState({ items: [], count: 0, value: 0, pushed: 0 }); const [brand, setBrand] = useState("");
-  const load = useCallback(() => api(`/api/history?brand=${encodeURIComponent(brand)}`).then(setD), [brand]);
+  const [d, setD] = useState({ items: [], count: 0, value: 0, pushed: 0, failed: 0 }); const [brand, setBrand] = useState(""); const [status, setStatus] = useState("");
+  const load = useCallback(() => api(`/api/history?brand=${encodeURIComponent(brand)}&status=${status}`).then(setD), [brand, status]);
   useEffect(() => { load(); }, [load]);
   const push = async (it) => { if (!admin) return toast("Admin only", "err"); toast("Pushing…"); const r = await aj("/api/history/push", { row: it.id }); toast(r.status || "done", r.ok ? "ok" : "err"); load(); };
-  const pushAll = async () => { if (!admin || !confirm("Push all approved prices to store?")) return; toast("Pushing…"); const r = await aj("/api/history/push_all", {}); toast(`Pushed ${r.pushed}${r.failed ? ", " + r.failed + " failed" : ""}`, r.failed ? "err" : "ok"); load(); };
+  const pushAll = async () => { if (!admin || !confirm("Re-push all prices not yet successfully pushed (includes failed / 429 retries)?\n\nSent one at a time in the background — each waits for the previous to confirm before the next, so Shopify can't rate-limit us.")) return; const r = await aj("/api/history/push_all", {}); toast(`Queued ${fmtInt(r.queued)} · pushing one at a time`, "ok"); setTimeout(load, 1000); };
   const clearDb = async () => { if (!admin) return toast("Admin only", "err"); if (!d.count) return toast("History already empty", "ok"); if (!confirm(`Permanently delete ALL ${fmtInt(d.count)} review history records?\n\nThis only clears the review/approval archive. Products are not affected.`)) return; toast("Clearing review history…"); const r = await aj("/api/history/clear", {}); r.ok ? toast(`Cleared ${fmtInt(r.removed)} review records`, "ok") : toast(r.error || "Failed", "err"); load(); };
   return <div className="h-full overflow-auto">
     <div className="flex items-start justify-between mb-4"><div><h1 style={{ fontSize: 28, fontWeight: 600 }}>Approval History</h1><div className="text-[13px]" style={{ color: COL.mut }}>Approved prices archived from review.</div></div>
-      <div className="flex gap-2.5 items-center"><VendorSelect value={brand} onChange={setBrand} /><Btn kind="ghost" sm onClick={() => window.location = "/api/history/export"}><Icon n="dl" s={13} />Export</Btn><Btn kind="primary" sm onClick={pushAll} disabled={!admin}><Icon n="share" s={13} />Push all</Btn><Btn kind="danger" sm onClick={clearDb} disabled={!admin || !d.count}><Icon n="x" s={13} />Clear DB</Btn></div></div>
-    <div className="grid grid-cols-3 gap-3 mb-4"><Stat k="Approved" v={fmtInt(d.count)} /><Stat k="Total value" v={inr(d.value)} c={COL.sec} /><Stat k="Pushed" v={fmtInt(d.pushed) + "/" + fmtInt(d.count)} c={COL.primary} /></div>
+      <div className="flex gap-2.5 items-center"><VendorSelect value={brand} onChange={setBrand} />
+        <select className="inp mono" style={{ width: 150 }} value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="">All push status</option><option value="failed">Failed / 429</option><option value="not_pushed">Not pushed</option><option value="pushed">Pushed ✓</option></select>
+        <Btn kind="ghost" sm onClick={() => { setBrand(""); setStatus(""); }}><Icon n="x" s={13} />Clear</Btn>
+        <Btn kind="ghost" sm onClick={() => window.location = "/api/history/export"}><Icon n="dl" s={13} />Export</Btn>
+        <Btn kind="primary" sm onClick={pushAll} disabled={!admin}><Icon n="share" s={13} />Retry / Push all</Btn>
+        <Btn kind="danger" sm onClick={clearDb} disabled={!admin || !d.count}><Icon n="x" s={13} />Clear DB</Btn></div></div>
+    <div className="grid grid-cols-4 gap-3 mb-4"><Stat k="Approved" v={fmtInt(d.count)} /><Stat k="Total value" v={inr(d.value)} c={COL.sec} /><Stat k="Pushed" v={fmtInt(d.pushed) + "/" + fmtInt(d.count)} c={COL.primary} /><Stat k="Failed / 429" v={fmtInt(d.failed)} c={COL.err} /></div>
     <div className="card overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Brand", "Product", "Base ₹", "Final ₹", "Markup", "By", "When", "Store", ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
       <tbody>{d.items.map((it) => <tr key={it.id} style={{ borderTop: "1px solid var(--c-low)" }}>
         <td className="px-3 py-2.5 mono text-[11px]">{(it.brand || "").replace(/^www\./, "")}</td>
@@ -300,7 +345,8 @@ function Alerts() {
       <div><div className="lbl mb-1.5">Threshold %</div><input type="number" className="inp mono" style={{ width: 90 }} value={thr} onChange={(e) => setThr(e.target.value)} /></div>
       <div><div className="lbl mb-1.5">Filter</div><div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>{[["all", "All"], ["drop", "Drops"], ["spike", "Spikes"]].map(([k, l]) => <button key={k} onClick={() => setDir(k)} className="px-3.5 py-1.5 text-[12px] font-semibold navi" style={{ background: dir === k ? COL.primary : "var(--c-low)", color: dir === k ? "#fff" : COL.mut }}>{l}</button>)}</div></div>
       <div><div className="lbl mb-1.5">Vendor</div><VendorSelect value={brand} onChange={setBrand} /></div>
-      <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13} /></Btn></div>
+      <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13} /></Btn>
+      <Btn kind="ghost" sm onClick={() => { setBrand(""); setDir("all"); setThr(15); }}><Icon n="x" s={13} />Clear</Btn></div>
     <div className="grid grid-cols-4 gap-2.5 mb-4"><Stat k="Alerts" v={fmtInt(d.total)} /><Stat k="Drops" v={fmtInt(d.drops)} c={COL.sec} /><Stat k="Spikes" v={fmtInt(d.spikes)} c={COL.err} /><Stat k="Threshold" v={"≥" + thr + "%"} c={COL.primary} /></div>
     <div className="card flex-1 min-h-0 overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Product", "Brand", "Dir", "Prev", "Now", "Δ", "Change %", "When"].map((h, i) => <th key={i} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
       <tbody>{d.items.map((it, i) => { const up = it.direction === "spike", c = up ? COL.err : COL.sec; return <tr key={i} style={{ borderTop: "1px solid var(--c-low)" }}>
@@ -316,7 +362,7 @@ function Alerts() {
 
 /* ===================== INTEGRATIONS ===================== */
 function Integrations({ admin }) {
-  const [cfg, setCfg] = useState({ shop_domain: "", api_version: "2024-10", dry_run: true, has_token: false, price_url_source: "mbo" }); const [token, setToken] = useState(""); const [brands, setBrands] = useState([]); const [v, setV] = useState("");
+  const [cfg, setCfg] = useState({ shop_domain: "", api_version: "2024-10", dry_run: true, has_token: false, price_url_source: "mbo" }); const [token, setToken] = useState(""); const [brands, setBrands] = useState([]); const [v, setV] = useState(""); const [fb, setFb] = useState("");
   const load = () => { api("/api/integration").then((d) => setCfg((c) => ({ ...c, ...d }))); api("/api/integrations").then((d) => setBrands(d.brands || [])); };
   useEffect(() => { load(); const t = setInterval(() => api("/api/integrations").then((d) => setBrands(d.brands || [])), 8000); return () => clearInterval(t); }, []);
   const save = async () => { const r = await aj("/api/integration/save", { ...cfg, access_token: token }); r.ok ? toast("Saved", "ok") : toast("Failed", "err"); setToken(""); load(); };
@@ -335,10 +381,13 @@ function Integrations({ admin }) {
       </div>
       <div className="flex gap-2"><Btn kind="primary" sm onClick={save} disabled={!admin}><Icon n="check" s={13} />Save</Btn><Btn kind="ghost" sm onClick={verify}><Icon n="plug" s={13} />Verify</Btn></div>
       {v && <div className="text-[11px] mt-2" style={{ color: COL.mut }}>{v}</div>}</div>
-    <div className="lbl mb-2">Brands in catalog (live)</div>
+    <div className="flex items-center justify-between mb-2">
+      <span className="lbl">Brands in catalog (live)</span>
+      <div className="flex gap-2.5 items-center"><VendorSelect value={fb} onChange={setFb} />
+        <Btn kind="ghost" sm onClick={() => setFb("")}><Icon n="x" s={13} />Clear</Btn></div></div>
     <div className="card overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Brand", "Products", "Mismatches"].map((h, i) => <th key={i} className="px-3 py-2.5 text-left">{h}</th>)}</tr></thead>
-      <tbody>{brands.map((b) => <tr key={b.brand} style={{ borderTop: "1px solid var(--c-low)" }}><td className="px-3 py-2.5 mono">{b.brand}</td><td className="px-3 py-2.5 mono">{fmtInt(b.products)}</td><td className="px-3 py-2.5 mono" style={{ color: COL.ter }}>{fmtInt(b.mismatches)}</td></tr>)}
-        {!brands.length && <tr><td colSpan="3" className="text-center py-10" style={{ color: COL.mut }}>No brands.</td></tr>}</tbody></table></div>
+      <tbody>{brands.filter((b) => !fb || b.brand === fb).map((b) => <tr key={b.brand} style={{ borderTop: "1px solid var(--c-low)" }}><td className="px-3 py-2.5 mono">{b.brand}</td><td className="px-3 py-2.5 mono">{fmtInt(b.products)}</td><td className="px-3 py-2.5 mono" style={{ color: COL.ter }}>{fmtInt(b.mismatches)}</td></tr>)}
+        {!brands.filter((b) => !fb || b.brand === fb).length && <tr><td colSpan="3" className="text-center py-10" style={{ color: COL.mut }}>No brands.</td></tr>}</tbody></table></div>
   </div>;
 }
 

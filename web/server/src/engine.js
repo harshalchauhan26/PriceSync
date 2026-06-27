@@ -158,16 +158,24 @@ function shopifyJsUrl(url) {
 const DOMAIN_CURRENCY = new Map();
 
 // Shopify .js prices are integer cents (e.g. 4950000 -> 49500.00). We record the
-// displayed selling price (variants[0].price) — the price the customer actually
-// pays, i.e. the discounted price while on sale. compare_at_price (the slashed
-// "was" price) is intentionally ignored.
+// ORIGINAL price: when the product is on sale, variants[0].compare_at_price is the
+// struck-through "was" price and that's what we want. When there is no sale,
+// compare_at_price is null/0, so we fall back to variants[0].price (the selling
+// price). Rule: compare_at_price > 0 ? compare_at_price : price.
 export async function extractShopify(fetcher, url) {
   const domain = new URL(url).host;
   try {
     const resp = await fetcher.get(shopifyJsUrl(url));
     const data = JSON.parse(resp.data);
     const variants = data.variants || [];
-    let raw = variants.length ? variants[0].price : data.price;
+    const v0 = variants[0];
+    let raw;
+    if (v0) {
+      const cmp = v0.compare_at_price;          // original "was" price (cents), or null/0 when not on sale
+      raw = (cmp != null && Number(cmp) > 0) ? cmp : v0.price;
+    } else {
+      raw = data.price;
+    }
     let price;
     if (typeof raw === "number" && Number.isInteger(raw)) price = raw / 100;
     else price = descaleIfCents(sanitizePrice(raw));

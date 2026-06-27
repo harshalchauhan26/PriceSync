@@ -21,6 +21,10 @@ venv/
 # --- local tooling ---
 .claude/
 
+# --- scratch / temp probes ---
+_*.mjs
+_*.html
+
 # --- node ---
 node_modules/
 /package.json

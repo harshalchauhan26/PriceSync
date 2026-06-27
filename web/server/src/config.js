@@ -38,6 +38,12 @@ export const config = {
   },
 };
 
-if (!config.databaseUrl) {
-  console.error("[MBO] No Supabase connection. Set SUPABASE_DB_URL in .env");
+// Fail fast on missing/insecure required config so a broken deploy never boots
+// into a half-working state (clearer than a downstream connection error).
+const problems = [];
+if (!config.databaseUrl) problems.push("SUPABASE_DB_URL (or SUPABASE_PROJECT_REF + SUPABASE_DB_PASSWORD) is required");
+if (config.isCloud && config.secret === "dev-insecure-change-me") problems.push("SECRET_KEY must be a long random hex in production (sessions are insecure otherwise)");
+if (problems.length) {
+  console.error("[MBO] CONFIG ERROR:\n  - " + problems.join("\n  - "));
+  if (!config.databaseUrl) process.exit(1);   // cannot run without a database
 }

@@ -90,7 +90,9 @@ export async function getMeta(k, def = null) {
 }
 
 // ---- counts / insights ----
-export async function counts() {
+export async function counts(brand) {
+  const where = brand ? "WHERE brand=$1" : "";
+  const params = brand ? [brand] : [];
   const r = await one(`SELECT COUNT(*) total,
     COUNT(*) FILTER (WHERE state='pending') pending,
     COUNT(*) FILTER (WHERE state='matched') matched,
@@ -98,7 +100,7 @@ export async function counts() {
     COUNT(*) FILTER (WHERE state='error') error,
     COUNT(*) FILTER (WHERE decision='approved') approved,
     COUNT(*) FILTER (WHERE state='mismatch' AND decision='pending') awaiting,
-    COUNT(*) FILTER (WHERE decision='rejected') rejected FROM products`);
+    COUNT(*) FILTER (WHERE decision='rejected') rejected FROM products ${where}`, params);
   const o = {}; for (const k of Object.keys(r)) o[k] = num(r[k]); return o;
 }
 
@@ -235,6 +237,45 @@ export function computeFinal(baseInr, liveInr, ref, markup, custom, convert, rat
   return Math.round((converted + Number(markup || 0)) * 100) / 100;
 }
 
+// Round a final price to a "clean" ending based on its units digit:
+//   0,1,2 -> round DOWN to the ...0   (1121,1122 -> 1120)
+//   3,4,5 -> ...5                      (1123,1124,1125 -> 1125)
+//   6,7,8,9 -> round UP to next ...0   (1126..1129 -> 1130)
+// Applied to the approved/pushed final price in Review.
+export function roundFinal(n) {
+  const v = Number(n);
+  if (n == null || !Number.isFinite(v)) return n;
+  const r = Math.round(v);
+  const tens = Math.floor(r / 10) * 10;
+  const d = r - tens;
+  return d <= 2 ? tens : d <= 5 ? tens + 5 : tens + 10;
+}
+
+// ---- push currency per brand ----
+// The price pushed to Shopify is ALWAYS in the brand's store currency: USD by
+// default, CAD for brands listed in meta 'push_cad_brands' (comma-separated
+// domains, host without www). The list is editable at runtime; cached briefly.
+let _cadCache = { at: 0, set: null };
+const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
+export async function cadBrandSet() {
+  if (_cadCache.set && Date.now() - _cadCache.at < 30_000) return _cadCache.set;
+  const raw = await getMeta("push_cad_brands", "");
+  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  _cadCache = { at: Date.now(), set };
+  return set;
+}
+export async function setCadBrands(list) {
+  const arr = (Array.isArray(list) ? list : String(list || "").split(","))
+    .map(normBrand).filter(Boolean);
+  const uniq = [...new Set(arr)];
+  await setMeta("push_cad_brands", uniq.join(","));
+  _cadCache = { at: 0, set: null };          // invalidate cache
+  return uniq;
+}
+export async function pushCurrencyFor(brand) {
+  return (await cadBrandSet()).has(normBrand(brand)) ? "CAD" : "USD";
+}
+
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
 export async function archiveApproved(client, prow, final, markup, ref, note, by) {
@@ -251,13 +292,25 @@ export async function archiveApproved(client, prow, final, markup, ref, note, by
 }
 
 // ---- history ----
-export async function historyList(brand) {
-  const rows = brand
-    ? await q("SELECT * FROM review_history WHERE brand=$1 ORDER BY approved_at DESC LIMIT 2000", [brand])
-    : await q("SELECT * FROM review_history ORDER BY approved_at DESC LIMIT 2000");
+// A push counts as SUCCESS only when Shopify confirmed the update (or dry-run).
+// Anything else with a status (e.g. "Shopify API error: 429", "PARTIAL/FAILED")
+// is a FAILURE worth retrying; a NULL status means it was never pushed.
+const PUSH_SUCCESS = "(shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')";
+export async function historyList(brand, status) {
+  const cl = []; const p = [];
+  if (brand) { p.push(brand); cl.push(`brand=$${p.length}`); }
+  if (status === "pushed") cl.push(PUSH_SUCCESS);
+  else if (status === "failed") cl.push(`shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}`);
+  else if (status === "not_pushed") cl.push("shopify_status IS NULL");
+  const where = cl.length ? "WHERE " + cl.join(" AND ") : "";
+  const rows = await q(`SELECT * FROM review_history ${where} ORDER BY approved_at DESC LIMIT 2000`, p);
+  // Summary stats are over the whole archive (not the filtered view).
   const s = await one(`SELECT COUNT(*) c, COALESCE(SUM(final_price),0) v,
-    COUNT(*) FILTER (WHERE shopify_status IS NOT NULL) pushed FROM review_history`);
-  return { items: rows, count: num(s.c), value: Number(s.v) || 0, pushed: num(s.pushed) };
+    COUNT(*) FILTER (WHERE ${PUSH_SUCCESS}) pushed,
+    COUNT(*) FILTER (WHERE shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}) failed,
+    COUNT(*) FILTER (WHERE shopify_status IS NULL) not_pushed FROM review_history`);
+  return { items: rows, count: num(s.c), value: Number(s.v) || 0,
+    pushed: num(s.pushed), failed: num(s.failed), not_pushed: num(s.not_pushed) };
 }
 
 // Empty the review/approval archive (the "review DB"). Products are NOT touched.
