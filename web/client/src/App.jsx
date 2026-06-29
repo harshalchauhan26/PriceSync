@@ -1,450 +1,923 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import Chart from "chart.js/auto";
 
-/* ---------- helpers ---------- */
-const COL = { primary: "#3b82f6", sec: "#4ae176", ter: "#ffb95f", err: "#ff6b6b", mut: "#8c909f" };
-const fmt = (n) => (n == null || n === "") ? "—" : Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
-const fmtInt = (n) => (n == null ? "0" : Number(n).toLocaleString());
-const inr = (n) => (n == null ? "—" : "₹" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 }));
-// Final-price rounding (mirrors store.roundFinal on the server): units digit
-// 0–2 → round down to …0, 3–5 → …5, 6–9 → round up to next …0.
-const roundFinal = (n) => { const v = Number(n); if (n == null || !Number.isFinite(v)) return n; const r = Math.round(v); const t = Math.floor(r / 10) * 10; const d = r - t; return d <= 2 ? t : d <= 5 ? t + 5 : t + 10; };
-const trunc = (u, n = 46) => { if (!u) return "—"; let l = u.replace(/^https?:\/\//, ""); return l.length > n ? l.slice(0, n - 1) + "…" : l; };
-const pid = (u) => { try { return new URL(u).pathname.split("/").filter(Boolean).pop() || "—"; } catch { return "—"; } };
-const elapsed = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}m ${String(s % 60).padStart(2, "0")}s`;
+/* ─── helpers ──────────────────────────────────────────────── */
+const fmt   = (n) => (n == null || n === "") ? "—" : Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+const fmtInt= (n) => (n == null ? "0" : Number(n).toLocaleString());
+const inr   = (n) => n == null ? "—" : "₹" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const roundFinal = (n) => { const v = Number(n); if (n == null || !Number.isFinite(v)) return n; const r = Math.round(v); const t = Math.floor(r/10)*10; const d = r-t; return d<=2?t:d<=5?t+5:t+10; };
+const trunc = (u, n=44) => { if (!u) return "—"; let l = u.replace(/^https?:\/\//,""); return l.length>n ? l.slice(0,n-1)+"…":l; };
+const elapsed = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}m ${String(s%60).padStart(2,"0")}s`;
 async function api(path, opts) { const r = await fetch(path, opts); try { return await r.json(); } catch { return {}; } }
-const aj = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+const aj = (path, body) => api(path, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{}) });
 
-/* ---------- toasts ---------- */
+/* ─── toasts ───────────────────────────────────────────────── */
 let _toast = () => {};
-export const toast = (t, k = "ok") => _toast(t, k);
 function Toaster() {
   const [xs, setXs] = useState([]);
-  _toast = (text, kind) => { const id = Math.random(); setXs((a) => [...a, { id, text, kind }]); setTimeout(() => setXs((a) => a.filter((i) => i.id !== id)), 3200); };
-  return <div className="fixed top-4 right-4 z-50 flex flex-col gap-2">
-    {xs.map((t) => <div key={t.id} className="toastin px-4 py-2.5 rounded-lg text-[13px] shadow-2xl"
-      style={{ background: "var(--c)", border: "1px solid " + (t.kind === "err" ? COL.err : COL.sec) }}>{t.text}</div>)}
+  _toast = (text, kind) => { const id = Math.random(); setXs(a=>[...a,{id,text,kind}]); setTimeout(()=>setXs(a=>a.filter(i=>i.id!==id)),3500); };
+  return <div style={{ position:"fixed", top:16, right:16, zIndex:9999, display:"flex", flexDirection:"column", gap:8 }}>
+    {xs.map(t=><div key={t.id} className="toastin card2" style={{ padding:"10px 16px", fontSize:12.5, fontWeight:600, border:"1px solid "+(t.kind==="err"?"rgba(239,68,68,.4)":"rgba(34,197,94,.35)"), color: t.kind==="err"?"#ef4444":"#e2e0ee", minWidth:280, maxWidth:380, boxShadow:"0 8px 32px rgba(0,0,0,.6)" }}>{t.text}</div>)}
   </div>;
 }
+const toast = (t, k="ok") => _toast(t, k);
 
-/* ---------- icons ---------- */
-const P = {
-  pipeline: "M3 3v18h18M7 14l3-3 3 3 5-6", review: "M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11",
-  clock: "M12 8v4l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0", alerts: "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a2 2 0 0 0 3.4 0",
-  plug: "M9 2v6M15 2v6M7 8h10v3a5 5 0 0 1-10 0V8ZM12 16v6", gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.6 1.6 0 0 0 .3 1.8M4.6 9a1.6 1.6 0 0 0-.3-1.8",
-  home: "M3 11l9-8 9 8M5 10v10h14V10", play: "M8 5v14l11-7z", refresh: "M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5",
-  stop: "M6 6h12v12H6z", upload: "M12 16V4M7 9l5-5 5 5M5 20h14", dl: "M12 3v12m-5-5 5 5 5-5M5 21h14",
-  check: "M20 6 9 17l-5-5", x: "M18 6 6 18M6 6l12 12", search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM21 21l-4.3-4.3",
-  share: "M4 12v8h16v-8M12 16V4M8 8l4-4 4 4", up: "M12 19V5M5 12l7-7 7 7", down: "M12 5v14M5 12l7 7 7-7", logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+/* ─── icons ────────────────────────────────────────────────── */
+const PATHS = {
+  pipeline:"M3 3v18h18M7 14l3-3 3 3 5-6",
+  review:"M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11",
+  clock:"M12 8v4l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0",
+  alerts:"M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a2 2 0 0 0 3.4 0",
+  plug:"M9 2v6M15 2v6M7 8h10v3a5 5 0 0 1-10 0V8ZM12 16v6",
+  gear:"M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.6 1.6 0 0 0 .3 1.8M4.6 9a1.6 1.6 0 0 0-.3-1.8",
+  home:"M3 11l9-8 9 8M5 10v10h14V10",
+  play:"M8 5v14l11-7z",
+  refresh:"M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5",
+  stop:"M6 6h12v12H6z",
+  upload:"M12 16V4M7 9l5-5 5 5M5 20h14",
+  dl:"M12 3v12m-5-5 5 5 5-5M5 21h14",
+  check:"M20 6 9 17l-5-5",
+  x:"M18 6 6 18M6 6l12 12",
+  search:"M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM21 21l-4.3-4.3",
+  share:"M4 12v8h16v-8M12 16V4M8 8l4-4 4 4",
+  up:"M12 19V5M5 12l7-7 7 7",
+  down:"M12 5v14M5 12l7 7 7-7",
+  logout:"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+  trash:"M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6",
+  db:"M12 2C7.58 2 4 3.79 4 6v12c0 2.21 3.58 4 8 4s8-1.79 8-4V6c0-2.21-3.58-4-8-4ZM4 12c0 2.21 3.58 4 8 4s8-1.79 8-4M4 9c0 2.21 3.58 4 8 4s8-1.79 8-4",
+  warn:"M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z",
+  filter:"M22 3H2l8 9.46V19l4 2v-8.54L22 3",
 };
-const Icon = ({ n, s = 16, c = "currentColor" }) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{(P[n] || "").split("M").filter(Boolean).map((d, i) => <path key={i} d={"M" + d} />)}</svg>;
+const Icon = ({n,s=15,c="currentColor"}) =>
+  <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    {(PATHS[n]||"").split("M").filter(Boolean).map((d,i)=><path key={i} d={"M"+d}/>)}
+  </svg>;
 
-function Btn({ children, kind = "ghost", sm, ...p }) {
-  const st = { primary: { background: COL.primary, color: "#fff", border: "1px solid " + COL.primary },
-    sec: { background: COL.sec, color: "#04140d", border: "1px solid " + COL.sec },
-    danger: { background: "transparent", color: COL.err, border: "1px solid " + COL.err },
-    ghost: { background: "var(--c-low)", color: "var(--on)", border: "1px solid var(--border)" } }[kind];
-  return <button {...p} style={st} className={"inline-flex items-center gap-1.5 font-semibold rounded-lg disabled:opacity-40 disabled:cursor-not-allowed " + (sm ? "px-2.5 py-1.5 text-[12px]" : "px-3.5 py-2 text-[13px]")}>{children}</button>;
+/* ─── Toggle ───────────────────────────────────────────────── */
+function Toggle({on, onChange}) {
+  return <button onClick={()=>onChange(!on)} className="tog-wrap"
+    style={{ background: on?"#22c55e":"rgba(255,255,255,.08)" }}>
+    <span className="tog-knob" style={{ left: on?20:3, background: on?"#03120a":"#5c5a72" }} />
+  </button>;
 }
-const Stat = ({ k, v, c }) => <div className="card p-3.5"><div className="lbl mb-1">{k}</div><div className="mono" style={{ fontSize: 22, fontWeight: 600, color: c || "#fff" }}>{v}</div></div>;
-function Toggle({ on, onChange }) { return <button onClick={() => onChange(!on)} className="relative rounded-full" style={{ width: 40, height: 22, background: on ? COL.sec : "var(--c-low)", border: "1px solid " + (on ? COL.sec : "var(--border)") }}><span className="absolute rounded-full transition-all" style={{ width: 16, height: 16, top: 2, left: on ? 20 : 2, background: on ? "#04140d" : COL.mut }} /></button>; }
-function VendorSelect({ value, onChange, kind }) {
+
+/* ─── Vendor select (single) ───────────────────────────────── */
+function VendorSelect({value, onChange, kind, source}) {
   const [vs, setVs] = useState([]);
-  useEffect(() => { api("/api/vendors" + (kind ? "?kind=" + kind : "")).then((d) => setVs(d.vendors || [])); }, [kind]);
-  return <select className="inp mono" style={{ width: 210 }} value={value} onChange={(e) => onChange(e.target.value)}>
+  useEffect(()=>{ let u="/api/vendors"+(kind?"?kind="+kind:""); if(source) u+=(kind?"&":"?")+"source="+source; api(u).then(d=>setVs(d.vendors||[])); },[kind,source]);
+  return <select className="inp mono" style={{minWidth:180}} value={value} onChange={e=>onChange(e.target.value)}>
     <option value="">All vendors ({vs.length})</option>
-    {vs.map((v) => <option key={v.vendor} value={v.vendor}>{v.vendor.replace(/^www\./, "")} · {v.count}</option>)}</select>;
+    {vs.map(v=><option key={v.vendor} value={v.vendor}>{v.vendor.replace(/^www\./,"")} · {v.count}</option>)}
+  </select>;
 }
-// Multi-select brand picker: pick any combination of brands, then bulk-apply a
-// rate/markup to all of them together. value/onChange use an array of brand names.
-function BrandMultiSelect({ value, onChange, kind }) {
-  const [vs, setVs] = useState([]); const [open, setOpen] = useState(false); const [q, setQ] = useState(""); const ref = useRef(null);
-  useEffect(() => { api("/api/vendors" + (kind ? "?kind=" + kind : "")).then((d) => setVs(d.vendors || [])); }, [kind]);
-  useEffect(() => { const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown", h); return () => document.removeEventListener("mousedown", h); }, []);
-  const sel = new Set(value);
-  const toggle = (v) => { const n = new Set(sel); n.has(v) ? n.delete(v) : n.add(v); onChange([...n]); };
-  const shown = vs.filter((v) => !q || v.vendor.toLowerCase().includes(q.toLowerCase()));
-  const label = value.length === 0 ? `All brands (${vs.length})` : `${value.length} brand${value.length > 1 ? "s" : ""} selected`;
-  return <div className="relative" ref={ref} style={{ width: 230 }}>
-    <button onClick={() => setOpen((o) => !o)} className="inp mono w-full text-left flex items-center justify-between" style={{ width: 230 }}>
-      <span className="truncate">{label}</span><Icon n="search" s={13} c={COL.mut} /></button>
-    {open && <div className="absolute z-40 mt-1 p-2 rounded-lg" style={{ width: 264, background: "var(--surface)", border: "1px solid var(--border)", boxShadow: "0 12px 30px rgba(0,0,0,.5)" }}>
-      <input className="inp w-full mb-2" placeholder="Search brands…" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
-      <div className="flex justify-between mb-1.5 text-[11px]">
-        <a style={{ cursor: "pointer", color: COL.primary }} onClick={() => onChange([...new Set([...value, ...shown.map((v) => v.vendor)])])}>Select all</a>
-        <a style={{ cursor: "pointer", color: COL.mut }} onClick={() => onChange([])}>Clear</a></div>
-      <div className="max-h-56 overflow-y-auto space-y-0.5">
-        {shown.map((v) => <label key={v.vendor} className="flex items-center gap-2 text-[12px] px-1 py-0.5 cursor-pointer">
-          <input type="checkbox" checked={sel.has(v.vendor)} onChange={() => toggle(v.vendor)} />
-          <span className="flex-1 truncate">{v.vendor.replace(/^www\./, "")}</span><span style={{ color: COL.mut }}>{v.count}</span></label>)}
-        {!shown.length && <div className="text-center py-3 text-[12px]" style={{ color: COL.mut }}>No brands</div>}</div>
+
+/* ─── Brand multi-select ───────────────────────────────────── */
+function BrandMultiSelect({value, onChange, kind}) {
+  const [vs,setVs]=useState([]); const [open,setOpen]=useState(false); const [q,setQ]=useState(""); const ref=useRef(null);
+  useEffect(()=>{ api("/api/vendors"+(kind?"?kind="+kind:"")).then(d=>setVs(d.vendors||[])); },[kind]);
+  useEffect(()=>{ const h=(e)=>{ if(ref.current&&!ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown",h); return()=>document.removeEventListener("mousedown",h); },[]);
+  const sel=new Set(value);
+  const toggle=(v)=>{ const n=new Set(sel); n.has(v)?n.delete(v):n.add(v); onChange([...n]); };
+  const shown=vs.filter(v=>!q||v.vendor.toLowerCase().includes(q.toLowerCase()));
+  const label=value.length===0?`All brands (${vs.length})`:`${value.length} brand${value.length>1?"s":""} selected`;
+  return <div className="relative" ref={ref} style={{position:"relative"}}>
+    <button onClick={()=>setOpen(o=>!o)} className="inp" style={{minWidth:200,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,cursor:"pointer"}}>
+      <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>{label}</span>
+      <Icon n="search" s={12} c="var(--on3)" />
+    </button>
+    {open&&<div className="card2" style={{position:"absolute",zIndex:50,top:"calc(100% + 4px)",left:0,width:260,padding:10,boxShadow:"0 16px 48px rgba(0,0,0,.7)"}}>
+      <input className="inp" style={{width:"100%",marginBottom:8}} placeholder="Search brands…" value={q} onChange={e=>setQ(e.target.value)} autoFocus />
+      <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,fontSize:11}}>
+        <span style={{color:"var(--blue)",cursor:"pointer"}} onClick={()=>onChange([...new Set([...value,...shown.map(v=>v.vendor)])])}>Select all</span>
+        <span style={{color:"var(--on3)",cursor:"pointer"}} onClick={()=>onChange([])}>Clear</span>
+      </div>
+      <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+        {shown.map(v=><label key={v.vendor} className="vendor-row">
+          <input type="checkbox" checked={sel.has(v.vendor)} onChange={()=>toggle(v.vendor)} />
+          <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.vendor.replace(/^www\./,"")}</span>
+          <span style={{color:"var(--on3)",fontSize:11}}>{v.count}</span>
+        </label>)}
+        {!shown.length&&<div style={{textAlign:"center",padding:"12px 0",color:"var(--on3)",fontSize:12}}>No brands</div>}
+      </div>
     </div>}
   </div>;
 }
-function ChartBox({ type, labels, datasets, options, h = 230 }) {
-  const ref = useRef(null), inst = useRef(null);
-  // Only rebuild when the data/config actually changes — NOT on every parent
-  // re-render (the app polls /api/meta on a timer, which would otherwise destroy
-  // and recreate every chart repeatedly and make the UI lag/flicker).
-  const sig = JSON.stringify({ type, labels, datasets, options });
-  useEffect(() => {
-    if (!ref.current) return; if (inst.current) inst.current.destroy();
-    inst.current = new Chart(ref.current.getContext("2d"), { type, data: { labels, datasets },
-      options: Object.assign({ responsive: true, maintainAspectRatio: false, animation: false,
-        plugins: { legend: { labels: { color: "#a1a1aa", font: { size: 11 } } } },
-        scales: (type === "doughnut") ? {} : { x: { ticks: { color: "#a1a1aa", font: { size: 10 } }, grid: { color: "#27272a" } }, y: { ticks: { color: "#a1a1aa", font: { size: 10 } }, grid: { color: "#27272a" } } } }, options || {}) });
-    return () => inst.current && inst.current.destroy();
-  }, [sig, h]);
-  return <div style={{ height: h }}><canvas ref={ref} /></div>;
+
+/* ─── Stat card ────────────────────────────────────────────── */
+const Stat = ({k,v,c}) =>
+  <div className="stat-card">
+    <div className="lbl">{k}</div>
+    <div className="stat-val mono" style={{color:c||"var(--on)"}}>{v}</div>
+  </div>;
+
+/* ─── Chart box ────────────────────────────────────────────── */
+function ChartBox({type,labels,datasets,options,h=200}) {
+  const ref=useRef(null), inst=useRef(null);
+  const sig=JSON.stringify({type,labels,datasets,options});
+  useEffect(()=>{
+    if(!ref.current) return; if(inst.current) inst.current.destroy();
+    inst.current=new Chart(ref.current.getContext("2d"),{type,data:{labels,datasets},
+      options:Object.assign({responsive:true,maintainAspectRatio:false,animation:false,
+        plugins:{legend:{labels:{color:"#5c5a72",font:{size:10}}}},
+        scales:(type==="doughnut")?{}:{
+          x:{ticks:{color:"#5c5a72",font:{size:10}},grid:{color:"rgba(255,255,255,.04)"}},
+          y:{ticks:{color:"#5c5a72",font:{size:10}},grid:{color:"rgba(255,255,255,.04)"}}}},options||{})});
+    return()=>inst.current&&inst.current.destroy();
+  },[sig,h]);
+  return <div style={{height:h}}><canvas ref={ref}/></div>;
 }
 
-/* ===================== AUTH ===================== */
-function Auth({ onIn }) {
-  const [mode, setMode] = useState("login"); const [email, setE] = useState(""); const [pw, setPw] = useState(""); const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
-  const submit = async (e) => { e.preventDefault(); setBusy(true); setErr("");
-    const d = await aj(mode === "login" ? "/api/login" : "/api/register", { email, password: pw });
-    setBusy(false); if (d.ok) onIn(d); else setErr(d.error || "Failed"); };
-  return <div className="h-full flex items-center justify-center">
-    <form onSubmit={submit} className="card p-8" style={{ width: 360 }}>
-      <div className="flex items-center gap-2.5 mb-5"><div style={{ width: 34, height: 34, borderRadius: 9, background: "linear-gradient(135deg,#3b82f6,#4ae176)", display: "flex", alignItems: "center", justifyContent: "center" }}>⚡</div>
-        <div><div style={{ fontWeight: 800, fontSize: 18 }}>MBO Tracker</div><div className="lbl">{mode === "login" ? "sign in" : "create account"}</div></div></div>
-      <div className="lbl mb-1">Email</div><input className="inp w-full mb-3" type="email" value={email} onChange={(e) => setE(e.target.value)} autoFocus required />
-      <div className="lbl mb-1">Password</div><input className="inp w-full" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required />
-      <button disabled={busy} className="w-full mt-5 rounded-lg font-bold py-2.5" style={{ background: COL.primary, color: "#fff" }}>{busy ? "…" : (mode === "login" ? "Sign in" : "Create account")}</button>
-      <div className="mt-3 text-[12px]" style={{ color: COL.err, minHeight: 16 }}>{err}</div>
-      <div className="text-[12px]" style={{ color: COL.mut }}>{mode === "login" ? <>No account? <a onClick={() => setMode("register")} style={{ color: COL.primary, cursor: "pointer" }}>Create one</a></> : <>Have an account? <a onClick={() => setMode("login")} style={{ color: COL.primary, cursor: "pointer" }}>Sign in</a></>}</div>
-    </form></div>;
+/* ─── Empty DB button (shared) ─────────────────────────────── */
+function EmptyDbBtn({admin}) {
+  const [busy,setBusy]=useState(false);
+  const go=async()=>{
+    if(!admin) return toast("Admin only","err");
+    if(!confirm("⚠️ EMPTY DATABASE\n\nThis will DELETE all products, price history, review history, and import catalog from Supabase.\n\nThis action cannot be undone. Continue?")) return;
+    setBusy(true);
+    const r=await aj("/api/db/empty",{});
+    setBusy(false);
+    r.ok ? toast(`Database emptied (${r.removed} rows removed)`,"ok") : toast(r.error||"Failed","err");
+  };
+  return <button className="btn btn-sm btn-empty" onClick={go} disabled={busy||!admin} title="Empty Supabase DB — deletes all data">
+    <Icon n="trash" s={12}/>{busy?"Clearing…":"Empty DB"}
+  </button>;
 }
 
-/* ===================== HOME ===================== */
-function Home({ go }) {
-  const [d, setD] = useState(null); const [brand, setBrand] = useState("");
-  const load = useCallback(() => { setD(null); api("/api/insights?brand=" + encodeURIComponent(brand)).then(setD); }, [brand]);
-  useEffect(() => { load(); }, [load]);
-  const head = <div className="flex items-center justify-between mb-4">
-    <h1 style={{ fontSize: 28, fontWeight: 600 }}>Insights</h1>
-    <div className="flex gap-2.5 items-center"><VendorSelect value={brand} onChange={setBrand} />
-      <Btn kind="ghost" sm onClick={() => setBrand("")}><Icon n="x" s={13} />Clear</Btn></div></div>;
-  if (!d) return <div className="h-full overflow-auto pr-1">{head}<div className="text-center py-20" style={{ color: COL.mut }}>Loading insights…</div></div>;
-  const c = d.counts || {}, ex = d.exposure || {}, fxr = d.fx || {};
-  const k = [["Total Products", fmtInt(c.total), "#fff"], ["Matched", fmtInt(c.matched), COL.sec], ["Mismatches", fmtInt(c.mismatch), COL.ter], ["Errors", fmtInt(c.error), COL.err], ["Vendors", fmtInt(d.vendors), COL.primary], ["Awaiting", fmtInt(c.awaiting), COL.ter], ["Approved (archived)", fmtInt(d.approved_count), COL.sec], ["Overpriced ₹", inr(Math.round(ex.over || 0)), COL.err]];
-  return <div className="h-full overflow-auto pr-1">{head}
-    <div className="grid grid-cols-4 gap-3 mb-4">{k.map(([a, b, c2]) => <Stat key={a} k={a} v={b} c={c2} />)}</div>
-    <div className="grid grid-cols-3 gap-3 mb-4">
-      <div className="card p-4"><div className="lbl mb-3">Catalog status</div><ChartBox type="doughnut" h={220} labels={["Matched", "Mismatch", "Error", "Pending"]} datasets={[{ data: [c.matched, c.mismatch, c.error, c.pending], backgroundColor: [COL.sec, COL.ter, COL.err, "#3f3f46"], borderWidth: 0 }]} options={{ plugins: { legend: { position: "bottom" } }, cutout: "62%" }} /></div>
-      <div className="card p-4"><div className="lbl mb-3">Top vendors by mismatch</div><ChartBox type="bar" h={220} labels={d.top_mismatch.map((v) => v.brand.replace(/\.(com|in|co).*/, ""))} datasets={[{ data: d.top_mismatch.map((v) => v.count), backgroundColor: COL.ter, borderRadius: 4 }]} options={{ indexAxis: "y", plugins: { legend: { display: false } } }} /></div>
-      <div className="card p-4"><div className="lbl mb-3">Largest vendors</div><ChartBox type="bar" h={220} labels={d.top_products.map((v) => v.brand.replace(/\.(com|in|co).*/, ""))} datasets={[{ data: d.top_products.map((v) => v.count), backgroundColor: COL.primary, borderRadius: 4 }]} options={{ indexAxis: "y", plugins: { legend: { display: false } } }} /></div>
+/* ─── Page toolbar (vendor filter + clear + empty DB) ─────── */
+function PageBar({title, subtitle, admin, vendor, onVendor, onClear, extraLeft, extraRight, kind, source}) {
+  return <div style={{marginBottom:20}}>
+    <div style={{marginBottom:12}}>
+      <h1 style={{fontSize:22,fontWeight:700,letterSpacing:"-.01em"}}>{title}</h1>
+      {subtitle&&<div style={{fontSize:12,color:"var(--on2)",marginTop:3}}>{subtitle}</div>}
     </div>
-    <div className="grid grid-cols-3 gap-3">
-      <div className="card p-4"><div className="lbl mb-3">Exposure (mismatch gap)</div>
-        <Row l="Overpriced" v={inr(Math.round(ex.over || 0))} c={COL.err} /><Row l="Underpriced" v={inr(Math.round(ex.under || 0))} c={COL.sec} /><Row l="Avg gap" v={inr(Math.round(ex.avg || 0))} /><Row l="Approved value" v={inr(Math.round(d.approved_value || 0))} c={COL.sec} /></div>
-      <div className="card p-4"><div className="lbl mb-3">Live FX → INR</div>{["USD", "CAD"].map((cu) => <Row key={cu} l={cu} v={"₹" + fmt(fxr[cu])} c={COL.primary} />)}</div>
-      <div className="card p-4"><div className="lbl mb-3">Quick actions</div><div className="flex flex-col gap-2">
-        <Btn kind="primary" onClick={() => go("pipeline")}><Icon n="play" s={14} />Run pipeline</Btn>
-        <Btn kind="ghost" onClick={() => go("review")}><Icon n="review" s={14} />Review {fmtInt(c.awaiting)} awaiting</Btn>
-        <Btn kind="ghost" onClick={() => go("history")}><Icon n="clock" s={14} />History</Btn></div></div>
-    </div></div>;
-}
-const Row = ({ l, v, c }) => <div className="flex justify-between py-1.5"><span className="text-[12.5px]" style={{ color: COL.mut }}>{l}</span><b className="mono" style={{ color: c || "#fff" }}>{v}</b></div>;
-
-/* ===================== PIPELINE ===================== */
-function Pipeline({ admin }) {
-  const [st, setSt] = useState({ entries: [], matched: 0, mismatch: 0, errors: 0, total_rows: 0, current_row: 0, elapsed: 0, message: "Idle.", running: false, phase: "idle", log_total: 0 });
-  const [cfg, setCfg] = useState({ concurrency: 8, timeout_ms: 12000, batch_size: 250, rest_between: 2, safe_retry: true, simulation: false, data_source: "database" });
-  const [vendors, setVendors] = useState([]); const [vsel, setVsel] = useState([]); const [cat, setCat] = useState({ total: 0 }); const [curSel, setCurSel] = useState("INR");
-  const cursor = useRef(0), logRef = useRef(null);
-  useEffect(() => { api("/api/pipe/status?cursor=0").then((d) => d.config &&
-    setCfg((current) => ({ ...current, ...d.config }))); }, []);
-  useEffect(() => {
-    api("/api/vendors?source=" + cfg.data_source).then((d) => setVendors(d.vendors || []));
-    api("/api/meta").then((d) => d.counts && setCat({ ...d.counts, imported: d.imported_count || 0 }));
-  }, [cfg.data_source]);
-  const poll = useCallback(async () => { const d = await api("/api/pipe/status?cursor=" + cursor.current); if (d.running === undefined) return; cursor.current = d.cursor; setSt((s) => ({ ...d, entries: [...s.entries, ...(d.entries || [])].slice(-400) })); }, []);
-  useEffect(() => { let live = true; const loop = async () => { if (!live) return; await poll(); setTimeout(loop, st.running ? 800 : 2000); }; loop(); return () => { live = false; }; }, [poll, st.running]);
-  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [st.entries.length]);
-  const send = (extra) => aj("/api/pipe/config", { ...cfg, ...extra });
-  const run = async (mode) => { await send({ fresh_start: mode === "fresh", retry_errors: mode === "update", vendors: vsel }); const d = await aj("/api/pipe/start", {}); d.error ? toast(d.error, "err") : toast("Run started", "ok"); setSt((s) => ({ ...s, entries: [] })); cursor.current = 0; };
-  const onFile = async (f) => { if (!f || !admin) return; const fd = new FormData(); fd.append("file", f); toast("Reading " + f.name + "..."); const p = await api("/api/import/preview", { method: "POST", body: fd }); if (!p.ok) return toast(p.error || "Preview failed", "err"); const fd2 = new FormData(); const d = await api("/api/import", { method: "POST", body: fd2 }); d.ok ? toast(`Sheet staged: ${d.rows} products · click "Add to database" to save`, "ok") : toast(d.error || "Import failed", "err"); refreshCat(); };
-  const refreshCat = () => { api("/api/meta").then((x) => x.counts && setCat({ ...x.counts, imported: x.imported_count || 0 })); api("/api/vendors?source=" + cfg.data_source).then((x) => setVendors(x.vendors || [])); };
-  const setCurrency = async () => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Set currency to ${curSel} for ${vsel.length ? "the selected" : "ALL"} products (${fmtInt(scope)})?\n\nThe price numbers are NOT changed — only the currency label and its ≈₹ comparison.`)) return; const r = await aj("/api/products/set_currency", { currency: curSel, vendors: vsel }); r.ok ? toast(`Currency set to ${r.currency} on ${fmtInt(r.updated)} products · prices unchanged`, "ok") : toast(r.error || "Failed", "err"); refreshCat(); };
-  const commitSheet = async () => { if (!admin) return toast("Admin only", "err"); if (!cat.imported) return toast("Upload a sheet first", "err"); if (!confirm(`Sync the database to the sheet?\n\nThe products DB will become EXACTLY the ${fmtInt(cat.imported)} Shopify products in the sheet — new ones added, products no longer in the sheet removed. Approval history is kept.`)) return; toast("Syncing database to sheet…"); const r = await aj("/api/import/commit", {}); r.ok ? toast(`Synced → ${fmtInt(r.total)} in DB (${fmtInt(r.added)} added, ${fmtInt(r.removed)} removed)`, "ok") : toast(r.error || "Failed", "err"); refreshCat(); };
-  const pct = st.total_rows ? Math.min(100, st.current_row / st.total_rows * 100) : 0;
-  const sourceTotal = cfg.data_source === "imported" ? cat.imported : cat.total;
-  const scope = vsel.length ? vendors.filter((v) => vsel.includes(v.vendor)).reduce((a, v) => a + v.count, 0) : sourceTotal;
-  const tv = (v) => { const n = new Set(vsel); n.has(v) ? n.delete(v) : n.add(v); setVsel([...n]); };
-  return <div className="grid grid-cols-[300px_1fr] gap-5 h-full min-h-0">
-    <div className="overflow-y-auto pr-1 space-y-3">
-      <div className="card p-3"><div className="lbl mb-2">Source Configuration</div>
-        <div onClick={() => document.getElementById("fi").click()} className="rounded-lg p-4 text-center cursor-pointer" style={{ border: "1.5px dashed var(--border)", color: COL.mut }}><Icon n="upload" s={20} /><div className="text-[12px] mt-1">Drop sheet or click to upload</div></div>
-        <input id="fi" type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => onFile(e.target.files[0])} />
-        <div className="text-[11px] mt-2" style={{ color: COL.mut }}>{fmtInt(sourceTotal)} products in selected source</div>
-        <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
-          <div><div className="text-[12px] font-semibold">{cfg.data_source === "imported" ? "Sheet products only" : "Database products"}</div>
-            <div className="text-[10px]" style={{ color: COL.mut }}>{cfg.data_source === "imported" ? "Scrape the uploaded sheet, not the DB" : "Scrape the permanent products database"}</div></div>
-          <Toggle on={cfg.data_source === "imported"} onChange={(on) => {
-            const data_source = on ? "imported" : "database";
-            const next = { ...cfg, data_source, vendors: [] };
-            setCfg(next); setVsel([]); aj("/api/pipe/config", next);
-          }} />
-        </div>
-        <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
-          <Btn kind="primary" sm onClick={commitSheet} disabled={!admin || !cat.imported} style={{ width: "100%", justifyContent: "center" }}><Icon n="dl" s={13} />Sync database to sheet</Btn>
-          <div className="text-[10px] mt-1.5" style={{ color: COL.mut }}>Staged in sheet: <b style={{ color: "#fff" }}>{fmtInt(cat.imported)}</b> · DB becomes exactly the sheet's Shopify products</div>
-        </div></div>
-      <div className="card p-3"><div className="flex justify-between items-center mb-2"><span className="lbl">Designer Domain</span><span className="text-[10px]" style={{ color: COL.mut }}><a onClick={() => setVsel([])} style={{ cursor: "pointer" }}>clear</a></span></div>
-        <div className="max-h-44 overflow-y-auto space-y-0.5">{vendors.map((v) => <label key={v.vendor} className="flex items-center gap-2 text-[12px] px-1 py-0.5 cursor-pointer"><input type="checkbox" checked={vsel.includes(v.vendor)} onChange={() => tv(v.vendor)} /><span className="flex-1 truncate">{v.vendor.replace(/^www\./, "")}</span><span style={{ color: COL.mut }}>{v.count}</span></label>)}</div>
-        <div className="text-[11px] mt-2" style={{ color: COL.mut }}>Scope: <b style={{ color: "#fff" }}>{fmtInt(scope)}</b> products</div></div>
-      <div className="card p-3 space-y-2"><div className="lbl">Engine Settings</div>
-        <div className="grid grid-cols-2 gap-2">{[["Concurrency", "concurrency"], ["Timeout (ms)", "timeout_ms"], ["Batch", "batch_size"], ["Rest (s)", "rest_between"]].map(([l, key]) => <div key={key}><div className="lbl mb-1">{l}</div><input type="number" className="inp w-full mono" value={cfg[key]} onChange={(e) => setCfg({ ...cfg, [key]: +e.target.value })} /></div>)}</div>
-        <div className="flex items-center justify-between pt-1"><span className="text-[12.5px]">Safe-Retry</span><Toggle on={cfg.safe_retry} onChange={(v) => setCfg({ ...cfg, safe_retry: v })} /></div>
-        <Btn kind="ghost" onClick={() => { send({}); toast("Config applied", "ok"); }}><Icon n="check" s={13} />Apply</Btn></div>
+    <div className="toolbar">
+      {extraLeft}
+      <div className="toolbar-sep"/>
+      <Icon n="filter" s={13} c="var(--on3)"/>
+      <VendorSelect value={vendor} onChange={onVendor} kind={kind} source={source}/>
+      <button className="btn btn-sm btn-ghost" onClick={onClear} title="Clear filters & screen">
+        <Icon n="x" s={12}/>Clear
+      </button>
+      <div className="toolbar-sep"/>
+      <EmptyDbBtn admin={admin}/>
+      {extraRight}
     </div>
-    <div className="flex flex-col min-h-0">
-      <div className="flex gap-2.5 mb-3 items-center flex-wrap">
-        <Btn kind="primary" onClick={() => run("fresh")} disabled={st.running || !admin}><Icon n="play" s={14} />Run from Start</Btn>
-        <Btn kind="ghost" onClick={() => run("update")} disabled={st.running || !admin}><Icon n="refresh" s={14} />Check Updates</Btn>
-        <Btn kind="danger" onClick={() => aj("/api/pipe/abort", {})} disabled={!st.running}><Icon n="stop" s={14} />Abort</Btn>
-        <Btn kind="ghost" onClick={() => { setVsel([]); setSt((s) => ({ ...s, entries: [] })); }}><Icon n="x" s={14} />Clear</Btn>
-        <span className="w-px h-5" style={{ background: "var(--border)" }} />
-        <span className="text-[11px]" style={{ color: COL.mut }}>Currency</span>
-        <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
-          {["INR", "USD", "CAD"].map((c) => <button key={c} onClick={() => setCurSel(c)} className="px-2.5 py-1.5 text-[12px] font-semibold navi" style={{ background: curSel === c ? COL.primary : "var(--c-low)", color: curSel === c ? "#fff" : COL.mut }}>{c}</button>)}
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   AUTH
+═══════════════════════════════════════════════════════════════ */
+function Auth({onIn}) {
+  const [mode,setMode]=useState("login"); const [email,setE]=useState(""); const [pw,setPw]=useState(""); const [err,setErr]=useState(""); const [busy,setBusy]=useState(false);
+  const submit=async(e)=>{ e.preventDefault(); setBusy(true); setErr(""); const d=await aj(mode==="login"?"/api/login":"/api/register",{email,password:pw}); setBusy(false); if(d.ok) onIn(d); else setErr(d.error||"Failed"); };
+  return <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)"}}>
+    <form onSubmit={submit} className="card" style={{width:360,padding:36}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
+        <div style={{width:38,height:38,borderRadius:10,background:"linear-gradient(135deg,#3b82f6,#22c55e)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>⚡</div>
+        <div>
+          <div style={{fontWeight:800,fontSize:17,letterSpacing:"-.02em"}}>MBO Tracker</div>
+          <div className="lbl">Terminal v2.4</div>
         </div>
-        <Btn kind="ghost" sm onClick={setCurrency} disabled={!admin}><Icon n="check" s={13} />Set currency</Btn>
-        <span className="ml-auto text-[11px] flex items-center gap-1.5" style={{ color: st.running ? COL.sec : COL.mut }}><span className="w-2 h-2 rounded-full pdot" style={{ background: st.running ? COL.sec : COL.mut }} />{st.running ? "ENGINE LIVE" : "IDLE"}</span></div>
-      <div className="grid grid-cols-6 gap-2.5 mb-3"><Stat k="Total" v={fmtInt(st.total_rows)} /><Stat k="Done" v={fmtInt(st.current_row)} /><Stat k="Matched" v={fmtInt(st.matched)} c={COL.sec} /><Stat k="Mismatch" v={fmtInt(st.mismatch)} c={COL.ter} /><Stat k="Errors" v={fmtInt(st.errors)} c={COL.err} /><Stat k="Elapsed" v={elapsed(st.elapsed || 0)} /></div>
-      {st.phase !== "idle" && <div className="mb-3 px-3.5 py-2 rounded-lg text-[12.5px] font-semibold" style={{ border: "1px solid " + COL.ter + "55", background: COL.ter + "18", color: COL.ter }}>Phase: {st.message}</div>}
-      <div className="h-2.5 rounded-full overflow-hidden mb-3 relative" style={{ background: "var(--c-low)", border: "1px solid var(--border)" }}><div className="h-full relative overflow-hidden" style={{ width: pct + "%", background: COL.primary }}>{st.running && <span className="shine" />}</div></div>
-      <div className="lbl mb-1.5">Stream Console · {fmtInt(st.log_total)}</div>
-      <div ref={logRef} className="card flex-1 min-h-0 overflow-auto mono" style={{ fontSize: 12 }}>
-        <table className="w-full"><tbody>{st.entries.map((e, i) => <tr key={i} className="fadeup" style={{ borderTop: "1px solid var(--c-low)" }}>
-          <td className="px-2 py-1.5" style={{ color: COL.mut, width: 60 }}>{e.t}</td>
-          <td className="px-2 py-1.5" style={{ color: COL.primary2, width: 110 }}>[{(e.domain || "?").replace(/^www\./, "").toUpperCase().slice(0, 12)}]</td>
-          <td className="px-2 py-1.5">{e.url ? <a href={e.url} target="_blank" rel="noopener" style={{ color: COL.primary }}>{trunc(e.url, 40)}</a> : "—"}</td>
-          <td className="px-2 py-1.5 text-right" style={{ width: 90 }}>{e.price}</td>
-          <td className="px-2 py-1.5" style={{ width: 90, color: e.status === "Price Matched" ? COL.sec : e.status && e.status.startsWith("Price Mismatch") ? COL.ter : COL.err }}>{e.status === "Fetch Error" ? "ERR" : e.status === "Price Matched" ? "MATCH" : "MISMATCH"}</td></tr>)}
-          {!st.entries.length && <tr><td className="text-center py-10" style={{ color: COL.mut }}>No log yet — Run from Start.</td></tr>}</tbody></table></div>
-    </div></div>;
-}
-
-/* ===================== REVIEW ===================== */
-function Review({ admin }) {
-  const [tab, setTab] = useState("mismatch"); const [items, setItems] = useState([]); const [counts, setCounts] = useState({});
-  const [brands, setBrands] = useState([]); const [sel, setSel] = useState(() => new Set()); const [gm, setGm] = useState(0); const [convCur, setConvCur] = useState("USD"); const [fxr, setFxr] = useState({});
-  const [usd, setUsd] = useState(""); const [cad, setCad] = useState("");
-  const convOn = convCur !== "INR";
-  const load = useCallback(async () => { const d = await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(brands.join(","))}`); setItems((d.items || []).map((it) => ({ ...it, _m: it.markup_pct || gm, _amt: "", _cur: (it.currency || "INR").toUpperCase() }))); setCounts(d.counts || {}); setSel(new Set()); }, [tab, brands]);
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => { api("/api/fx").then((d) => { if (d.rates) setFxr(d.rates); if (d.markup != null) setGm(d.markup); setUsd(d.overrides?.USD ?? ""); setCad(d.overrides?.CAD ?? ""); }); }, []);
-  const saveFx = async () => { const r = await aj("/api/fx/override", { usd, cad, markup: gm }); if (r.rates) setFxr(r.rates); if (r.overrides) { setUsd(r.overrides.USD ?? ""); setCad(r.overrides.CAD ?? ""); } toast(r.ok ? "Rates & markup saved · applies to all" : "Save failed", r.ok ? "ok" : "err"); };
-  // Conversion currency is chosen at the top (USD/CAD/off) and forced on every
-  // non-INR live price, so all foreign prices convert the same agreed way.
-  // Live price expressed in INR using its own currency (mirrors server toInr).
-  const liveInr = (it) => { if (it.live_price == null) return null; const c = (it.currency || "INR").toUpperCase(); if (c === "INR") return it.live_price; return it.live_price * (fxr[c] || 1); };
-  const dInr = (it) => { const li = liveInr(it); return li != null && it.base_price != null ? li - it.base_price : null; };
-  // Output currency chosen at the top. Final = INR reference / targetRate + flat markup amount.
-  const targetCur = convCur;   // INR | USD | CAD chosen in the top toggle
-  const targetRate = targetCur === "INR" ? 1 : (fxr[targetCur] || 1);
-  const amtInr = (amount, currency) => { const n = Number(amount); if (!Number.isFinite(n) || n <= 0) return null; const c = (currency || "INR").toUpperCase(); const r = (c === "INR" || c === "UNKNOWN") ? 1 : (fxr[c] || 1); return Math.round(n * r * 100) / 100; };
-  // Master markup: the single top-level `gm` value (expressed in the active
-  // conversion currency `targetCur`) drives every product. Per-row markup overrides
-  // were removed so the top field applies to all rows uniformly.
-  const previewFinal = (it) => { const manual = amtInr(it._amt, it._cur); if (manual != null) return roundFinal(manual / targetRate); const refInr = liveInr(it) ?? it.base_price; if (refInr == null) return null; return roundFinal(refInr / targetRate + Number(gm || 0)); };
-  // Optimistic: drop the row from the table immediately so the click feels instant,
-  // then fire the request. The trailing load() reconciles counts/items in the
-  // background (and restores the row if the server rejected the action).
-  const decide = async (it, decision) => { setItems((xs) => xs.filter((x) => x.id !== it.id)); const r = await aj("/api/review/decide", { row: it.id, decision, markup_pct: gm, price_amount: it._amt, price_currency: it._cur, convert: convOn, convert_currency: convOn ? convCur : "" }); r.ok ? toast(decision === "approved" ? `Approved ${fmt(r.final_price)} ${r.push_currency || ""} · ${r.shopify?.status || "queued"}` : "Rejected", r.shopify && !r.shopify.ok ? "err" : "ok") : toast(r.error, "err"); load(); };
-  const del = async (it) => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Reject and remove this product from the database?\n\n${trunc(it.url, 56)}`)) return; setItems((xs) => xs.filter((x) => x.id !== it.id)); const r = await aj("/api/review/delete", { row: it.id }); r.ok ? toast("Rejected · removed from database", "ok") : toast(r.error || "Failed", "err"); load(); };
-  const approveSel = async () => { if (!sel.size) return toast("Select rows first", "err"); let pushed = 0, failed = 0; for (const id of sel) { const it = items.find((x) => x.id === id); const r = await aj("/api/review/decide", { row: id, decision: "approved", markup_pct: gm, price_amount: it._amt, price_currency: it._cur, convert: convOn, convert_currency: convOn ? convCur : "" }); r.shopify?.ok ? pushed++ : failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed ? `, ${failed} failed` : ""}`, failed ? "err" : "ok"); load(); };
-  const approveAll = async () => { if (!confirm(`Approve ALL ${items.length} ${tab} (${brands.length ? brands.length + " brand(s)" : "all brands"}) with +${gm} ${targetCur} markup?`)) return; setItems([]); const r = await aj("/api/review/approve_all", { markup_pct: gm, convert: convOn, convert_currency: convOn ? convCur : "", kind: tab, brands }); r.ok ? toast(`Approved ${r.approved} · pushing ${fmtInt(r.queued || 0)} to Shopify in background (3s/req)`, "ok") : toast(r.error, "err"); load(); };
-  const rejectAll = async () => { if (!admin) return toast("Admin only", "err"); if (!confirm(`Reject ALL ${items.length} ${tab} (${brands.length ? brands.length + " brand(s)" : "all brands"}) and clear them from the review queue?\n\nThe products stay in the database; they just leave Review.`)) return; setItems([]); const r = await aj("/api/review/reject_all", { kind: tab, brands }); r.ok ? toast(`Rejected ${r.rejected} · cleared from review`, "ok") : toast(r.error || "Failed", "err"); load(); };
-  const tabs = [["mismatch", "Mismatches", counts.awaiting, COL.ter], ["error", "Errors", counts.error, COL.err], ["resolved", "Resolved", counts.matched, COL.sec]];
-  const tog = (id) => { const n = new Set(sel); n.has(id) ? n.delete(id) : n.add(id); setSel(n); };
-  return <div className="h-full min-h-0 flex flex-col">
-    <div className="flex items-start justify-between mb-3">
-      <div><h1 style={{ fontSize: 28, fontWeight: 600 }}>Review &amp; Approval</h1><div className="text-[13px]" style={{ color: COL.mut }}>Approving archives the row and pushes the final price to Shopify using the selected MBO URL setting.</div></div>
-      <div className="flex gap-2.5 items-center"><BrandMultiSelect value={brands} onChange={setBrands} kind={tab} />
-        <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13} />Refresh</Btn>
-        <Btn kind="ghost" sm onClick={() => { setBrands([]); setTab("mismatch"); setSel(new Set()); }}><Icon n="x" s={13} />Clear</Btn>
-        <Btn kind="ghost" sm onClick={() => window.location = `/api/export?kind=${tab === "resolved" ? "all" : tab}`}><Icon n="dl" s={13} />Export</Btn>
-        <Btn kind="primary" sm onClick={approveSel} disabled={!admin}><Icon n="check" s={13} />Approve Selected</Btn></div></div>
-    <div className="card p-3 flex items-center gap-3 mb-3 flex-wrap">
-      <span className="lbl">Global pricing · all products</span>
-      <span className="text-[12px]" style={{ color: COL.mut }}>Markup</span><input type="number" className="inp mono" style={{ width: 72 }} value={gm} onChange={(e) => setGm(e.target.value)} /><span className="text-[12px]">{targetCur}</span>
-      <span className="w-px h-5" style={{ background: "var(--border)" }} />
-      <span className="text-[12px]" style={{ color: COL.mut }}>USD→₹</span><input type="number" step="0.01" className="inp mono" style={{ width: 84 }} placeholder={fmt(fxr.USD)} value={usd} onChange={(e) => setUsd(e.target.value)} />
-      <span className="text-[12px]" style={{ color: COL.mut }}>CAD→₹</span><input type="number" step="0.01" className="inp mono" style={{ width: 84 }} placeholder={fmt(fxr.CAD)} value={cad} onChange={(e) => setCad(e.target.value)} />
-      <Btn kind="ghost" sm onClick={saveFx} disabled={!admin}><Icon n="check" s={13} />Save rates</Btn>
-      <span className="w-px h-5" style={{ background: "var(--border)" }} />
-      <span className="text-[12px]" style={{ color: COL.mut }}>Apply conversion</span>
-      <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
-        {[["INR", "INR"], ["USD", "USD→₹"], ["CAD", "CAD→₹"]].map(([k, l]) => <button key={k} onClick={() => setConvCur(k)} className="px-3 py-1.5 text-[12px] font-semibold navi" style={{ background: convCur === k ? COL.primary : "var(--c-low)", color: convCur === k ? "#fff" : COL.mut }}>{l}</button>)}
       </div>
-      <Btn kind="sec" sm onClick={approveAll} disabled={!admin || !items.length}><Icon n="check" s={13} />Apply &amp; Approve all ({items.length})</Btn>
-      <Btn kind="danger" sm onClick={rejectAll} disabled={!admin || !items.length}><Icon n="x" s={13} />Reject all ({items.length})</Btn></div>
-    <div className="flex gap-1.5 mb-3">{tabs.map(([k, l, n, c]) => <button key={k} onClick={() => { setTab(k); setBrands([]); }} className="px-4 py-2 rounded-lg text-[13px] font-semibold navi" style={{ background: tab === k ? "var(--c)" : "transparent", color: tab === k ? "#fff" : COL.mut, border: "1px solid " + (tab === k ? "var(--border)" : "transparent") }}>{l} <span className="mono" style={{ color: c }}>{fmtInt(n)}</span></button>)}</div>
-    <div className="card flex-1 min-h-0 overflow-auto">
-      <table className="w-full text-[12.5px]"><thead><tr className="lbl">{["", "Brand", "Product", "Base ₹", "Live", "≈₹", "Δ₹", `Markup ${targetCur}`, "Amount", "Currency", `Final ${targetCur}`, ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
-        <tbody>{items.map((it) => { const li = liveInr(it), dl = dInr(it), up = (dl || 0) > 0; return <tr key={it.id} style={{ borderTop: "1px solid var(--c-low)" }}>
-          <td className="px-3 py-2"><input type="checkbox" checked={sel.has(it.id)} onChange={() => tog(it.id)} /></td>
-          <td className="px-3 py-2 mono text-[11px]">{(it.brand || "").replace(/^www\./, "")}</td>
-          <td className="px-3 py-2"><a href={it.url} target="_blank" rel="noopener" style={{ color: COL.primary }}>{trunc(it.url, 30)}</a></td>
-          <td className="px-3 py-2 mono text-right">{fmt(it.base_price)}</td>
-          <td className="px-3 py-2 mono text-right">{fmt(it.live_price)} <span style={{ color: COL.mut, fontSize: 10 }}>{it.currency}</span></td>
-          <td className="px-3 py-2 mono text-right">{fmt(li)}</td>
-          <td className="px-3 py-2 mono text-right" style={{ color: up ? COL.err : COL.sec }}>{dl != null ? (up ? "+" : "") + fmt(dl) : "—"}</td>
-          <td className="px-3 py-2"><input type="number" className="inp mono text-right" style={{ width: 64, opacity: 0.6 }} value={gm} readOnly title="Master markup — set it at the top; applies to all products" /></td>
-          <td className="px-3 py-2"><input type="number" className="inp mono text-right" style={{ width: 78 }} placeholder="amount" value={it._amt} onChange={(e) => setItems((xs) => xs.map((x) => x.id === it.id ? { ...x, _amt: e.target.value } : x))} /></td>
-          <td className="px-3 py-2"><select className="inp mono" style={{ width: 78 }} value={it._cur} onChange={(e) => setItems((xs) => xs.map((x) => x.id === it.id ? { ...x, _cur: e.target.value } : x))}><option>INR</option><option>USD</option><option>CAD</option><option>EUR</option><option>GBP</option><option>AUD</option></select></td>
-          <td className="px-3 py-2 mono text-right" style={{ color: COL.sec }}>{fmt(previewFinal(it))}</td>
-          <td className="px-3 py-2"><div className="flex gap-1.5">{it.decision === "approved" ? <span style={{ color: COL.sec }}>✓</span> : <><button title="Approve · push to Shopify · remove from DB" onClick={() => decide(it, "approved")} style={{ color: COL.sec }} disabled={!admin}><Icon n="check" s={15} /></button><button title="Reject · remove from DB" onClick={() => del(it)} style={{ color: COL.err }} disabled={!admin}><Icon n="x" s={15} /></button></>}</div></td></tr>; })}
-          {!items.length && <tr><td colSpan="12" className="text-center py-12" style={{ color: COL.mut }}>Nothing here.</td></tr>}</tbody></table></div>
-  </div>;
-}
-
-/* ===================== HISTORY ===================== */
-function History({ admin }) {
-  const [d, setD] = useState({ items: [], count: 0, value: 0, pushed: 0, failed: 0 }); const [brand, setBrand] = useState(""); const [status, setStatus] = useState("");
-  const load = useCallback(() => api(`/api/history?brand=${encodeURIComponent(brand)}&status=${status}`).then(setD), [brand, status]);
-  useEffect(() => { load(); }, [load]);
-  const push = async (it) => { if (!admin) return toast("Admin only", "err"); toast("Pushing…"); const r = await aj("/api/history/push", { row: it.id }); toast(r.status || "done", r.ok ? "ok" : "err"); load(); };
-  const pushAll = async () => { if (!admin || !confirm("Re-push all prices not yet successfully pushed (includes failed / 429 retries)?\n\nSent one at a time in the background — each waits for the previous to confirm before the next, so Shopify can't rate-limit us.")) return; const r = await aj("/api/history/push_all", {}); toast(`Queued ${fmtInt(r.queued)} · pushing one at a time`, "ok"); setTimeout(load, 1000); };
-  const clearDb = async () => { if (!admin) return toast("Admin only", "err"); if (!d.count) return toast("History already empty", "ok"); if (!confirm(`Permanently delete ALL ${fmtInt(d.count)} review history records?\n\nThis only clears the review/approval archive. Products are not affected.`)) return; toast("Clearing review history…"); const r = await aj("/api/history/clear", {}); r.ok ? toast(`Cleared ${fmtInt(r.removed)} review records`, "ok") : toast(r.error || "Failed", "err"); load(); };
-  return <div className="h-full overflow-auto">
-    <div className="flex items-start justify-between mb-4"><div><h1 style={{ fontSize: 28, fontWeight: 600 }}>Approval History</h1><div className="text-[13px]" style={{ color: COL.mut }}>Approved prices archived from review.</div></div>
-      <div className="flex gap-2.5 items-center"><VendorSelect value={brand} onChange={setBrand} />
-        <select className="inp mono" style={{ width: 150 }} value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="">All push status</option><option value="failed">Failed / 429</option><option value="not_pushed">Not pushed</option><option value="pushed">Pushed ✓</option></select>
-        <Btn kind="ghost" sm onClick={() => { setBrand(""); setStatus(""); }}><Icon n="x" s={13} />Clear</Btn>
-        <Btn kind="ghost" sm onClick={() => window.location = "/api/history/export"}><Icon n="dl" s={13} />Export</Btn>
-        <Btn kind="primary" sm onClick={pushAll} disabled={!admin}><Icon n="share" s={13} />Retry / Push all</Btn>
-        <Btn kind="danger" sm onClick={clearDb} disabled={!admin || !d.count}><Icon n="x" s={13} />Clear DB</Btn></div></div>
-    <div className="grid grid-cols-4 gap-3 mb-4"><Stat k="Approved" v={fmtInt(d.count)} /><Stat k="Total value" v={inr(d.value)} c={COL.sec} /><Stat k="Pushed" v={fmtInt(d.pushed) + "/" + fmtInt(d.count)} c={COL.primary} /><Stat k="Failed / 429" v={fmtInt(d.failed)} c={COL.err} /></div>
-    <div className="card overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Brand", "Product", "Base ₹", "Final ₹", "Markup", "By", "When", "Store", ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
-      <tbody>{d.items.map((it) => <tr key={it.id} style={{ borderTop: "1px solid var(--c-low)" }}>
-        <td className="px-3 py-2.5 mono text-[11px]">{(it.brand || "").replace(/^www\./, "")}</td>
-        <td className="px-3 py-2.5"><a href={it.url} target="_blank" rel="noopener" style={{ color: COL.primary }}>{trunc(it.url, 30)}</a></td>
-        <td className="px-3 py-2.5 mono text-right">{fmt(it.base_price)}</td><td className="px-3 py-2.5 mono text-right" style={{ color: COL.sec }}>{fmt(it.final_price)}</td>
-        <td className="px-3 py-2.5 mono text-right">{it.markup_pct != null ? (+it.markup_pct).toFixed(2) : "—"}</td>
-        <td className="px-3 py-2.5 text-[11px]" style={{ color: COL.mut }}>{it.approved_by || "—"}</td>
-        <td className="px-3 py-2.5 mono text-[11px]" style={{ color: COL.mut }}>{(it.approved_at || "").slice(0, 16).replace("T", " ")}</td>
-        <td className="px-3 py-2.5 text-[11px]">{it.shopify_status ? <span style={{ color: COL.sec }}>{it.shopify_status.slice(0, 22)}</span> : <span style={{ color: COL.mut }}>not pushed</span>}</td>
-        <td className="px-3 py-2.5"><button onClick={() => push(it)} style={{ color: COL.primary }}><Icon n="share" s={15} /></button></td></tr>)}
-        {!d.items.length && <tr><td colSpan="9" className="text-center py-12" style={{ color: COL.mut }}>No approvals yet.</td></tr>}</tbody></table></div>
-  </div>;
-}
-
-/* ===================== ALERTS ===================== */
-function Alerts() {
-  const [thr, setThr] = useState(15); const [dir, setDir] = useState("all"); const [brand, setBrand] = useState(""); const [d, setD] = useState({ items: [], total: 0, drops: 0, spikes: 0 });
-  const load = useCallback(() => api(`/api/alerts?threshold=${thr}&direction=${dir}&brand=${encodeURIComponent(brand)}`).then(setD), [thr, dir, brand]);
-  useEffect(() => { load(); }, [load]);
-  return <div className="h-full min-h-0 flex flex-col">
-    <h1 style={{ fontSize: 28, fontWeight: 600 }}>Price Movement Alerts</h1><div className="text-[13px] mb-4" style={{ color: COL.mut }}>Volatility vs the previous run.</div>
-    <div className="card p-4 flex items-end gap-5 flex-wrap mb-4">
-      <div><div className="lbl mb-1.5">Threshold %</div><input type="number" className="inp mono" style={{ width: 90 }} value={thr} onChange={(e) => setThr(e.target.value)} /></div>
-      <div><div className="lbl mb-1.5">Filter</div><div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>{[["all", "All"], ["drop", "Drops"], ["spike", "Spikes"]].map(([k, l]) => <button key={k} onClick={() => setDir(k)} className="px-3.5 py-1.5 text-[12px] font-semibold navi" style={{ background: dir === k ? COL.primary : "var(--c-low)", color: dir === k ? "#fff" : COL.mut }}>{l}</button>)}</div></div>
-      <div><div className="lbl mb-1.5">Vendor</div><VendorSelect value={brand} onChange={setBrand} /></div>
-      <Btn kind="ghost" sm onClick={load}><Icon n="refresh" s={13} /></Btn>
-      <Btn kind="ghost" sm onClick={() => { setBrand(""); setDir("all"); setThr(15); }}><Icon n="x" s={13} />Clear</Btn></div>
-    <div className="grid grid-cols-4 gap-2.5 mb-4"><Stat k="Alerts" v={fmtInt(d.total)} /><Stat k="Drops" v={fmtInt(d.drops)} c={COL.sec} /><Stat k="Spikes" v={fmtInt(d.spikes)} c={COL.err} /><Stat k="Threshold" v={"≥" + thr + "%"} c={COL.primary} /></div>
-    <div className="card flex-1 min-h-0 overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Product", "Brand", "Dir", "Prev", "Now", "Δ", "Change %", "When"].map((h, i) => <th key={i} className="px-3 py-2.5 text-left whitespace-nowrap">{h}</th>)}</tr></thead>
-      <tbody>{d.items.map((it, i) => { const up = it.direction === "spike", c = up ? COL.err : COL.sec; return <tr key={i} style={{ borderTop: "1px solid var(--c-low)" }}>
-        <td className="px-3 py-2.5"><a href={it.url} target="_blank" rel="noopener" style={{ color: COL.primary }}>{trunc(it.url, 32)}</a></td>
-        <td className="px-3 py-2.5 mono text-[11px]">{(it.brand || "").replace(/^www\./, "")}</td>
-        <td className="px-3 py-2.5"><span className="inline-flex items-center gap-1 font-bold text-[11px]" style={{ color: c }}><Icon n={up ? "up" : "down"} s={13} />{up ? "SPIKE" : "DROP"}</span></td>
-        <td className="px-3 py-2.5 mono text-right">{fmt(it.prev)}</td><td className="px-3 py-2.5 mono text-right">{fmt(it.live_price)}</td>
-        <td className="px-3 py-2.5 mono text-right" style={{ color: c }}>{fmt(it.abs_change)}</td><td className="px-3 py-2.5 mono text-right font-bold" style={{ color: c }}>{it.pct > 0 ? "+" : ""}{it.pct}%</td>
-        <td className="px-3 py-2.5 mono text-[11px]" style={{ color: COL.mut }}>{(it.created_at || "").slice(0, 16).replace("T", " ")}</td></tr>; })}
-        {!d.items.length && <tr><td colSpan="8" className="text-center py-12" style={{ color: COL.mut }}>No movements ≥ {thr}% — run the pipeline twice.</td></tr>}</tbody></table></div>
-  </div>;
-}
-
-/* ===================== INTEGRATIONS ===================== */
-function Integrations({ admin }) {
-  const [cfg, setCfg] = useState({ shop_domain: "", api_version: "2024-10", dry_run: true, has_token: false, price_url_source: "mbo" }); const [token, setToken] = useState(""); const [brands, setBrands] = useState([]); const [v, setV] = useState(""); const [fb, setFb] = useState("");
-  const load = () => { api("/api/integration").then((d) => setCfg((c) => ({ ...c, ...d }))); api("/api/integrations").then((d) => setBrands(d.brands || [])); };
-  useEffect(() => { load(); const t = setInterval(() => api("/api/integrations").then((d) => setBrands(d.brands || [])), 8000); return () => clearInterval(t); }, []);
-  const save = async () => { const r = await aj("/api/integration/save", { ...cfg, access_token: token }); r.ok ? toast("Saved", "ok") : toast("Failed", "err"); setToken(""); load(); };
-  const verify = async () => { setV("…"); const r = await aj("/api/integration/verify", {}); setV(r.status); toast(r.status, r.ok ? "ok" : "err"); };
-  return <div className="h-full overflow-auto">
-    <h1 style={{ fontSize: 28, fontWeight: 600 }}>Integrations</h1><div className="text-[13px] mb-4" style={{ color: COL.mut }}>One Shopify store · brands update live from Supabase.</div>
-    <div className="card p-4 mb-4" style={{ maxWidth: 520 }}><div className="lbl mb-3">Shopify Store</div>
-      <div className="lbl mb-1">Store domain</div><input className="inp w-full mono mb-2" placeholder="store.myshopify.com" value={cfg.shop_domain} onChange={(e) => setCfg({ ...cfg, shop_domain: e.target.value })} disabled={!admin} />
-      <div className="lbl mb-1">Access token {cfg.has_token && <span style={{ color: COL.sec }}>· saved</span>}</div><input className="inp w-full mono mb-2" type="password" placeholder={cfg.has_token ? "••••••••" : "shpat_…"} value={token} onChange={(e) => setToken(e.target.value)} disabled={!admin} />
-      <div className="flex items-center gap-3 mb-3"><div className="flex items-center gap-2"><span className="lbl">API</span><input className="inp mono" style={{ width: 100 }} value={cfg.api_version} onChange={(e) => setCfg({ ...cfg, api_version: e.target.value })} disabled={!admin} /></div>
-        <div className="flex items-center gap-2"><Toggle on={!cfg.dry_run} onChange={(x) => setCfg({ ...cfg, dry_run: !x })} /><span className="text-[12px]" style={{ color: cfg.dry_run ? COL.ter : COL.sec }}>{cfg.dry_run ? "Dry Run" : "Live"}</span></div></div>
-      <div className="flex items-center justify-between rounded-lg p-3 mb-3" style={{ background: "var(--c-low)", border: "1px solid var(--border)" }}>
-        <div><div className="text-[12px] font-semibold">Shopify price-update URL</div>
-          <div className="text-[10px]" style={{ color: COL.mut }}>{cfg.price_url_source === "mbo" ? "Use MBO Shopify Admin/Product URL" : "Use Designer Product URL"}</div></div>
-        <Toggle on={cfg.price_url_source === "mbo"} onChange={(on) => setCfg({ ...cfg, price_url_source: on ? "mbo" : "designer" })} />
+      <div className="lbl" style={{marginBottom:4}}>Email</div>
+      <input className="inp" style={{width:"100%",marginBottom:12}} type="email" value={email} onChange={e=>setE(e.target.value)} autoFocus required/>
+      <div className="lbl" style={{marginBottom:4}}>Password</div>
+      <input className="inp" style={{width:"100%"}} type="password" value={pw} onChange={e=>setPw(e.target.value)} required/>
+      <button disabled={busy} style={{width:"100%",marginTop:20,padding:"11px 0",borderRadius:8,background:"#3b82f6",color:"#fff",fontWeight:700,fontSize:14,border:"none",cursor:"pointer"}}>
+        {busy?"…":(mode==="login"?"Sign in":"Create account")}
+      </button>
+      <div style={{marginTop:10,fontSize:12,color:"#ef4444",minHeight:16}}>{err}</div>
+      <div style={{fontSize:12,color:"var(--on3)"}}>
+        {mode==="login"
+          ? <>No account? <span onClick={()=>setMode("register")} style={{color:"#3b82f6",cursor:"pointer"}}>Create one</span></>
+          : <>Have an account? <span onClick={()=>setMode("login")} style={{color:"#3b82f6",cursor:"pointer"}}>Sign in</span></>}
       </div>
-      <div className="flex gap-2"><Btn kind="primary" sm onClick={save} disabled={!admin}><Icon n="check" s={13} />Save</Btn><Btn kind="ghost" sm onClick={verify}><Icon n="plug" s={13} />Verify</Btn></div>
-      {v && <div className="text-[11px] mt-2" style={{ color: COL.mut }}>{v}</div>}</div>
-    <div className="flex items-center justify-between mb-2">
-      <span className="lbl">Brands in catalog (live)</span>
-      <div className="flex gap-2.5 items-center"><VendorSelect value={fb} onChange={setFb} />
-        <Btn kind="ghost" sm onClick={() => setFb("")}><Icon n="x" s={13} />Clear</Btn></div></div>
-    <div className="card overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Brand", "Products", "Mismatches"].map((h, i) => <th key={i} className="px-3 py-2.5 text-left">{h}</th>)}</tr></thead>
-      <tbody>{brands.filter((b) => !fb || b.brand === fb).map((b) => <tr key={b.brand} style={{ borderTop: "1px solid var(--c-low)" }}><td className="px-3 py-2.5 mono">{b.brand}</td><td className="px-3 py-2.5 mono">{fmtInt(b.products)}</td><td className="px-3 py-2.5 mono" style={{ color: COL.ter }}>{fmtInt(b.mismatches)}</td></tr>)}
-        {!brands.filter((b) => !fb || b.brand === fb).length && <tr><td colSpan="3" className="text-center py-10" style={{ color: COL.mut }}>No brands.</td></tr>}</tbody></table></div>
+    </form>
   </div>;
 }
 
-/* ===================== SETTINGS (owner) ===================== */
-function Settings({ me }) {
-  const [sessions, setSessions] = useState([]); const [users, setUsers] = useState([]); const owner = me.role === "owner";
-  const load = () => { if (!owner) return; api("/api/admin/sessions").then((d) => setSessions(d.sessions || [])); api("/api/admin/users").then((d) => setUsers(d.users || [])); };
-  useEffect(() => { load(); if (owner) { const t = setInterval(() => api("/api/admin/sessions").then((d) => setSessions(d.sessions || [])), 5000); return () => clearInterval(t); } }, [owner]);
-  const setRole = async (email, role) => { await aj("/api/admin/users/role", { email, role }); toast("Role updated", "ok"); load(); };
-  const del = async (email) => { if (!confirm("Delete " + email + "?")) return; const r = await aj("/api/admin/users/delete", { email }); r.ok ? toast("Deleted", "ok") : toast(r.error, "err"); load(); };
-  if (!owner) return <div className="card p-6" style={{ maxWidth: 420 }}><div className="lbl mb-2">Account</div><div className="text-[14px]">{me.email}</div><div className="text-[12px]" style={{ color: COL.mut }}>role: {me.role}</div></div>;
-  return <div className="h-full overflow-auto space-y-4">
-    <h1 style={{ fontSize: 28, fontWeight: 600 }}>Owner Console</h1>
-    <div><div className="lbl mb-2">Active sessions ({sessions.filter((s) => s.active).length} live)</div>
-      <div className="card overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["User", "Role", "IP", "Idle", "Status"].map((h, i) => <th key={i} className="px-3 py-2.5 text-left">{h}</th>)}</tr></thead>
-        <tbody>{sessions.map((s) => <tr key={s.sid} style={{ borderTop: "1px solid var(--c-low)" }}><td className="px-3 py-2.5">{s.email}</td><td className="px-3 py-2.5 mono">{s.role}</td><td className="px-3 py-2.5 mono text-[11px]">{s.ip}</td><td className="px-3 py-2.5 mono">{s.idle_s}s</td><td className="px-3 py-2.5"><span style={{ color: s.active ? COL.sec : COL.mut }}>{s.active ? "● live" : "idle"}</span></td></tr>)}
-          {!sessions.length && <tr><td colSpan="5" className="text-center py-8" style={{ color: COL.mut }}>No sessions.</td></tr>}</tbody></table></div></div>
-    <div><div className="lbl mb-2">Users</div>
-      <div className="card overflow-auto"><table className="w-full text-[12.5px]"><thead><tr className="lbl">{["Email", "Role", ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-left">{h}</th>)}</tr></thead>
-        <tbody>{users.map((u) => <tr key={u.id} style={{ borderTop: "1px solid var(--c-low)" }}><td className="px-3 py-2.5">{u.email}</td>
-          <td className="px-3 py-2.5"><select className="inp mono" value={u.role} onChange={(e) => setRole(u.email, e.target.value)} disabled={u.email === me.email}><option>owner</option><option>admin</option><option>viewer</option></select></td>
-          <td className="px-3 py-2.5">{u.email !== me.email && <button onClick={() => del(u.email)} style={{ color: COL.err }}><Icon n="x" s={15} /></button>}</td></tr>)}</tbody></table></div></div>
+/* ═══════════════════════════════════════════════════════════════
+   HOME / INSIGHTS
+═══════════════════════════════════════════════════════════════ */
+function Home({go, admin}) {
+  const [d,setD]=useState(null); const [brand,setBrand]=useState("");
+  const load=useCallback(()=>{ setD(null); api("/api/insights?brand="+encodeURIComponent(brand)).then(setD); },[brand]);
+  useEffect(()=>{ load(); },[load]);
+  const clear=()=>{ setBrand(""); };
+  const Row=({l,v,c})=><div style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:"1px solid var(--border)"}}>
+    <span style={{fontSize:12,color:"var(--on2)"}}>{l}</span>
+    <b className="mono" style={{color:c||"var(--on)"}}>{v}</b>
+  </div>;
+  if(!d) return <div style={{height:"100%",overflow:"auto"}}>
+    <PageBar title="Insights" admin={admin} vendor={brand} onVendor={setBrand} onClear={clear} extraRight={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
+    <div style={{textAlign:"center",padding:"80px 0",color:"var(--on3)"}}>Loading insights…</div>
+  </div>;
+  const c=d.counts||{}, ex=d.exposure||{}, fxr=d.fx||{};
+  return <div style={{height:"100%",overflow:"auto"}}>
+    <PageBar title="Insights" admin={admin} vendor={brand} onVendor={setBrand} onClear={clear}
+      extraRight={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
+      {[["Total Products",fmtInt(c.total),"var(--on)"],["Matched",fmtInt(c.matched),"var(--green)"],["Mismatches",fmtInt(c.mismatch),"var(--amber)"],["Errors",fmtInt(c.error),"var(--red)"],["Vendors",fmtInt(d.vendors),"var(--blue)"],["Awaiting",fmtInt(c.awaiting),"var(--amber)"],["Approved",fmtInt(d.approved_count),"var(--green)"],["Overpriced",inr(Math.round(ex.over||0)),"var(--red)"]].map(([a,b,c2])=><Stat key={a} k={a} v={b} c={c2}/>)}
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
+      <div className="card" style={{padding:16}}>
+        <div className="lbl" style={{marginBottom:12}}>Catalog Status</div>
+        <ChartBox type="doughnut" h={200} labels={["Matched","Mismatch","Error","Pending"]} datasets={[{data:[c.matched,c.mismatch,c.error,c.pending],backgroundColor:["#22c55e","#f59e0b","#ef4444","#27273a"],borderWidth:0}]} options={{plugins:{legend:{position:"bottom"}},cutout:"60%"}}/>
+      </div>
+      <div className="card" style={{padding:16}}>
+        <div className="lbl" style={{marginBottom:12}}>Top Vendors by Mismatch</div>
+        <ChartBox type="bar" h={200} labels={d.top_mismatch.map(v=>v.brand.replace(/\.(com|in|co).*/,""))} datasets={[{data:d.top_mismatch.map(v=>v.count),backgroundColor:"#f59e0b",borderRadius:4}]} options={{indexAxis:"y",plugins:{legend:{display:false}}}}/>
+      </div>
+      <div className="card" style={{padding:16}}>
+        <div className="lbl" style={{marginBottom:12}}>Largest Vendors</div>
+        <ChartBox type="bar" h={200} labels={d.top_products.map(v=>v.brand.replace(/\.(com|in|co).*/,""))} datasets={[{data:d.top_products.map(v=>v.count),backgroundColor:"#3b82f6",borderRadius:4}]} options={{indexAxis:"y",plugins:{legend:{display:false}}}}/>
+      </div>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+      <div className="card" style={{padding:16}}>
+        <div className="lbl" style={{marginBottom:10}}>Exposure (Mismatch Gap)</div>
+        <Row l="Overpriced" v={inr(Math.round(ex.over||0))} c="var(--red)"/>
+        <Row l="Underpriced" v={inr(Math.round(ex.under||0))} c="var(--green)"/>
+        <Row l="Avg gap" v={inr(Math.round(ex.avg||0))}/>
+        <Row l="Approved value" v={inr(Math.round(d.approved_value||0))} c="var(--green)"/>
+      </div>
+      <div className="card" style={{padding:16}}>
+        <div className="lbl" style={{marginBottom:10}}>Live FX → INR</div>
+        {["USD","CAD"].map(cu=><Row key={cu} l={cu} v={"₹"+fmt(fxr[cu])} c="var(--blue)"/>)}
+      </div>
+      <div className="card" style={{padding:16}}>
+        <div className="lbl" style={{marginBottom:10}}>Quick Actions</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <button className="btn btn-primary" style={{justifyContent:"center"}} onClick={()=>go("pipeline")}><Icon n="play" s={14}/>Run Pipeline</button>
+          <button className="btn btn-ghost" style={{justifyContent:"center"}} onClick={()=>go("review")}><Icon n="review" s={14}/>Review {fmtInt(c.awaiting)} awaiting</button>
+          <button className="btn btn-ghost" style={{justifyContent:"center"}} onClick={()=>go("history")}><Icon n="clock" s={14}/>Approval History</button>
+        </div>
+      </div>
+    </div>
   </div>;
 }
 
-/* ===================== SHELL ===================== */
+/* ═══════════════════════════════════════════════════════════════
+   PIPELINE
+═══════════════════════════════════════════════════════════════ */
+function Pipeline({admin}) {
+  const [st,setSt]=useState({entries:[],matched:0,mismatch:0,errors:0,total_rows:0,current_row:0,elapsed:0,message:"Idle.",running:false,phase:"idle",log_total:0});
+  const [cfg,setCfg]=useState({concurrency:8,timeout_ms:12000,batch_size:250,rest_between:2,safe_retry:true,simulation:false,data_source:"database"});
+  const [vendors,setVendors]=useState([]); const [vsel,setVsel]=useState([]); const [cat,setCat]=useState({total:0}); const [curSel,setCurSel]=useState("INR");
+  const cursor=useRef(0), logRef=useRef(null);
+
+  useEffect(()=>{ api("/api/pipe/status?cursor=0").then(d=>d.config&&setCfg(c=>({...c,...d.config}))); },[]);
+  const refreshMeta=useCallback(()=>{
+    api("/api/vendors?source="+cfg.data_source).then(d=>setVendors(d.vendors||[]));
+    api("/api/meta").then(d=>d.counts&&setCat({...d.counts,imported:d.imported_count||0}));
+  },[cfg.data_source]);
+  useEffect(()=>{ refreshMeta(); },[refreshMeta]);
+
+  const poll=useCallback(async()=>{
+    const d=await api("/api/pipe/status?cursor="+cursor.current);
+    if(d.running===undefined) return;
+    cursor.current=d.cursor;
+    setSt(s=>({...d,entries:[...s.entries,...(d.entries||[])].slice(-500)}));
+  },[]);
+  useEffect(()=>{ let live=true; const loop=async()=>{ if(!live) return; await poll(); setTimeout(loop,st.running?700:2500); }; loop(); return()=>{live=false;}; },[poll,st.running]);
+  useEffect(()=>{ if(logRef.current) logRef.current.scrollTop=logRef.current.scrollHeight; },[st.entries.length]);
+
+  const send=(extra)=>aj("/api/pipe/config",{...cfg,...extra});
+  const run=async(mode)=>{
+    await send({fresh_start:mode==="fresh",retry_errors:mode==="update",vendors:vsel});
+    const d=await aj("/api/pipe/start",{});
+    d.error?toast(d.error,"err"):toast("Pipeline started","ok");
+    setSt(s=>({...s,entries:[]})); cursor.current=0;
+  };
+  const clearLog=()=>{ setSt(s=>({...s,entries:[]})); aj("/api/pipe/clear_log",{}); };
+  const onFile=async(f)=>{
+    if(!f||!admin) return;
+    const fd=new FormData(); fd.append("file",f);
+    toast("Reading "+f.name+"…");
+    const p=await api("/api/import/preview",{method:"POST",body:fd});
+    if(!p.ok) return toast(p.error||"Preview failed","err");
+    const fd2=new FormData(); fd2.append("file",f);
+    const r=await api("/api/import",{method:"POST",body:fd2});
+    r.ok?toast(`Staged: ${r.rows} products · click Sync to save`,"ok"):toast(r.error||"Import failed","err");
+    refreshMeta();
+  };
+  const setCurrency=async()=>{
+    if(!admin) return toast("Admin only","err");
+    if(!confirm(`Set currency to ${curSel} for ${vsel.length?"selected":"ALL"} products?\n\nPrice numbers are NOT changed — only the currency label.`)) return;
+    const scope=vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):(cfg.data_source==="imported"?cat.imported:cat.total);
+    const r=await aj("/api/products/set_currency",{currency:curSel,vendors:vsel});
+    r.ok?toast(`Currency set to ${r.currency} on ${fmtInt(r.updated)} products`,"ok"):toast(r.error||"Failed","err");
+    refreshMeta();
+  };
+  const commitSheet=async()=>{
+    if(!admin) return toast("Admin only","err");
+    if(!cat.imported) return toast("Upload a sheet first","err");
+    if(!confirm(`Sync database to the sheet?\n\nDB will become EXACTLY the ${fmtInt(cat.imported)} products in the sheet.`)) return;
+    toast("Syncing…");
+    const r=await aj("/api/import/commit",{});
+    r.ok?toast(`Synced → ${fmtInt(r.total)} in DB (${fmtInt(r.added)} added, ${fmtInt(r.removed)} removed)`,"ok"):toast(r.error||"Failed","err");
+    refreshMeta();
+  };
+
+  const pct=st.total_rows?Math.min(100,st.current_row/st.total_rows*100):0;
+  const sourceTotal=cfg.data_source==="imported"?cat.imported:cat.total;
+  const getTagClass=(status)=>{
+    if(!status) return "tag tag-info";
+    if(status==="Price Matched"||status==="MATCH"||status==="DONE") return "tag tag-done";
+    if(status==="Fetch Error"||status==="ERR"||status==="FAIL") return "tag tag-fail";
+    if(status==="Price Mismatch!") return "tag tag-warn";
+    return "tag tag-info";
+  };
+  const getTagLabel=(status)=>{
+    if(!status) return "INFO";
+    if(status==="Price Matched") return "DONE";
+    if(status==="Fetch Error") return "FAIL";
+    if(status==="Price Mismatch!") return "WARN";
+    return "INFO";
+  };
+
+  return <div style={{display:"grid",gridTemplateColumns:"290px 1fr",gap:16,height:"100%",minHeight:0}}>
+    {/* ── Left sidebar ── */}
+    <div style={{overflowY:"auto",display:"flex",flexDirection:"column",gap:12}}>
+      {/* Source Config */}
+      <div className="card" style={{padding:14}}>
+        <div className="lbl" style={{marginBottom:10}}>Source Configuration</div>
+        <div className="dropzone" onClick={()=>document.getElementById("pipe-fi").click()}>
+          <div className="dz-icon"><Icon n="upload" s={18} c="var(--on3)"/></div>
+          <div style={{fontSize:12,color:"var(--on2)",fontWeight:600}}>Drop .MBO or .JSON</div>
+          <div className="lbl" style={{marginTop:4}}>MAX 50MB</div>
+        </div>
+        <input id="pipe-fi" type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>onFile(e.target.files[0])}/>
+        <div style={{fontSize:11,color:"var(--on3)",marginTop:8}}>{fmtInt(sourceTotal)} products in source</div>
+        <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div>
+            <div style={{fontSize:12,fontWeight:600}}>{cfg.data_source==="imported"?"Sheet products":"Database products"}</div>
+            <div style={{fontSize:10,color:"var(--on3)",marginTop:2}}>{cfg.data_source==="imported"?"Scrape uploaded sheet":"Scrape permanent DB"}</div>
+          </div>
+          <Toggle on={cfg.data_source==="imported"} onChange={on=>{
+            const data_source=on?"imported":"database";
+            const next={...cfg,data_source,vendors:[]};
+            setCfg(next); setVsel([]); aj("/api/pipe/config",next);
+          }}/>
+        </div>
+        <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid var(--border)"}}>
+          <button className="btn btn-primary btn-sm" style={{width:"100%",justifyContent:"center"}} onClick={commitSheet} disabled={!admin||!cat.imported}>
+            <Icon n="dl" s={12}/>Sync database to sheet
+          </button>
+          <div style={{fontSize:10,color:"var(--on3)",marginTop:6}}>Staged: <b style={{color:"var(--on)"}}>{fmtInt(cat.imported)}</b></div>
+        </div>
+      </div>
+
+      {/* Designer Domain */}
+      <div className="card" style={{padding:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div className="lbl">Designer Domain</div>
+          <span style={{fontSize:11,color:"var(--blue)",cursor:"pointer"}} onClick={()=>setVsel([])}>clear</span>
+        </div>
+        <div style={{maxHeight:160,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+          {vendors.map(v=><label key={v.vendor} className="vendor-row">
+            <input type="checkbox" checked={vsel.includes(v.vendor)} onChange={()=>{ const n=new Set(vsel); n.has(v.vendor)?n.delete(v.vendor):n.add(v.vendor); setVsel([...n]); }}/>
+            <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.vendor.replace(/^www\./,"")}</span>
+            <span style={{color:"var(--on3)",fontSize:11}}>{v.count}</span>
+          </label>)}
+        </div>
+        <div style={{fontSize:11,color:"var(--on3)",marginTop:8}}>
+          Scope: <b style={{color:"var(--on)"}}>{fmtInt(vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):sourceTotal)}</b>
+        </div>
+      </div>
+
+      {/* Engine Settings */}
+      <div className="card" style={{padding:14}}>
+        <div className="lbl" style={{marginBottom:10}}>Engine Settings</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+          {[["Concurrency","concurrency"],["Timeout (ms)","timeout_ms"],["Batch Size","batch_size"],["Interval (s)","rest_between"]].map(([l,k])=>
+            <div key={k}>
+              <div className="lbl" style={{marginBottom:4}}>{l}</div>
+              <input type="number" className="inp mono" style={{width:"100%"}} value={cfg[k]} onChange={e=>setCfg({...cfg,[k]:+e.target.value})}/>
+            </div>
+          )}
+        </div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderTop:"1px solid var(--border)"}}>
+          <div>
+            <div style={{fontSize:12,fontWeight:600}}>Safe Retry Mode</div>
+            <div style={{fontSize:10,color:"var(--on3)"}}>Backoff algorithm active</div>
+          </div>
+          <Toggle on={cfg.safe_retry} onChange={v=>setCfg({...cfg,safe_retry:v})}/>
+        </div>
+        <button className="btn btn-ghost btn-sm" style={{width:"100%",justifyContent:"center",marginTop:8}} onClick={()=>{ send({}); toast("Config applied","ok"); }}>
+          <Icon n="check" s={12}/>Apply Settings
+        </button>
+      </div>
+    </div>
+
+    {/* ── Right main ── */}
+    <div style={{display:"flex",flexDirection:"column",minHeight:0,gap:10}}>
+      {/* Phase banner */}
+      {st.phase!=="idle"&&<div className="phase-banner">
+        <Icon n="warn" s={14}/>
+        <span>CURRENT PHASE: {st.message.toUpperCase()}</span>
+      </div>}
+
+      {/* Action row */}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <button className="btn btn-primary" onClick={()=>run("fresh")} disabled={st.running||!admin} style={{minWidth:130,justifyContent:"center"}}>
+          <Icon n="play" s={14}/>[Run from Start]
+        </button>
+        <button className="btn btn-ghost" onClick={()=>run("update")} disabled={st.running||!admin} style={{minWidth:130,justifyContent:"center"}}>
+          <Icon n="refresh" s={14}/>[Check Updates]
+        </button>
+        <button className="btn btn-abort" onClick={()=>aj("/api/pipe/abort",{})} disabled={!st.running} style={{minWidth:100,justifyContent:"center"}}>
+          <Icon n="stop" s={14}/>[Abort]
+        </button>
+        <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
+          <span className="engine-dot" style={{background:st.running?"var(--green)":"var(--on3)",...(st.running?{animation:"pulseDot 2s infinite"}:{})}}/>
+          <span style={{fontSize:11,fontWeight:700,letterSpacing:".06em",color:st.running?"var(--green)":"var(--on3)"}}>ENGINE {st.running?"LIVE":"IDLE"}</span>
+        </div>
+      </div>
+
+      {/* Currency + clear */}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:"var(--on3)"}}>Currency</span>
+        <div className="pill-group">
+          {["INR","USD","CAD"].map(c=><button key={c} className={`pill${curSel===c?" active":""}`} onClick={()=>setCurSel(c)}>{c}</button>)}
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={setCurrency} disabled={!admin}><Icon n="check" s={12}/>Set currency</button>
+        <div style={{marginLeft:"auto",display:"flex",gap:8}}>
+          <button className="btn btn-ghost btn-sm" onClick={clearLog}><Icon n="x" s={12}/>Clear log</button>
+          <EmptyDbBtn admin={admin}/>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:8}}>
+        <Stat k="Total Units" v={fmtInt(st.total_rows)}/>
+        <Stat k="Done"        v={fmtInt(st.current_row)}/>
+        <Stat k="Matched"     v={fmtInt(st.matched)}     c="var(--green)"/>
+        <Stat k="Mismatch"    v={fmtInt(st.mismatch)}    c="var(--amber)"/>
+        <Stat k="Errors"      v={fmtInt(st.errors)}      c="var(--red)"/>
+        <Stat k="Pending"     v={fmtInt(Math.max(0,(st.total_rows||0)-(st.current_row||0)))} c="var(--blue)"/>
+      </div>
+
+      {/* Progress */}
+      <div className="progress-track">
+        <div className="progress-fill" style={{width:pct+"%"}}>
+          {st.running&&<div className="shine" style={{position:"absolute",inset:0}}/>}
+        </div>
+      </div>
+
+      {/* Console */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          <span className="lbl">Stream Console</span>
+          <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(34,197,94,.12)",color:"var(--green)",fontWeight:700}}>WebSocket Active</span>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <button className="btn btn-ghost btn-sm" onClick={()=>window.location="/api/export?kind=all"} title="Export"><Icon n="dl" s={12}/></button>
+          <button className="btn btn-ghost btn-sm" onClick={clearLog} title="Clear"><Icon n="trash" s={12}/></button>
+        </div>
+      </div>
+      <div ref={logRef} className="console-wrap" style={{flex:1,minHeight:0}}>
+        {st.entries.map((e,i)=><div key={i} className="console-row fadeup">
+          <span style={{color:"var(--on3)"}}>{e.t}</span>
+          <span style={{color:"var(--blue)",fontWeight:600}}>[{(e.domain||"?").replace(/^www\./,"").toUpperCase().slice(0,11)}]</span>
+          <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--on2)"}}>
+            {e.url?<a href={e.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(e.url,48)}</a>:"Invoking engine task :: "+e.msg}
+          </span>
+          <span className={getTagClass(e.status)} style={{justifySelf:"end"}}>{getTagLabel(e.status)}</span>
+        </div>)}
+        {!st.entries.length&&<div style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>No log yet — Run from Start.</div>}
+      </div>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   REVIEW
+═══════════════════════════════════════════════════════════════ */
+function Review({admin}) {
+  const [tab,setTab]=useState("mismatch");
+  const [items,setItems]=useState([]); const [counts,setCounts]=useState({});
+  const [brands,setBrands]=useState([]); const [sel,setSel]=useState(()=>new Set());
+  const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
+  const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
+  const [vendor,setVendor]=useState("");
+  const convOn=convCur!=="INR";
+
+  const load=useCallback(async()=>{
+    const bList=vendor?[vendor]:brands;
+    const d=await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(bList.join(","))}`);
+    setItems((d.items||[]).map(it=>({...it,_m:it.markup_pct||gm,_amt:"",_cur:(it.currency||"INR").toUpperCase()})));
+    setCounts(d.counts||{}); setSel(new Set());
+  },[tab,brands,vendor]);
+  useEffect(()=>{ load(); },[load]);
+  useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); setCad(d.overrides?.CAD??""); }); },[]);
+
+  const liveInr=(it)=>{ if(it.live_price==null) return null; const c=(it.currency||"INR").toUpperCase(); if(c==="INR") return it.live_price; return it.live_price*(fxr[c]||1); };
+  const dInr=(it)=>{ const li=liveInr(it); return li!=null&&it.base_price!=null?li-it.base_price:null; };
+  const targetRate=convCur==="INR"?1:(fxr[convCur]||1);
+  const amtInr=(amount,currency)=>{ const n=Number(amount); if(!Number.isFinite(n)||n<=0) return null; const c=(currency||"INR").toUpperCase(); const r=(c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1); return Math.round(n*r*100)/100; };
+  const previewFinal=(it)=>{ const manual=amtInr(it._amt,it._cur); if(manual!=null) return roundFinal(manual/targetRate); const refInr=liveInr(it)??it.base_price; if(refInr==null) return null; return roundFinal(refInr/targetRate+Number(gm||0)); };
+  const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,cad,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");setCad(r.overrides.CAD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
+  const decide=async(it,decision)=>{ setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision,markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.ok?toast(decision==="approved"?`Approved ${fmt(r.final_price)} ${r.push_currency||""}`:".Rejected",r.shopify&&!r.shopify.ok?"err":"ok"):toast(r.error,"err"); load(); };
+  const del=async(it)=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Remove ${trunc(it.url,56)}?`)) return; setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/delete",{row:it.id}); r.ok?toast("Removed","ok"):toast(r.error||"Failed","err"); load(); };
+  const approveSel=async()=>{ if(!sel.size) return toast("Select rows first","err"); let pushed=0,failed=0; for(const id of sel){ const it=items.find(x=>x.id===id); const r=await aj("/api/review/decide",{row:id,decision:"approved",markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.shopify?.ok?pushed++:failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed?`, ${failed} failed`:""}`,failed?"err":"ok"); load(); };
+  const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); r.ok?toast(`Approved ${r.approved}`,"ok"):toast(r.error,"err"); load(); };
+  const rejectAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Reject ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/reject_all",{kind:tab,brands:bList}); r.ok?toast(`Rejected ${r.rejected}`,"ok"):toast(r.error||"Failed","err"); load(); };
+  const clear=()=>{ setBrands([]); setVendor(""); setTab("mismatch"); setSel(new Set()); };
+  const tog=(id)=>{ const n=new Set(sel); n.has(id)?n.delete(id):n.add(id); setSel(n); };
+  const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error,"var(--red)"],["resolved","Resolved",counts.matched,"var(--green)"]];
+
+  return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
+    <PageBar title="Review & Approval Queue" subtitle="Approving archives the row and pushes the final price to Shopify."
+      admin={admin} vendor={vendor} onVendor={setVendor} onClear={clear} kind={tab}
+      extraLeft={<>
+        <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>
+        <button className="btn btn-ghost btn-sm" onClick={()=>window.location=`/api/export?kind=${tab==="resolved"?"all":tab}`}><Icon n="dl" s={12}/>Export</button>
+      </>}
+      extraRight={<>
+        <button className="btn btn-primary btn-sm" onClick={approveSel} disabled={!admin}><Icon n="check" s={12}/>Approve Selected</button>
+      </>}/>
+
+    {/* Global pricing strip */}
+    <div className="card" style={{padding:"12px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <span className="lbl">Global Pricing</span>
+      <span style={{fontSize:12,color:"var(--on3)"}}>Markup</span>
+      <input type="number" className="inp mono" style={{width:70}} value={gm} onChange={e=>setGm(e.target.value)}/>
+      <span style={{fontSize:12}}>{convCur}</span>
+      <div className="toolbar-sep"/>
+      <span style={{fontSize:12,color:"var(--on3)"}}>USD→₹</span>
+      <input type="number" step=".01" className="inp mono" style={{width:80}} placeholder={fmt(fxr.USD)} value={usd} onChange={e=>setUsd(e.target.value)}/>
+      <span style={{fontSize:12,color:"var(--on3)"}}>CAD→₹</span>
+      <input type="number" step=".01" className="inp mono" style={{width:80}} placeholder={fmt(fxr.CAD)} value={cad} onChange={e=>setCad(e.target.value)}/>
+      <button className="btn btn-ghost btn-sm" onClick={saveFx} disabled={!admin}><Icon n="check" s={12}/>Save rates</button>
+      <div className="toolbar-sep"/>
+      <div className="pill-group">
+        {[["INR","INR"],["USD","USD→₹"],["CAD","CAD→₹"]].map(([k,l])=><button key={k} className={`pill${convCur===k?" active":""}`} onClick={()=>setConvCur(k)}>{l}</button>)}
+      </div>
+      <button className="btn btn-success btn-sm" onClick={approveAll} disabled={!admin||!items.length}><Icon n="check" s={12}/>Approve all ({items.length})</button>
+      <button className="btn btn-danger btn-sm" onClick={rejectAll} disabled={!admin||!items.length}><Icon n="x" s={12}/>Reject all</button>
+    </div>
+
+    {/* Tabs */}
+    <div className="tab-bar" style={{marginBottom:10}}>
+      {tabs.map(([k,l,n,c])=><button key={k} onClick={()=>{setTab(k);setBrands([]);}} className={`tab${tab===k?" active":""}`}>
+        {l} <span className="mono" style={{color:c,marginLeft:4}}>{fmtInt(n)}</span>
+      </button>)}
+    </div>
+
+    {/* Multi-brand filter */}
+    <div style={{marginBottom:10,display:"flex",alignItems:"center",gap:8}}>
+      <Icon n="filter" s={13} c="var(--on3)"/>
+      <BrandMultiSelect value={brands} onChange={setBrands} kind={tab}/>
+    </div>
+
+    {/* Table */}
+    <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
+      <table className="tbl">
+        <thead><tr>{["","Brand","Product","Base ₹","Live","≈₹","Δ₹",`Markup ${convCur}`,"Amount","Cur",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <tbody>
+          {items.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; return <tr key={it.id}>
+            <td><input type="checkbox" checked={sel.has(it.id)} onChange={()=>tog(it.id)}/></td>
+            <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(it.brand||"").replace(/^www\./,"")}</td>
+            <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,28)}</a></td>
+            <td className="mono" style={{textAlign:"right"}}>{fmt(it.base_price)}</td>
+            <td className="mono" style={{textAlign:"right"}}>{fmt(it.live_price)} <span style={{color:"var(--on3)",fontSize:10}}>{it.currency}</span></td>
+            <td className="mono" style={{textAlign:"right"}}>{fmt(li)}</td>
+            <td className="mono" style={{textAlign:"right",color:up?"var(--red)":"var(--green)"}}>{dl!=null?(up?"+":"")+fmt(dl):"—"}</td>
+            <td><input type="number" className="inp mono" style={{width:60,opacity:.6,textAlign:"right"}} value={gm} readOnly/></td>
+            <td><input type="number" className="inp mono" style={{width:76,textAlign:"right"}} placeholder="amount" value={it._amt} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_amt:e.target.value}:x))}/></td>
+            <td><select className="inp mono" style={{width:70}} value={it._cur} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_cur:e.target.value}:x))}><option>INR</option><option>USD</option><option>CAD</option><option>EUR</option><option>GBP</option></select></td>
+            <td className="mono" style={{textAlign:"right",color:"var(--green)"}}>{fmt(previewFinal(it))}</td>
+            <td><div style={{display:"flex",gap:6}}>{it.decision==="approved"?<span style={{color:"var(--green)"}}>✓</span>:<>
+              <button title="Approve" onClick={()=>decide(it,"approved")} style={{color:"var(--green)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="check" s={15}/></button>
+              <button title="Delete" onClick={()=>del(it)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="x" s={15}/></button>
+            </>}</div></td>
+          </tr>;})}
+          {!items.length&&<tr><td colSpan={12} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>Nothing here.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HISTORY
+═══════════════════════════════════════════════════════════════ */
+function History({admin}) {
+  const [d,setD]=useState({items:[],count:0,value:0,pushed:0,failed:0}); const [brand,setBrand]=useState(""); const [status,setStatus]=useState("");
+  const load=useCallback(()=>api(`/api/history?brand=${encodeURIComponent(brand)}&status=${status}`).then(setD),[brand,status]);
+  useEffect(()=>{ load(); },[load]);
+  const push=async(it)=>{ if(!admin) return toast("Admin only","err"); toast("Pushing…"); const r=await aj("/api/history/push",{row:it.id}); toast(r.status||"done",r.ok?"ok":"err"); load(); };
+  const pushAll=async()=>{ if(!admin||!confirm("Re-push all prices not yet successfully pushed?")) return; const r=await aj("/api/history/push_all",{}); toast(`Queued ${fmtInt(r.queued)}`,"ok"); setTimeout(load,1000); };
+  const clearDb=async()=>{ if(!admin) return toast("Admin only","err"); if(!d.count) return toast("History already empty","ok"); if(!confirm(`Delete ALL ${fmtInt(d.count)} review history records?`)) return; const r=await aj("/api/history/clear",{}); r.ok?toast(`Cleared ${fmtInt(r.removed)} records`,"ok"):toast(r.error||"Failed","err"); load(); };
+  const clear=()=>{ setBrand(""); setStatus(""); };
+
+  return <div style={{height:"100%",overflow:"auto"}}>
+    <PageBar title="Approval History" subtitle="Approved prices archived from review."
+      admin={admin} vendor={brand} onVendor={setBrand} onClear={clear}
+      extraLeft={<>
+        <select className="inp mono" style={{width:160}} value={status} onChange={e=>setStatus(e.target.value)}>
+          <option value="">All push status</option>
+          <option value="failed">Failed / 429</option>
+          <option value="not_pushed">Not pushed</option>
+          <option value="pushed">Pushed ✓</option>
+        </select>
+        <button className="btn btn-ghost btn-sm" onClick={()=>window.location="/api/history/export"}><Icon n="dl" s={12}/>Export</button>
+        <button className="btn btn-primary btn-sm" onClick={pushAll} disabled={!admin}><Icon n="share" s={12}/>Retry / Push all</button>
+        <button className="btn btn-danger btn-sm" onClick={clearDb} disabled={!admin||!d.count}><Icon n="trash" s={12}/>Clear History</button>
+      </>}/>
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
+      <Stat k="Approved"      v={fmtInt(d.count)}/>
+      <Stat k="Total Value"   v={inr(d.value)} c="var(--green)"/>
+      <Stat k="Pushed"        v={fmtInt(d.pushed)+"/"+fmtInt(d.count)} c="var(--blue)"/>
+      <Stat k="Failed / 429"  v={fmtInt(d.failed)} c="var(--red)"/>
+    </div>
+
+    <div className="card" style={{overflow:"auto"}}>
+      <table className="tbl">
+        <thead><tr>{["Brand","Product","Base ₹","Final ₹","Markup","By","When","Store",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <tbody>
+          {d.items.map(it=><tr key={it.id}>
+            <td className="mono" style={{fontSize:11}}>{(it.brand||"").replace(/^www\./,"")}</td>
+            <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,30)}</a></td>
+            <td className="mono" style={{textAlign:"right"}}>{fmt(it.base_price)}</td>
+            <td className="mono" style={{textAlign:"right",color:"var(--green)"}}>{fmt(it.final_price)}</td>
+            <td className="mono" style={{textAlign:"right"}}>{it.markup_pct!=null?(+it.markup_pct).toFixed(2):"—"}</td>
+            <td style={{fontSize:11,color:"var(--on3)"}}>{it.approved_by||"—"}</td>
+            <td className="mono" style={{fontSize:11,color:"var(--on3)"}}>{(it.approved_at||"").slice(0,16).replace("T"," ")}</td>
+            <td style={{fontSize:11}}>{it.shopify_status?<span style={{color:"var(--green)"}}>{it.shopify_status.slice(0,22)}</span>:<span style={{color:"var(--on3)"}}>not pushed</span>}</td>
+            <td><button onClick={()=>push(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:"pointer"}}><Icon n="share" s={15}/></button></td>
+          </tr>)}
+          {!d.items.length&&<tr><td colSpan={9} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>No approvals yet.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ALERTS
+═══════════════════════════════════════════════════════════════ */
+function Alerts({admin}) {
+  const [thr,setThr]=useState(15); const [dir,setDir]=useState("all"); const [brand,setBrand]=useState(""); const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
+  const load=useCallback(()=>api(`/api/alerts?threshold=${thr}&direction=${dir}&brand=${encodeURIComponent(brand)}`).then(setD),[thr,dir,brand]);
+  useEffect(()=>{ load(); },[load]);
+  const clear=()=>{ setBrand(""); setDir("all"); setThr(15); };
+
+  return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
+    <PageBar title="Price Movement Alerts" subtitle="Volatility monitoring across designer brands."
+      admin={admin} vendor={brand} onVendor={setBrand} onClear={clear}
+      extraLeft={<>
+        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+          <div className="lbl">Threshold %</div>
+          <input type="number" className="inp mono" style={{width:80}} value={thr} onChange={e=>setThr(e.target.value)}/>
+        </div>
+        <div className="pill-group">
+          {[["all","All"],["drop","Drops"],["spike","Spikes"]].map(([k,l])=><button key={k} className={`pill${dir===k?" active":""}`} onClick={()=>setDir(k)}>{l}</button>)}
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/></button>
+      </>}/>
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
+      <Stat k="Alerts"    v={fmtInt(d.total)}/>
+      <Stat k="Drops"     v={fmtInt(d.drops)}   c="var(--green)"/>
+      <Stat k="Spikes"    v={fmtInt(d.spikes)}   c="var(--red)"/>
+      <Stat k="Threshold" v={"≥"+thr+"%"}         c="var(--blue)"/>
+    </div>
+
+    <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
+      <table className="tbl">
+        <thead><tr>{["Product","Brand","Direction","Prev Price","Now","Delta","Change %","When"].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <tbody>
+          {d.items.map((it,i)=>{ const up=it.direction==="spike",c=up?"var(--red)":"var(--green)"; return <tr key={i}>
+            <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,30)}</a></td>
+            <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(it.brand||"").replace(/^www\./,"")}</td>
+            <td><span style={{display:"inline-flex",alignItems:"center",gap:4,fontWeight:700,fontSize:11,color:c}}><Icon n={up?"up":"down"} s={13} c={c}/>{up?"SPIKE":"DROP"}</span></td>
+            <td className="mono" style={{textAlign:"right"}}>{fmt(it.prev)}</td>
+            <td className="mono" style={{textAlign:"right"}}>{fmt(it.live_price)}</td>
+            <td className="mono" style={{textAlign:"right",color:c}}>{fmt(it.abs_change)}</td>
+            <td className="mono" style={{textAlign:"right",fontWeight:700,color:c}}>{it.pct>0?"+":""}{it.pct}%</td>
+            <td className="mono" style={{fontSize:11,color:"var(--on3)"}}>{(it.created_at||"").slice(0,16).replace("T"," ")}</td>
+          </tr>;})}
+          {!d.items.length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>No movements ≥ {thr}% — run the pipeline twice to generate history.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INTEGRATIONS
+═══════════════════════════════════════════════════════════════ */
+function Integrations({admin}) {
+  const [cfg,setCfg]=useState({shop_domain:"",api_version:"2024-10",dry_run:true,has_token:false,price_url_source:"mbo"});
+  const [token,setToken]=useState(""); const [brands,setBrands]=useState([]); const [fb,setFb]=useState(""); const [v,setV]=useState("");
+  const load=()=>{ api("/api/integration").then(d=>setCfg(c=>({...c,...d}))); api("/api/integrations").then(d=>setBrands(d.brands||[])); };
+  useEffect(()=>{ load(); const t=setInterval(()=>api("/api/integrations").then(d=>setBrands(d.brands||[])),8000); return()=>clearInterval(t); },[]);
+  const save=async()=>{ const r=await aj("/api/integration/save",{...cfg,access_token:token}); r.ok?toast("Saved","ok"):toast("Failed","err"); setToken(""); load(); };
+  const verify=async()=>{ setV("…"); const r=await aj("/api/integration/verify",{}); setV(r.status); toast(r.status,r.ok?"ok":"err"); };
+  const clear=()=>{ setFb(""); };
+
+  return <div style={{height:"100%",overflow:"auto"}}>
+    <PageBar title="Integrations" subtitle="Configure store connection and sync parameters for live inventory tracking."
+      admin={admin} vendor={fb} onVendor={setFb} onClear={clear}/>
+
+    {/* Config card */}
+    <div className="card" style={{padding:20,maxWidth:520,marginBottom:16}}>
+      <div className="lbl" style={{marginBottom:14}}>Shopify Store</div>
+      <div className="lbl" style={{marginBottom:4}}>Store domain</div>
+      <input className="inp" style={{width:"100%",marginBottom:10}} placeholder="store.myshopify.com" value={cfg.shop_domain} onChange={e=>setCfg({...cfg,shop_domain:e.target.value})} disabled={!admin}/>
+      <div className="lbl" style={{marginBottom:4}}>Access token {cfg.has_token&&<span style={{color:"var(--green)"}}>· saved ✓</span>}</div>
+      <input className="inp" style={{width:"100%",marginBottom:10}} type="password" placeholder={cfg.has_token?"••••••••":"shpat_…"} value={token} onChange={e=>setToken(e.target.value)} disabled={!admin}/>
+      <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span className="lbl">API version</span>
+          <input className="inp mono" style={{width:100}} value={cfg.api_version} onChange={e=>setCfg({...cfg,api_version:e.target.value})} disabled={!admin}/>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <Toggle on={!cfg.dry_run} onChange={x=>setCfg({...cfg,dry_run:!x})}/>
+          <span style={{fontSize:12,color:cfg.dry_run?"var(--amber)":"var(--green)",fontWeight:600}}>{cfg.dry_run?"Dry Run":"Live"}</span>
+        </div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 12px",borderRadius:7,background:"var(--card2)",border:"1px solid var(--border2)",marginBottom:14}}>
+        <div>
+          <div style={{fontSize:12,fontWeight:600}}>Shopify price-update URL</div>
+          <div style={{fontSize:10,color:"var(--on3)",marginTop:2}}>{cfg.price_url_source==="mbo"?"MBO Shopify Admin URL":"Designer Product URL"}</div>
+        </div>
+        <Toggle on={cfg.price_url_source==="mbo"} onChange={on=>setCfg({...cfg,price_url_source:on?"mbo":"designer"})}/>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <button className="btn btn-primary btn-sm" onClick={save} disabled={!admin}><Icon n="check" s={12}/>Save</button>
+        <button className="btn btn-ghost btn-sm" onClick={verify}><Icon n="plug" s={12}/>Verify Connection</button>
+      </div>
+      {v&&<div style={{fontSize:11,color:"var(--on2)",marginTop:8}}>{v}</div>}
+    </div>
+
+    {/* Brands table */}
+    <div className="lbl" style={{marginBottom:8}}>Brands in catalog (live)</div>
+    <div className="card" style={{overflow:"auto"}}>
+      <table className="tbl">
+        <thead><tr>{["Brand","Products","Mismatches"].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <tbody>
+          {brands.filter(b=>!fb||b.brand===fb).map(b=><tr key={b.brand}>
+            <td className="mono">{b.brand}</td>
+            <td className="mono">{fmtInt(b.products)}</td>
+            <td className="mono" style={{color:"var(--amber)"}}>{fmtInt(b.mismatches)}</td>
+          </tr>)}
+          {!brands.filter(b=>!fb||b.brand===fb).length&&<tr><td colSpan={3} style={{textAlign:"center",padding:"40px 0",color:"var(--on3)"}}>No brands.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SETTINGS
+═══════════════════════════════════════════════════════════════ */
+function Settings({me, admin}) {
+  const [sessions,setSessions]=useState([]); const [users,setUsers]=useState([]);
+  const owner=me.role==="owner";
+  const load=()=>{ if(!owner) return; api("/api/admin/sessions").then(d=>setSessions(d.sessions||[])); api("/api/admin/users").then(d=>setUsers(d.users||[])); };
+  useEffect(()=>{ load(); if(owner){ const t=setInterval(()=>api("/api/admin/sessions").then(d=>setSessions(d.sessions||[])),5000); return()=>clearInterval(t); } },[owner]);
+  const setRole=async(email,role)=>{ await aj("/api/admin/users/role",{email,role}); toast("Role updated","ok"); load(); };
+  const del=async(email)=>{ if(!confirm("Delete "+email+"?")) return; const r=await aj("/api/admin/users/delete",{email}); r.ok?toast("Deleted","ok"):toast(r.error,"err"); load(); };
+
+  if(!owner) return <div className="card" style={{padding:24,maxWidth:400}}>
+    <div className="lbl" style={{marginBottom:8}}>Account</div>
+    <div style={{fontSize:15,fontWeight:600,marginBottom:4}}>{me.email}</div>
+    <div style={{fontSize:12,color:"var(--on3)"}}>role: {me.role}</div>
+  </div>;
+
+  return <div style={{height:"100%",overflow:"auto",display:"flex",flexDirection:"column",gap:16}}>
+    <div style={{marginBottom:4}}>
+      <h1 style={{fontSize:22,fontWeight:700}}>Owner Console</h1>
+      <div style={{display:"flex",gap:8,marginTop:10}}>
+        <EmptyDbBtn admin={admin}/>
+      </div>
+    </div>
+    <div>
+      <div className="lbl" style={{marginBottom:8}}>Active Sessions ({sessions.filter(s=>s.active).length} live)</div>
+      <div className="card" style={{overflow:"auto"}}>
+        <table className="tbl">
+          <thead><tr>{["User","Role","IP","Idle","Status"].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+          <tbody>
+            {sessions.map(s=><tr key={s.sid}>
+              <td>{s.email}</td><td className="mono">{s.role}</td><td className="mono" style={{fontSize:11}}>{s.ip}</td><td className="mono">{s.idle_s}s</td>
+              <td><span style={{color:s.active?"var(--green)":"var(--on3)"}}>● {s.active?"live":"idle"}</span></td>
+            </tr>)}
+            {!sessions.length&&<tr><td colSpan={5} style={{textAlign:"center",padding:"32px 0",color:"var(--on3)"}}>No sessions.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <div className="lbl" style={{marginBottom:8}}>Users</div>
+      <div className="card" style={{overflow:"auto"}}>
+        <table className="tbl">
+          <thead><tr>{["Email","Role",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+          <tbody>
+            {users.map(u=><tr key={u.id}>
+              <td>{u.email}</td>
+              <td><select className="inp mono" value={u.role} onChange={e=>setRole(u.email,e.target.value)} disabled={u.email===me.email}><option>owner</option><option>admin</option><option>viewer</option></select></td>
+              <td>{u.email!==me.email&&<button onClick={()=>del(u.email)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}}><Icon n="x" s={14}/></button>}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SHELL
+═══════════════════════════════════════════════════════════════ */
 export default function App() {
-  const [me, setMe] = useState(undefined); const [view, setView] = useState("home"); const [meta, setMeta] = useState({ counts: {}, alerts: 0 });
-  useEffect(() => { api("/api/me").then((d) => setMe(d && d.email ? d : null)); }, []);
-  useEffect(() => { if (!me) return; const f = () => {
-    api("/api/meta").then((d) => d.counts && setMeta((m) => JSON.stringify(m) === JSON.stringify(d) ? m : d));
-    // Re-poll identity so a role change (e.g. owner promotes/demotes this user) updates
-    // the UI gating without a manual reload. Drop to login if the session was revoked.
-    api("/api/me").then((d) => { if (!d || !d.email) setMe(null); else setMe((m) => m && m.role === d.role ? m : d); });
-  }; f(); const t = setInterval(f, 15000); return () => clearInterval(t); }, [me]);
-  if (me === undefined) return <div className="h-full flex items-center justify-center" style={{ color: COL.mut }}>Loading…</div>;
-  if (!me) return <><Toaster /><Auth onIn={(d) => setMe(d)} /></>;
-  const admin = me.role === "admin" || me.role === "owner";
-  const nav = [["home", "Home", "home"], ["pipeline", "Pipeline", "pipeline"], ["review", "Review", "review"], ["history", "History", "clock"], ["alerts", "Alerts", "alerts"], ["integrations", "Integrations", "plug"]];
-  const titles = { home: "Insights", pipeline: "Pipeline", review: "Review", history: "History", alerts: "Alerts", integrations: "Integrations", settings: "Settings" };
-  return <div className="flex h-screen"><Toaster />
-    <nav className="shrink-0 flex flex-col p-3" style={{ width: 220, background: "var(--surface)", borderRight: "1px solid var(--border)" }}>
-      <div className="flex items-center gap-2.5 px-2 py-2 mb-4"><div style={{ width: 30, height: 30, borderRadius: 8, background: "linear-gradient(135deg,#3b82f6,#4ae176)" }} /><div><div style={{ fontWeight: 800 }}>MBO Tracker</div><div className="lbl">Terminal v2.4</div></div></div>
-      {nav.map(([k, l, ic]) => <button key={k} onClick={() => setView(k)} className="navi flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[13px] font-semibold mb-1" style={{ background: view === k ? "rgba(59,130,246,.14)" : "transparent", color: view === k ? "#fff" : COL.mut, borderLeft: "2px solid " + (view === k ? COL.primary : "transparent") }}><Icon n={ic} s={16} />{l}{k === "review" && meta.counts.awaiting > 0 && <span className="ml-auto mono text-[10px] px-1.5 rounded" style={{ background: COL.ter + "22", color: COL.ter }}>{meta.counts.awaiting}</span>}{k === "alerts" && meta.alerts > 0 && <span className="ml-auto mono text-[10px] px-1.5 rounded" style={{ background: COL.err + "22", color: COL.err }}>{meta.alerts}</span>}</button>)}
-      <div className="mt-auto">
-        <button onClick={() => setView("settings")} className="navi flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[13px] font-semibold w-full" style={{ color: view === "settings" ? "#fff" : COL.mut }}><Icon n="gear" s={16} />Settings</button>
-        <div className="pt-2 mt-2 flex items-center gap-2 text-[11px]" style={{ borderTop: "1px solid var(--border)", color: COL.mut }}><span className="w-2 h-2 rounded-full pdot" style={{ background: COL.sec }} />Supabase · live</div></div>
+  const [me,setMe]=useState(undefined); const [view,setView]=useState("pipeline"); const [meta,setMeta]=useState({counts:{},alerts:0});
+  useEffect(()=>{ api("/api/me").then(d=>setMe(d&&d.email?d:null)); },[]);
+  useEffect(()=>{ if(!me) return; const f=()=>{
+    api("/api/meta").then(d=>d.counts&&setMeta(m=>JSON.stringify(m)===JSON.stringify(d)?m:d));
+    api("/api/me").then(d=>{ if(!d||!d.email) setMe(null); else setMe(m=>m&&m.role===d.role?m:d); });
+  }; f(); const t=setInterval(f,15000); return()=>clearInterval(t); },[me]);
+
+  if(me===undefined) return <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--on3)"}}>Loading…</div>;
+  if(!me) return <><Toaster/><Auth onIn={d=>setMe(d)}/></>;
+
+  const admin=me.role==="admin"||me.role==="owner";
+  const nav=[
+    ["pipeline","Pipeline","pipeline"],
+    ["review","Review","review"],
+    ["alerts","Alerts","alerts"],
+    ["history","History","clock"],
+    ["integrations","Integrations","plug"],
+  ];
+
+  return <div style={{display:"flex",height:"100vh",overflow:"hidden"}}>
+    <Toaster/>
+    {/* ── Sidebar ── */}
+    <nav style={{width:200,background:"var(--surface)",borderRight:"1px solid var(--border)",display:"flex",flexDirection:"column",padding:"12px 8px",flexShrink:0}}>
+      {/* Logo */}
+      <div style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",marginBottom:20}}>
+        <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#22c55e)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>⚡</div>
+        <div>
+          <div style={{fontWeight:800,fontSize:14,letterSpacing:"-.02em",lineHeight:1.2}}>MBO Tracker</div>
+          <div className="lbl" style={{marginTop:1}}>Terminal v2.4</div>
+        </div>
+      </div>
+
+      {/* Nav items */}
+      {nav.map(([k,l,ic])=><button key={k} onClick={()=>setView(k)} className={`nav-item${view===k?" active":""}`}>
+        <Icon n={ic} s={16}/>
+        <span>{l}</span>
+        {k==="review"&&meta.counts?.awaiting>0&&
+          <span className="badge" style={{marginLeft:"auto",background:"rgba(245,158,11,.15)",color:"var(--amber)"}}>{meta.counts.awaiting}</span>}
+        {k==="alerts"&&meta.alerts>0&&
+          <span className="badge" style={{marginLeft:"auto",background:"rgba(239,68,68,.15)",color:"var(--red)"}}>{meta.alerts}</span>}
+      </button>)}
+
+      {/* Bottom */}
+      <div style={{marginTop:"auto",paddingTop:12,borderTop:"1px solid var(--border)",display:"flex",flexDirection:"column",gap:4}}>
+        <button onClick={()=>setView("settings")} className={`nav-item${view==="settings"?" active":""}`}><Icon n="gear" s={16}/>Settings</button>
+        <div style={{padding:"8px 10px",display:"flex",alignItems:"center",gap:6,fontSize:11,color:"var(--on3)"}}>
+          <span style={{width:6,height:6,borderRadius:"50%",background:"var(--green)",display:"inline-block"}}/>
+          Supabase · live
+        </div>
+        <div style={{padding:"4px 10px",fontSize:11,color:"var(--on3)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{me.email}</div>
+        <button onClick={async()=>{ await api("/api/logout"); setMe(null); }} className="nav-item" style={{color:"var(--red)"}}>
+          <Icon n="logout" s={16}/>Sign out
+        </button>
+      </div>
     </nav>
-    <div className="flex-1 flex flex-col min-w-0">
-      <div className="flex items-center justify-between px-5 py-3" style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
-        <h1 className="text-[15px] font-bold">{titles[view]}</h1>
-        <div className="flex items-center gap-3"><div className="text-right leading-tight"><div className="text-[12px] font-semibold">{me.email}</div><div className="lbl" style={{ color: me.role === "owner" ? COL.sec : COL.mut }}>{me.role}</div></div>
-          <div className="rounded-full flex items-center justify-center text-[12px] font-bold" style={{ width: 32, height: 32, background: COL.primary, color: "#fff" }}>{me.email[0].toUpperCase()}</div>
-          <button onClick={async () => { await api("/api/logout"); setMe(null); }} title="Sign out" style={{ color: COL.mut }}><Icon n="logout" s={17} /></button></div></div>
-      <div className="flex-1 min-h-0 p-5">
-        {view === "home" && <Home go={setView} />}{view === "pipeline" && <Pipeline admin={admin} />}{view === "review" && <Review admin={admin} />}
-        {view === "history" && <History admin={admin} />}{view === "alerts" && <Alerts />}{view === "integrations" && <Integrations admin={admin} />}
-        {view === "settings" && <Settings me={me} />}
-      </div></div></div>;
+
+    {/* ── Main area ── */}
+    <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+      {/* Topbar */}
+      <div style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"10px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:11,color:"var(--on3)",fontFamily:"JetBrains Mono,monospace"}}>Search parameters…</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:12,fontWeight:600}}>{me.email}</div>
+            <div className="lbl" style={{color:me.role==="owner"?"var(--green)":"var(--on3)"}}>{me.role}</div>
+          </div>
+          <div style={{width:30,height:30,borderRadius:"50%",background:"var(--blue)",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:13}}>
+            {me.email[0].toUpperCase()}
+          </div>
+        </div>
+      </div>
+
+      {/* Page content */}
+      <div style={{flex:1,minHeight:0,padding:"20px 24px",overflow:"auto"}}>
+        {view==="pipeline"    && <Pipeline    admin={admin}/>}
+        {view==="review"      && <Review      admin={admin}/>}
+        {view==="history"     && <History     admin={admin}/>}
+        {view==="alerts"      && <Alerts      admin={admin}/>}
+        {view==="integrations"&& <Integrations admin={admin}/>}
+        {view==="home"        && <Home        go={setView} admin={admin}/>}
+        {view==="settings"    && <Settings    me={me} admin={admin}/>}
+      </div>
+    </div>
+  </div>;
 }

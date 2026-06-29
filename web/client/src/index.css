@@ -1,27 +1,366 @@
 @import "tailwindcss";
 
-:root{
-  --bg:#0e0e10; --surface:#131315; --c-low:#1c1b1d; --c:#201f22; --c-high:#2a2a2c;
-  --border:#424754; --on:#e5e1e4; --on-var:#c2c6d6; --outline:#8c909f;
-  --primary:#3b82f6; --primary2:#4d8eff; --sec:#4ae176; --ter:#ffb95f; --err:#ff6b6b;
+/* ── Design tokens ─────────────────────────────────────────── */
+:root {
+  --bg:      #0a0a0c;
+  --surface: #0f0f12;
+  --panel:   #13131a;
+  --card:    #16161e;
+  --card2:   #1a1a24;
+  --border:  #2a2a38;
+  --border2: #353548;
+  --on:      #e2e0ee;
+  --on2:     #9b99b4;
+  --on3:     #5c5a72;
+
+  --blue:    #3b82f6;
+  --blue2:   #2563eb;
+  --green:   #22c55e;
+  --green2:  #16a34a;
+  --amber:   #f59e0b;
+  --red:     #ef4444;
+  --red2:    #dc2626;
+  --purple:  #a855f7;
+  --cyan:    #06b6d4;
+
+  /* console tag colours */
+  --tag-done: #22c55e;
+  --tag-warn: #f59e0b;
+  --tag-fail: #ef4444;
+  --tag-info: #3b82f6;
 }
-*{box-sizing:border-box;margin:0;padding:0}
-html,body,#root{height:100%}
-body{background:var(--bg);color:var(--on);font-family:Geist,"Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-.mono{font-family:"JetBrains Mono",Consolas,monospace}
-.lbl{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--outline)}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px}
-.inp{background:var(--c-low);border:1px solid var(--border);color:var(--on);border-radius:8px;padding:8px 10px;font-size:13px;outline:none}
-.inp:focus{border-color:var(--primary)}
-*::-webkit-scrollbar{width:8px;height:8px}
-*::-webkit-scrollbar-thumb{background:#3f3f46;border-radius:8px}
-*::-webkit-scrollbar-track{background:transparent}
-@keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
-.shine::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.3),transparent);animation:shimmer 1.6s infinite}
-@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-.fadeup{animation:fadeUp .25s ease both}
-@keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
-.toastin{animation:slideIn .3s ease both}
-@keyframes pulseDot{0%{box-shadow:0 0 0 0 rgba(74,225,118,.5)}70%{box-shadow:0 0 0 6px rgba(74,225,118,0)}100%{box-shadow:0 0 0 0 rgba(74,225,118,0)}}
-.pdot{animation:pulseDot 2s infinite}
-.navi{transition:background .15s,color .15s}
+
+/* ── Reset ─────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--on);
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Typography ────────────────────────────────────────────── */
+.mono { font-family: "JetBrains Mono", "Fira Code", Consolas, monospace; }
+.lbl  {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--on3);
+}
+
+/* ── Scrollbars ────────────────────────────────────────────── */
+*::-webkit-scrollbar       { width: 5px; height: 5px; }
+*::-webkit-scrollbar-thumb { background: #2a2a38; border-radius: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ── Cards / Panels ────────────────────────────────────────── */
+.card  { background: var(--card);  border: 1px solid var(--border);  border-radius: 10px; }
+.panel { background: var(--panel); border: 1px solid var(--border);  border-radius: 10px; }
+.card2 { background: var(--card2); border: 1px solid var(--border2); border-radius: 8px; }
+
+/* ── Form inputs ───────────────────────────────────────────── */
+.inp {
+  background: var(--card2);
+  border: 1px solid var(--border2);
+  color: var(--on);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color .15s;
+}
+.inp:focus { border-color: var(--blue); }
+
+/* ── Navigation ────────────────────────────────────────────── */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--on2);
+  cursor: pointer;
+  transition: background .12s, color .12s;
+  border: none;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+}
+.nav-item:hover { background: rgba(255,255,255,.04); color: var(--on); }
+.nav-item.active {
+  background: rgba(59,130,246,.12);
+  color: #fff;
+  border-left: 2px solid var(--blue);
+}
+
+/* ── Console / Stream log ──────────────────────────────────── */
+.console-wrap {
+  background: #0a0a10;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: auto;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 11.5px;
+}
+.console-row {
+  display: grid;
+  grid-template-columns: 64px 100px 1fr 80px;
+  align-items: center;
+  padding: 4px 10px;
+  border-bottom: 1px solid rgba(255,255,255,.03);
+  gap: 8px;
+}
+.console-row:hover { background: rgba(255,255,255,.03); }
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .05em;
+}
+.tag-done { background: rgba(34,197,94,.15);  color: var(--tag-done); }
+.tag-warn { background: rgba(245,158,11,.15); color: var(--tag-warn); }
+.tag-fail { background: rgba(239,68,68,.15);  color: var(--tag-fail); }
+.tag-info { background: rgba(59,130,246,.15); color: var(--tag-info); }
+
+/* ── Progress bar ──────────────────────────────────────────── */
+.progress-track {
+  height: 6px;
+  background: var(--card2);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--blue2), var(--blue));
+  border-radius: 999px;
+  position: relative;
+  transition: width .3s ease;
+}
+
+/* ── Phase banner ──────────────────────────────────────────── */
+.phase-banner {
+  background: rgba(245,158,11,.08);
+  border: 1px solid rgba(245,158,11,.3);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Stat cards ────────────────────────────────────────────── */
+.stat-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.stat-val {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+  margin-top: 4px;
+}
+
+/* ── Buttons ───────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: opacity .15s, filter .15s;
+  white-space: nowrap;
+}
+.btn:disabled { opacity: .38; cursor: not-allowed; }
+.btn:not(:disabled):hover { filter: brightness(1.1); }
+.btn-sm { padding: 5px 10px; font-size: 11.5px; border-radius: 6px; }
+
+.btn-primary { background: var(--blue);  color: #fff;       border-color: var(--blue2); }
+.btn-success { background: var(--green); color: #03120a;    border-color: var(--green2); }
+.btn-danger  { background: transparent;  color: var(--red); border-color: var(--red); }
+.btn-ghost   { background: var(--card2); color: var(--on2); border-color: var(--border2); }
+.btn-abort   { background: var(--red2);  color: #fff;       border-color: var(--red2); }
+.btn-empty   { background: rgba(239,68,68,.1); color: var(--red); border-color: rgba(239,68,68,.3); }
+.btn-empty:not(:disabled):hover { background: rgba(239,68,68,.2); filter: none; }
+
+/* ── Toggle ────────────────────────────────────────────────── */
+.tog-wrap {
+  width: 38px; height: 21px;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  position: relative;
+  transition: background .2s;
+  flex-shrink: 0;
+}
+.tog-knob {
+  position: absolute;
+  width: 15px; height: 15px;
+  border-radius: 50%;
+  top: 3px;
+  transition: left .2s, background .2s;
+}
+
+/* ── Table ─────────────────────────────────────────────────── */
+.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tbl th {
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 10px;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--on3);
+  background: var(--panel);
+  white-space: nowrap;
+}
+.tbl td { padding: 10px 12px; border-top: 1px solid var(--border); vertical-align: middle; }
+.tbl tbody tr:hover td { background: rgba(255,255,255,.02); }
+
+/* ── Vendor checkbox list ──────────────────────────────────── */
+.vendor-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background .1s;
+  font-size: 12px;
+}
+.vendor-row:hover { background: rgba(255,255,255,.04); }
+
+/* ── Upload drop zone ──────────────────────────────────────── */
+.dropzone {
+  border: 1.5px dashed var(--border2);
+  border-radius: 8px;
+  padding: 24px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.dropzone:hover { border-color: var(--blue); background: rgba(59,130,246,.04); }
+
+/* ── Engine status dot ─────────────────────────────────────── */
+.engine-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+@keyframes pulseDot {
+  0%   { box-shadow: 0 0 0 0   rgba(34,197,94,.6); }
+  70%  { box-shadow: 0 0 0 7px rgba(34,197,94,0); }
+  100% { box-shadow: 0 0 0 0   rgba(34,197,94,0); }
+}
+.pulse-green { animation: pulseDot 2s infinite; background: var(--green); }
+
+/* ── Animations ────────────────────────────────────────────── */
+@keyframes shimmer { 0% { transform:translateX(-100%); } 100% { transform:translateX(100%); } }
+.shine { position: relative; overflow: hidden; }
+.shine::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg,transparent,rgba(255,255,255,.25),transparent);
+  animation: shimmer 1.5s infinite;
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fadeup { animation: fadeUp .2s ease both; }
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(50px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.toastin { animation: slideIn .25s ease both; }
+
+/* ── Tabs ──────────────────────────────────────────────────── */
+.tab-bar { display: flex; gap: 4px; }
+.tab {
+  padding: 7px 16px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--on2);
+  transition: background .15s, color .15s;
+}
+.tab.active {
+  background: var(--card2);
+  color: #fff;
+  border-color: var(--border2);
+}
+
+/* ── Badge ─────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: "JetBrains Mono", Consolas, monospace;
+}
+
+/* ── Section header ────────────────────────────────────────── */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+/* ── Toolbar strip ─────────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.toolbar-sep { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
+
+/* ── Connector pills ───────────────────────────────────────── */
+.pill-group { display: flex; border-radius: 6px; overflow: hidden; border: 1px solid var(--border2); }
+.pill {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--card2);
+  color: var(--on2);
+  border: none;
+  transition: background .12s, color .12s;
+}
+.pill.active { background: var(--blue); color: #fff; }
+
+/* ── Dashed inner border for dropzone label ────────────────── */
+.dz-icon {
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  background: var(--card2);
+  border: 1px solid var(--border2);
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 8px;
+}

@@ -493,6 +493,22 @@ app.get("/api/export", wrap(async (req, res) => {
   await sendXlsx(res, `mbo_${kind}`, rows);
 }));
 
+
+
+app.post("/api/db/empty", sec.ownerOnly, wrap(async (req, res) => {
+  const tables = ["price_history", "review_history", "import_catalog", "products"];
+  let removed = 0;
+  for (const t of tables) {
+    const r = await q(`DELETE FROM ${t}`);
+    removed += (r.rowCount || 0);
+  }
+  // Also reset meta keys that track import state
+  await q("DELETE FROM meta WHERE k IN ('last_import','last_import_rows','last_import_contains','last_import_domains')");
+  res.json({ ok: true, removed, tables });
+}));
+
+
+
 // ---------- owner console ----------
 app.get("/api/admin/sessions", sec.ownerOnly, (req, res) => res.json({ sessions: sec.activeSessions() }));
 app.get("/api/admin/users", sec.ownerOnly, wrap(async (req, res) => res.json({ users: (await sec.listUsers()).map((u) => ({ ...u, created_at: String(u.created_at) })) })));
