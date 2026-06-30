@@ -8,6 +8,7 @@ import pLimit from "p-limit";
 import { Fetcher, extractRow } from "./engine.js";
 import { toInr } from "./fx.js";
 import * as store from "./store.js";
+import { sendPipelineReport } from "./mailer.js";
 const engTol = store.matchTol;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -176,5 +177,17 @@ export async function startPipeline(eng, runId) {
     st.phase = "done"; st.message = "Error: " + e.message;
   } finally {
     st.running = false;
+  }
+  // Pipeline has terminated — email a per-brand report if anything needs review
+  // (pending mismatches and/or price alerts). Fire-and-forget: the mailer decides
+  // whether there's anything to send and never throws. Skipped on a user abort.
+  if (!st.abort) {
+    sendPipelineReport()
+      .then((r) => {
+        if (r?.skipped) log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: "nothing to report — no email sent" });
+        else if (r?.ok) log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: `report sent to ${r.to} (${r.count} mismatch, ${r.alerts} alert)` });
+        else log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: `not sent: ${r?.error || "unknown"}` });
+      })
+      .catch((e) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: "send failed: " + e.message }));
   }
 }

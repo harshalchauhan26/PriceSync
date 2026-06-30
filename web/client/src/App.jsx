@@ -47,6 +47,7 @@ const PATHS = {
   db:"M12 2C7.58 2 4 3.79 4 6v12c0 2.21 3.58 4 8 4s8-1.79 8-4V6c0-2.21-3.58-4-8-4ZM4 12c0 2.21 3.58 4 8 4s8-1.79 8-4M4 9c0 2.21 3.58 4 8 4s8-1.79 8-4",
   warn:"M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z",
   filter:"M22 3H2l8 9.46V19l4 2v-8.54L22 3",
+  mail:"M4 4h16v16H4zM4 6l8 6 8-6",
 };
 const Icon = ({n,s=15,c="currentColor"}) =>
   <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
@@ -524,6 +525,7 @@ function Review({admin}) {
   const approveSel=async()=>{ if(!sel.size) return toast("Select rows first","err"); let pushed=0,failed=0; for(const id of sel){ const it=items.find(x=>x.id===id); const r=await aj("/api/review/decide",{row:id,decision:"approved",markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.shopify?.ok?pushed++:failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed?`, ${failed} failed`:""}`,failed?"err":"ok"); load(); };
   const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); r.ok?toast(`Approved ${r.approved}`,"ok"):toast(r.error,"err"); load(); };
   const rejectAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Reject ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/reject_all",{kind:tab,brands:bList}); r.ok?toast(`Rejected ${r.rejected}`,"ok"):toast(r.error||"Failed","err"); load(); };
+  const emailReport=async()=>{ const bList=vendor?[vendor]:brands; const scope=bList.length?`${bList.length} brand(s)`:"all brands"; if(!confirm(`Email a per-brand mismatch sheet for ${scope}?`)) return; toast("Sending…","ok"); const r=await aj("/api/alerts/email_mismatch",{brands:bList}); r.ok?toast(`Emailed ${r.count} mismatch(es) to ${r.to}`,"ok"):toast(r.error||"Email failed","err"); };
   const clear=()=>{ setBrands([]); setVendor(""); setTab("mismatch"); setSel(new Set()); };
   const tog=(id)=>{ const n=new Set(sel); n.has(id)?n.delete(id):n.add(id); setSel(n); };
   const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error,"var(--red)"],["resolved","Resolved",counts.matched,"var(--green)"]];
@@ -533,7 +535,8 @@ function Review({admin}) {
       admin={admin} vendor={vendor} onVendor={setVendor} onClear={clear} kind={tab}
       extraLeft={<>
         <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>
-        <button className="btn btn-ghost btn-sm" onClick={()=>window.location=`/api/export?kind=${tab==="resolved"?"all":tab}`}><Icon n="dl" s={12}/>Export</button>
+        <button className="btn btn-ghost btn-sm" onClick={()=>{const bList=vendor?[vendor]:brands; const bq=bList.length?`&brands=${encodeURIComponent(bList.join(","))}`:""; window.location=`/api/export?kind=${tab==="resolved"?"all":tab}${bq}`;}} title={(vendor?[vendor]:brands).length?`Export selected ${(vendor?[vendor]:brands).length} brand(s)`:"Export all brands"}><Icon n="dl" s={12}/>Export{(vendor?[vendor]:brands).length?` (${(vendor?[vendor]:brands).length})`:""}</button>
+        {tab==="mismatch"&&<button className="btn btn-ghost btn-sm" onClick={emailReport} title="Email a per-brand mismatch workbook"><Icon n="mail" s={12}/>Email</button>}
       </>}
       extraRight={<>
         <button className="btn btn-primary btn-sm" onClick={approveSel} disabled={!admin}><Icon n="check" s={12}/>Approve Selected</button>

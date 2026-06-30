@@ -432,7 +432,10 @@ app.get("/api/alerts/brands", wrap(async (req, res) => {
   res.json({ brands: rows.map((r) => ({ brand: r.brand, count: Number(r.c) })) });
 }));
 app.post("/api/alerts/email_mismatch", wrap(async (req, res) => {
-  const r = await sendMismatchReport((req.body || {}).to);
+  const body = req.body || {};
+  const brands = Array.isArray(body.brands) ? body.brands.filter(Boolean)
+    : String(body.brands || "").split(",").map((b) => b.trim()).filter(Boolean);
+  const r = await sendMismatchReport(body.to, brands);
   res.status(r.ok ? 200 : 400).json(r);
 }));
 
@@ -487,10 +490,16 @@ async function sendXlsx(res, name, rows) {
 }
 app.get("/api/export", wrap(async (req, res) => {
   const kind = req.query.kind || "all";
-  const where = { all: "1=1", mismatch: "state='mismatch'", error: "state='error'", approved: "decision='approved'" }[kind] || "1=1";
+  let where = { all: "1=1", mismatch: "state='mismatch'", error: "state='error'", approved: "decision='approved'" }[kind] || "1=1";
+  // Optional brand scope (the Review "Export" button passes the selected brands so
+  // the sheet covers only those brands, not the whole catalog).
+  const brands = (req.query.brands || "").split(",").map((b) => b.trim()).filter(Boolean);
+  const params = [];
+  if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 1}`).join(",")})`; params.push(...brands); }
   const rows = await q(`SELECT id,brand,platform,url,base_price,live_price,currency,status,state,delta,
-    decision,markup_pct,final_price FROM products WHERE ${where} ORDER BY id`);
-  await sendXlsx(res, `mbo_${kind}`, rows);
+    decision,markup_pct,final_price FROM products WHERE ${where} ORDER BY brand, id`, params);
+  const suffix = brands.length ? `_${brands.length}brands` : "";
+  await sendXlsx(res, `mbo_${kind}${suffix}`, rows);
 }));
 
 
