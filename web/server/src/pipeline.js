@@ -70,6 +70,9 @@ async function processOne(eng, fetcher, prod, runId) {
   // Brands configured for USD fetch (meta 'fetch_usd_brands') are scraped through
   // the store's currency switcher so we record the designer's USD price.
   const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
+  // Brands configured for high-price capture (meta 'range_high_brands') record the
+  // full set price from a variable product's lowPrice/highPrice range.
+  const preferHigh = eng.rangeHighBrands ? eng.rangeHighBrands.has(normBrand(brand)) : false;
   let live, currency;
   if (cfg.simulation) {
     await sleep(30 + Math.random() * 90);
@@ -93,7 +96,8 @@ async function processOne(eng, fetcher, prod, runId) {
   }
   try {
     [live, currency] = await extractRow(fetcher, url, (prod.platform || "").trim(),
-      prod.custom_regex || null, fetchCur ? { fetchCurrency: fetchCur } : undefined);
+      prod.custom_regex || null,
+      (fetchCur || preferHigh) ? { fetchCurrency: fetchCur || undefined, preferHighPrice: preferHigh } : undefined);
     if (live == null) throw new Error("price not found");
   } catch (e) {
     log(eng, { row: tag, domain: brand, url, currency: "-", price: "-", status: "Fetch Error", msg: e.message });
@@ -170,8 +174,9 @@ export async function startPipeline(eng, runId) {
   const mode = cfg.fresh_start ? "fresh" : "update";
   const vendors = (cfg.vendors && cfg.vendors.length) ? cfg.vendors : null;
   try {
-    // Snapshot the USD-fetch brand set once per run (cheap, cached in store).
+    // Snapshot the USD-fetch + range-high brand sets once per run (cheap, cached in store).
     eng.usdFetchBrands = await store.usdFetchBrandSet();
+    eng.rangeHighBrands = await store.rangeHighBrandSet();
     const source = cfg.data_source === 'imported' ? 'imported' : 'database';
     const rows = await store.workRows(mode, vendors, source);
     const total = source === 'imported'

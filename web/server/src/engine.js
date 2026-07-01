@@ -127,13 +127,21 @@ export function detectCurrency(text) {
   return null;
 }
 
-export function extractPriceFromHtml(html, customRegex = null) {
+export function extractPriceFromHtml(html, customRegex = null, preferHigh = false) {
   if (customRegex) {
     try {
       const m = html.match(new RegExp(customRegex, "s"));
       if (m) return sanitizePrice(m[1] !== undefined ? m[1] : m[0]);
     } catch { /* bad regex */ }
     return null;
+  }
+  // Some brands publish sets/variable products as a price RANGE (AggregateOffer:
+  // lowPrice/highPrice). By default we take the low (see below), but brands flagged
+  // for high-price capture record the FULL set price — match highPrice first, then
+  // fall through to the normal single-"price" path for non-range products.
+  if (preferHigh) {
+    const h = html.match(/"highPrice"\s*:\s*"?([0-9][0-9,.]*)"?/);
+    if (h) return sanitizePrice(h[1]);
   }
   let m = html.match(/property=["']product:price:amount["'][^>]*content=["']([^"']+)["']|content=["']([^"']+)["'][^>]*property=["']product:price:amount["']/);
   if (m) return sanitizePrice(m[1] || m[2]);
@@ -205,14 +213,14 @@ export async function extractShopify(fetcher, url) {
   return [price, currency];
 }
 
-export async function extractWordpress(fetcher, url) {
+export async function extractWordpress(fetcher, url, preferHigh = false) {
   const html = (await fetcher.get(url)).data;
-  return [extractPriceFromHtml(html), detectCurrency(html)];
+  return [extractPriceFromHtml(html, null, preferHigh), detectCurrency(html)];
 }
 
-export async function extractCustom(fetcher, url, customRegex) {
+export async function extractCustom(fetcher, url, customRegex, preferHigh = false) {
   const html = (await fetcher.get(url)).data;
-  return [extractPriceFromHtml(html, customRegex), detectCurrency(html)];
+  return [extractPriceFromHtml(html, customRegex, preferHigh), detectCurrency(html)];
 }
 
 // Append a currency-switcher query param (e.g. ?wmc-currency=USD for the WMC /
@@ -232,11 +240,12 @@ export async function extractRow(fetcher, url, platform, customRegex, opts = {})
   const u = opts.fetchCurrency
     ? withCurrencyParam(url, opts.currencyParam || "wmc-currency", opts.fetchCurrency)
     : url;
+  const hi = opts.preferHighPrice === true;
   let res;
   if (p === "shopify") res = await extractShopify(fetcher, u);
-  else if (p === "wordpress" || p === "woocommerce") res = await extractWordpress(fetcher, u);
-  else if (p === "custom") res = await extractCustom(fetcher, u, customRegex);
-  else res = await extractWordpress(fetcher, u);
+  else if (p === "wordpress" || p === "woocommerce") res = await extractWordpress(fetcher, u, hi);
+  else if (p === "custom") res = await extractCustom(fetcher, u, customRegex, hi);
+  else res = await extractWordpress(fetcher, u, hi);
   if (opts.fetchCurrency && res && res[1] == null) res = [res[0], opts.fetchCurrency];
   return res;
 }
