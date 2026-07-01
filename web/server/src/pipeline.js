@@ -60,11 +60,16 @@ function log(eng, e) {
   }
 }
 
+const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
+
 async function processOne(eng, fetcher, prod, runId) {
   const cfg = eng.config;
   const url = (prod.url || "").trim();
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
+  // Brands configured for USD fetch (meta 'fetch_usd_brands') are scraped through
+  // the store's currency switcher so we record the designer's USD price.
+  const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
   let live, currency;
   if (cfg.simulation) {
     await sleep(30 + Math.random() * 90);
@@ -87,7 +92,8 @@ async function processOne(eng, fetcher, prod, runId) {
     return state;
   }
   try {
-    [live, currency] = await extractRow(fetcher, url, (prod.platform || "").trim(), prod.custom_regex || null);
+    [live, currency] = await extractRow(fetcher, url, (prod.platform || "").trim(),
+      prod.custom_regex || null, fetchCur ? { fetchCurrency: fetchCur } : undefined);
     if (live == null) throw new Error("price not found");
   } catch (e) {
     log(eng, { row: tag, domain: brand, url, currency: "-", price: "-", status: "Fetch Error", msg: e.message });
@@ -143,6 +149,8 @@ export async function startPipeline(eng, runId) {
   const mode = cfg.fresh_start ? "fresh" : "update";
   const vendors = (cfg.vendors && cfg.vendors.length) ? cfg.vendors : null;
   try {
+    // Snapshot the USD-fetch brand set once per run (cheap, cached in store).
+    eng.usdFetchBrands = await store.usdFetchBrandSet();
     const source = cfg.data_source === 'imported' ? 'imported' : 'database';
     const rows = await store.workRows(mode, vendors, source);
     const total = source === 'imported'

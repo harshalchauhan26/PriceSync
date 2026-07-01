@@ -7,6 +7,19 @@ const REQUIRED = ["MBO Product URL", "Designer Product URL", "Platform Type",
   "Custom Regex", "Studio East Price"];
 const STORE_KEY = '__store__';   // single global Shopify integration
 
+// Strip currency-switcher fetch params (e.g. wmc-currency) so the stored url stays
+// canonical. Leaves other params (e.g. ?variant=) intact.
+export function canonicalUrl(url) {
+  const s = String(url || "").trim();
+  if (!s) return s;
+  try {
+    const u = new URL(s);
+    u.searchParams.delete("wmc-currency");
+    u.searchParams.delete("currency");
+    return u.toString();
+  } catch { return s; }
+}
+
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS products (' +
     'id BIGSERIAL PRIMARY KEY, key TEXT UNIQUE, mbo_url TEXT, url TEXT,' +
@@ -199,17 +212,22 @@ export async function saveResult(prod, status, live, cur, state, runId) {
   const base = prod.base_price;
   const delta = (live != null && base != null) ? (await toInr(live, cur)) - base : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  // Persist the CANONICAL url only. The currency switcher param (?wmc-currency=USD)
+  // is a fetch-time detail added by the engine — it must never leak into the stored
+  // url, which is the row's identity and the Shopify handle source. This strips it
+  // defensively so a bad caller can't corrupt products.url again.
+  const cleanUrl = canonicalUrl(prod.url);
   await q(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,
       live_price,currency,status,state,delta,decision,decided_at,updated_at)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',NULL,$13)
-    ON CONFLICT(key) DO UPDATE SET live_price=excluded.live_price,currency=excluded.currency,
+    ON CONFLICT(key) DO UPDATE SET url=excluded.url,live_price=excluded.live_price,currency=excluded.currency,
       status=excluded.status,state=excluded.state,delta=excluded.delta,
       decision='pending',decided_at=NULL,updated_at=excluded.updated_at`,
-    [prod.key, prod.mbo_url || "", prod.url, prod.platform, prod.custom_regex, prod.brand,
+    [prod.key, prod.mbo_url || "", cleanUrl, prod.platform, prod.custom_regex, prod.brand,
       base, live, cur, status, state, delta, now]);
   await q(`INSERT INTO price_history(key,url,brand,base_price,live_price,delta,state,status,run_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [prod.key, prod.url, prod.brand, base, live, delta, state, status, runId]);
+    [prod.key, cleanUrl, prod.brand, base, live, delta, state, status, runId]);
   return delta;
 }
 
@@ -274,6 +292,35 @@ export async function setCadBrands(list) {
 }
 export async function pushCurrencyFor(brand) {
   return (await cadBrandSet()).has(normBrand(brand)) ? "CAD" : "USD";
+}
+
+// ---- per-brand FETCH currency ----
+// Most designer stores serve their native currency (INR) and we scrape that. A few
+// WooCommerce stores (e.g. saakshakinni.com) run the "Multi Currency for
+// WooCommerce" (WMC) switcher and expose the designer's international USD price via
+// the ?wmc-currency=USD URL param. Brands listed in meta 'fetch_usd_brands'
+// (comma-separated domains, host without www) are scraped with that param so we
+// record the store's real USD price — which is what gets pushed to a USD storefront
+// on approval, instead of a generic FX conversion of the INR price.
+let _usdFetchCache = { at: 0, set: null };
+export async function usdFetchBrandSet() {
+  if (_usdFetchCache.set && Date.now() - _usdFetchCache.at < 30_000) return _usdFetchCache.set;
+  const raw = await getMeta("fetch_usd_brands", "");
+  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  _usdFetchCache = { at: Date.now(), set };
+  return set;
+}
+export async function setUsdFetchBrands(list) {
+  const arr = (Array.isArray(list) ? list : String(list || "").split(","))
+    .map(normBrand).filter(Boolean);
+  const uniq = [...new Set(arr)];
+  await setMeta("fetch_usd_brands", uniq.join(","));
+  _usdFetchCache = { at: 0, set: null };       // invalidate cache
+  return uniq;
+}
+// Returns the currency to FETCH for this brand ("USD") or null for native scrape.
+export async function fetchCurrencyFor(brand) {
+  return (await usdFetchBrandSet()).has(normBrand(brand)) ? "USD" : null;
 }
 
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,

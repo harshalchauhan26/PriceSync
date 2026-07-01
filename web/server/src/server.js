@@ -464,6 +464,11 @@ app.get("/api/integrations", wrap(async (req, res) => res.json({ brands: await s
 // GET returns the current CAD brand list; POST {brands:[...] | "a.com,b.com"} replaces it (admin).
 app.get("/api/push/cad", wrap(async (req, res) => res.json({ default: "USD", cad_brands: [...(await store.cadBrandSet())] })));
 app.post("/api/push/cad", wrap(async (req, res) => res.json({ ok: true, cad_brands: await store.setCadBrands(req.body.brands ?? req.body.list ?? "") })));
+// Fetch-currency config: brands listed here are scraped through their store's
+// currency switcher (?wmc-currency=USD) so we record the designer's USD price.
+// GET returns the current list; POST {brands:[...] | "a.com,b.com"} replaces it.
+app.get("/api/fetch/usd", wrap(async (req, res) => res.json({ default: "native", usd_brands: [...(await store.usdFetchBrandSet())] })));
+app.post("/api/fetch/usd", wrap(async (req, res) => res.json({ ok: true, usd_brands: await store.setUsdFetchBrands(req.body.brands ?? req.body.list ?? "") })));
 app.post("/api/shopify/update_price", wrap(async (req, res) => {
   const productUrl = String(req.body.product_url || "").trim();
   const newPrice = req.body.new_price;

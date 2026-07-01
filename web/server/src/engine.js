@@ -215,10 +215,28 @@ export async function extractCustom(fetcher, url, customRegex) {
   return [extractPriceFromHtml(html, customRegex), detectCurrency(html)];
 }
 
-export async function extractRow(fetcher, url, platform, customRegex) {
+// Append a currency-switcher query param (e.g. ?wmc-currency=USD for the WMC /
+// "Multi Currency for WooCommerce" plugin) so the store serves that currency's
+// prices. Preserves any existing query string.
+export function withCurrencyParam(url, param, currency) {
+  if (!currency || !param) return url;
+  try { const u = new URL(url); u.searchParams.set(param, currency); return u.toString(); }
+  catch { return url; }
+}
+
+// opts.fetchCurrency: when set (e.g. "USD"), fetch the store in that currency via
+// opts.currencyParam (default "wmc-currency"). If the page doesn't expose a
+// currency of its own, we trust the requested one (the switcher served those prices).
+export async function extractRow(fetcher, url, platform, customRegex, opts = {}) {
   const p = (platform || "").trim().toLowerCase();
-  if (p === "shopify") return extractShopify(fetcher, url);
-  if (p === "wordpress" || p === "woocommerce") return extractWordpress(fetcher, url);
-  if (p === "custom") return extractCustom(fetcher, url, customRegex);
-  return extractWordpress(fetcher, url);
+  const u = opts.fetchCurrency
+    ? withCurrencyParam(url, opts.currencyParam || "wmc-currency", opts.fetchCurrency)
+    : url;
+  let res;
+  if (p === "shopify") res = await extractShopify(fetcher, u);
+  else if (p === "wordpress" || p === "woocommerce") res = await extractWordpress(fetcher, u);
+  else if (p === "custom") res = await extractCustom(fetcher, u, customRegex);
+  else res = await extractWordpress(fetcher, u);
+  if (opts.fetchCurrency && res && res[1] == null) res = [res[0], opts.fetchCurrency];
+  return res;
 }
