@@ -106,6 +106,27 @@ async function processOne(eng, fetcher, prod, runId) {
     await store.saveResult(prod, "Fetch Error", live, cur, "error", runId);
     return "error";
   }
+  // USD-fetch brands: compare the store's own USD price against a frozen USD baseline
+  // (USD-to-USD). No FX round-trip — this is the designer's real international price,
+  // so an INR-converted comparison would flag every row as a mismatch. The baseline is
+  // seeded on the first observation; after that a mismatch means the store's USD price
+  // actually changed vs the recorded baseline.
+  if (fetchCur === "USD" && cur === "USD") {
+    const baseUsd = prod.base_usd;
+    let state, status, msg;
+    if (baseUsd == null) {
+      state = "matched"; status = "Price Matched (USD)"; msg = `USD baseline set @ ${live}`;
+    } else {
+      const delta = live - baseUsd;
+      if (Math.abs(delta) <= engTol(baseUsd, "USD")) { state = "matched"; status = "Price Matched (USD)"; }
+      else { state = "mismatch"; status = "Price Mismatch! (USD)"; }
+      msg = `USD ${live} vs baseline ${baseUsd}`;
+    }
+    log(eng, { row: tag, domain: brand, url, currency: "USD", price: String(live),
+      status: state === "matched" ? "Price Matched" : "Price Mismatch!", msg });
+    await store.saveResult(prod, status, live, cur, state, runId, { usdBaseline: true });
+    return state;
+  }
   const liveInr = await toInr(live, cur);
   const delta = liveInr - base;
   const disp = ["INR", "UNKNOWN"].includes(cur) ? cur : `${cur}->INR`;

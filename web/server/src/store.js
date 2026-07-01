@@ -33,6 +33,10 @@ const SCHEMA = [
     'rerun_at TEXT, updated_at TEXT)',
   'CREATE INDEX IF NOT EXISTS ix_products_state ON products(state)',
   'CREATE INDEX IF NOT EXISTS ix_products_brand ON products(brand)',
+  // Frozen USD baseline for brands scraped in their store's own USD (fetch_usd_brands).
+  // These rows compare live store-USD vs this baseline (USD-to-USD) instead of FX-ing
+  // the INR base_price. Seeded from the first USD scrape and kept until a human resets it.
+  'ALTER TABLE products ADD COLUMN IF NOT EXISTS base_usd DOUBLE PRECISION',
   'CREATE TABLE IF NOT EXISTS import_catalog (' +
     'key TEXT PRIMARY KEY, mbo_url TEXT, url TEXT, platform TEXT,' +
     'custom_regex TEXT, brand TEXT, base_price DOUBLE PRECISION, imported_at TEXT)',
@@ -162,7 +166,7 @@ export async function dbProducts(mode = "fresh", vendorList = null) {
     p.push(...vendorList);
   }
   const where = cl.length ? "WHERE " + cl.join(" AND ") : "";
-  return q(`SELECT key,mbo_url,url,platform,custom_regex,brand,base_price,state
+  return q(`SELECT key,mbo_url,url,platform,custom_regex,brand,base_price,base_usd,state
             FROM products ${where} ORDER BY id`, p);
 }
 export async function countProducts(vendorList = null) {
@@ -182,7 +186,7 @@ export async function importedProducts(mode = 'fresh', vendorList = null) {
   if (mode !== 'fresh') clauses.push(`COALESCE(p.state, 'pending') IN ('pending','error')`);
   const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
   return q(`SELECT c.key,c.mbo_url,c.url,c.platform,c.custom_regex,c.brand,c.base_price,
-      COALESCE(p.state,'pending') state
+      p.base_usd, COALESCE(p.state,'pending') state
     FROM import_catalog c LEFT JOIN products p ON p.key=c.key
     ${where} ORDER BY c.key`, params);
 }
@@ -208,9 +212,18 @@ export async function workRows(mode = "fresh", vendorList = null, source = 'data
 // found mismatch reaches Review. The product source is always the sheet/DB, so
 // this never invents junk. decision is reset to pending so a row that flips back
 // to mismatch reappears in Review even if it was decided in a previous cycle.
-export async function saveResult(prod, status, live, cur, state, runId) {
+export async function saveResult(prod, status, live, cur, state, runId, extra = {}) {
   const base = prod.base_price;
-  const delta = (live != null && base != null) ? (await toInr(live, cur)) - base : null;
+  // USD-fetch brands compare live store-USD against a frozen USD baseline (seeded on
+  // first sight, kept after). delta is then the USD change vs that baseline — NOT an
+  // FX'd INR gap. base_usd is written with COALESCE so it freezes on the first run and
+  // never clobbers an existing baseline; non-USD rows pass null and keep base_usd as-is.
+  const usdBaseline = extra.usdBaseline === true;
+  const baseUsd = usdBaseline ? (prod.base_usd != null ? prod.base_usd : live) : null;
+  const delta = usdBaseline
+    ? ((live != null && baseUsd != null) ? live - baseUsd : null)
+    : ((live != null && base != null) ? (await toInr(live, cur)) - base : null);
+  const baseUsdVal = usdBaseline ? live : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   // Persist the CANONICAL url only. The currency switcher param (?wmc-currency=USD)
   // is a fetch-time detail added by the engine — it must never leak into the stored
@@ -218,13 +231,14 @@ export async function saveResult(prod, status, live, cur, state, runId) {
   // defensively so a bad caller can't corrupt products.url again.
   const cleanUrl = canonicalUrl(prod.url);
   await q(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,
-      live_price,currency,status,state,delta,decision,decided_at,updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',NULL,$13)
+      live_price,currency,status,state,delta,decision,decided_at,updated_at,base_usd)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',NULL,$13,$14)
     ON CONFLICT(key) DO UPDATE SET url=excluded.url,live_price=excluded.live_price,currency=excluded.currency,
       status=excluded.status,state=excluded.state,delta=excluded.delta,
-      decision='pending',decided_at=NULL,updated_at=excluded.updated_at`,
+      decision='pending',decided_at=NULL,updated_at=excluded.updated_at,
+      base_usd=COALESCE(products.base_usd,excluded.base_usd)`,
     [prod.key, prod.mbo_url || "", cleanUrl, prod.platform, prod.custom_regex, prod.brand,
-      base, live, cur, status, state, delta, now]);
+      base, live, cur, status, state, delta, now, baseUsdVal]);
   await q(`INSERT INTO price_history(key,url,brand,base_price,live_price,delta,state,status,run_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
     [prod.key, cleanUrl, prod.brand, base, live, delta, state, status, runId]);
