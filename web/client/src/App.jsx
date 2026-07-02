@@ -392,7 +392,7 @@ function Pipeline({admin}) {
       <div className="card" style={{padding:14}}>
         <div className="lbl" style={{marginBottom:10}}>Engine Settings</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-          {[["Concurrency","concurrency"],["Timeout (ms)","timeout_ms"],["Batch Size","batch_size"],["Interval (s)","rest_between"]].map(([l,k])=>
+          {[["Concurrency","concurrency"],["Timeout (ms)","timeout_ms"],["Batch Size","batch_size"],["Interval (s)","rest_between"]],  ["Threads (1-4)","threads"].map(([l,k])=>
             <div key={k}>
               <div className="lbl" style={{marginBottom:4}}>{l}</div>
               <input type="number" className="inp mono" style={{width:"100%"}} value={cfg[k]} onChange={e=>setCfg({...cfg,[k]:+e.target.value})}/>

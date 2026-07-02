@@ -3,6 +3,11 @@ import { Fetcher, extractRow } from "./engine.js";
 import { toInr } from "./fx.js";
 import * as store from "./store.js";
 import { sendPipelineReport } from "./mailer.js";
+
+import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
 const engTol = store.matchTol;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -14,6 +19,7 @@ export function setDefault(key, val) { DEFAULTS[key] = val; }
 function newConfig() {
   return {
     concurrency: 8, timeout_ms: 12000, batch_size: 500, rest_between: 2,
+    threads:1
     simulation: false, fresh_start: true, retry_errors: false,
     safe_retry: true, safe_concurrency: 1, safe_cooldown_min: 4,
     safe_cooldown_max: 8, safe_rest_between: 30, safe_batch_size: 25,
@@ -126,23 +132,75 @@ async function processOne(eng, fetcher, prod, runId) {
   await store.saveResult(prod, status, live, cur, state, runId);
   return state;
 }
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const WORKER_PATH = path.resolve(__dirname, "./worker.js");
+
+// Split array into N chunks
+function chunkArray(arr, n) {
+  const size = Math.ceil(arr.length / n);
+  return Array.from({ length: n }, (_, i) => arr.slice(i * size, (i + 1) * size)).filter(c => c.length);
+}
+
+// Run a batch via worker threads (true multi-threading)
+function runWorker(rows, config, runId) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(WORKER_PATH, {
+      workerData: { rows, config, runId }
+    });
+    const results = [];
+    worker.on("message", (msg) => {
+      if (msg.type === "progress") results.push(msg.result);
+    });
+    worker.on("error", reject);
+    worker.on("exit", (code) => {
+      if (code !== 0) reject(new Error(`Worker exited with code ${code}`));
+      else resolve(results);
+    });
+  });
+}
+
 
 async function runPass(eng, rows, workers, fetcher, runId, onDone) {
   const cfg = eng.config, st = eng.state;
-  const safe = st.phase === 'safe_retry';
+  const safe = st.phase === "safe_retry";
   const batchSize = Math.max(1, Number(safe ? cfg.safe_batch_size : cfg.batch_size) || rows.length || 1);
   const restSeconds = Math.max(0, Number(safe ? cfg.safe_rest_between : cfg.rest_between) || 0);
+
+  // Use worker threads if more than 1 thread configured (new behaviour)
+  const numThreads = Math.min(4, Math.max(1, cfg.threads || 1)); // max 4 threads
+  const useThreads = numThreads > 1 && !cfg.simulation;
+
   for (let start = 0; start < rows.length && !st.abort; start += batchSize) {
-    const limit = pLimit(Math.max(1, workers));
     const batch = rows.slice(start, start + batchSize);
-    await Promise.all(batch.map((p) => limit(async () => {
-      if (st.abort) return;
-      const r = await processOne(eng, fetcher, p, runId);
-      onDone(r);
-    })));
+
+    if (useThreads) {
+      // Split batch across worker threads
+      const chunks = chunkArray(batch, numThreads);
+      const workerPromises = chunks.map(chunk => runWorker(chunk, cfg, runId));
+      const allResults = await Promise.all(workerPromises);
+      for (const results of allResults) {
+        for (const r of results) {
+          if (st.abort) break;
+          onDone(r.state);
+          log(eng, { t: new Date().toISOString().slice(11, 19),
+            row: r.tag, domain: r.brand, url: r.url,
+            currency: r.currency || "-", price: r.price || "-",
+            status: r.status, msg: r.msg || "" });
+        }
+      }
+    } else {
+      // Original pLimit path (single-threaded async, unchanged)
+      const limit = pLimit(Math.max(1, workers));
+      await Promise.all(batch.map((p) => limit(async () => {
+        if (st.abort) return;
+        const r = await processOne(eng, fetcher, p, runId);
+        onDone(r);
+      })));
+    }
+
     if (!st.abort && start + batchSize < rows.length && restSeconds > 0) {
-      const label = safe ? 'Safe-retry' : 'Main pass';
-      st.message = label + ' - resting ' + restSeconds + 's...';
+      const label = safe ? "Safe-retry" : "Main pass";
+      st.message = label + " - resting " + restSeconds + "s...";
       const until = Date.now() + restSeconds * 1000;
       while (!st.abort && Date.now() < until) {
         await sleep(Math.min(500, Math.max(0, until - Date.now())));
@@ -151,6 +209,8 @@ async function runPass(eng, rows, workers, fetcher, runId, onDone) {
     }
   }
 }
+
+File
 
 export async function startPipeline(eng, runId) {
   const cfg = eng.config, st = eng.state;
