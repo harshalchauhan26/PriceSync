@@ -19,7 +19,7 @@ export function setDefault(key, val) { DEFAULTS[key] = val; }
 function newConfig() {
   return {
     concurrency: 8, timeout_ms: 12000, batch_size: 500, rest_between: 2,
-    threads:1
+    threads:1,
     simulation: false, fresh_start: true, retry_errors: false,
     safe_retry: true, safe_concurrency: 1, safe_cooldown_min: 4,
     safe_cooldown_max: 8, safe_rest_between: 30, safe_batch_size: 25,
