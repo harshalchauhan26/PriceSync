@@ -1,4 +1,3 @@
-// Shopify price push (port of push_price_to_shopify / verify_shopify).
 import axios from "axios";
 import { decrypt } from "./crypto.js";
 import { getStoreIntegration } from "./store.js";
@@ -27,21 +26,13 @@ async function cfg() {
   return { ...c, access_token: decrypt(c.access_token) };
 }
 
-// Serialize ALL Shopify pushes process-wide: never send the next price-update
-// request until the previous one has fully COMPLETED (its update + verification
-// returned). Completion-gated, not time-based — no fixed delay, so we go as fast
-// as the store confirms, yet a burst can never overlap and 429 Shopify (the
-// earlier failure mode seen as "Shopify API error: 429"). Every caller shares one
-// queue: per-row approve, approve-all, push-all, and concurrent admins.
 let _pushChain = Promise.resolve();
 function enqueuePush(task) {
-  const run = _pushChain.then(task, task);    // start only after the prior settles
-  _pushChain = run.then(() => {}, () => {});  // keep the chain alive on success OR failure
+  const run = _pushChain.then(task, task);
+  _pushChain = run.then(() => {}, () => {});
   return run;
 }
 
-// Public entry point: queue the push so it runs strictly AFTER the previous push
-// has finished (and we have its confirmation). Returns the same result object.
 export function pushPrice(url, price) {
   return enqueuePush(() => _pushPrice(url, price));
 }

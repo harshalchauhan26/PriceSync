@@ -1,4 +1,3 @@
-// Supabase Postgres pool (same tables as the Python app).
 import pg from "pg";
 import { config } from "./config.js";
 
@@ -9,7 +8,6 @@ export const pool = new pg.Pool({
   connectionTimeoutMillis: 15000,
 });
 
-// query(text, params) -> rows
 export async function q(text, params = []) {
   const res = await pool.query(text, params);
   return res.rows;

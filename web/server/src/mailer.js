@@ -1,6 +1,3 @@
-// Email the mismatch report (port of the smtplib flow -> nodemailer).
-// The attached workbook carries ONE worksheet per brand (plus a Summary tab and,
-// when relevant, a Price Alerts tab) so each brand's mismatches are separated.
 import nodemailer from "nodemailer";
 import ExcelJS from "exceljs";
 import { q } from "./db.js";
@@ -9,9 +6,6 @@ import { config } from "./config.js";
 const COLS = ["brand", "url", "base_price", "live_price", "currency", "status", "state",
   "delta", "decision", "final_price"];
 
-// Pull every pending mismatch, optionally narrowed to a set of brands. Ordered by
-// brand then by largest absolute delta so each brand's sheet leads with its
-// biggest gaps.
 async function mismatchRows(brands) {
   let where = "state='mismatch'"; const p = [];
   if (brands && brands.length) {
@@ -23,8 +17,6 @@ async function mismatchRows(brands) {
     ORDER BY brand, ABS(COALESCE(delta,0)) DESC`, p);
 }
 
-// Latest-vs-previous price moves >= threshold% (mirrors /api/alerts), for the
-// optional alerts tab in the auto report.
 async function alertRows(threshold = 5) {
   try {
     return await q(`SELECT brand,url,prev,live_price,
@@ -39,7 +31,6 @@ async function alertRows(threshold = 5) {
   } catch { return []; }
 }
 
-// Excel sheet names: <=31 chars, none of \ / ? * [ ] :, must be unique & non-blank.
 function safeSheetName(name, used) {
   let base = String(name || "").replace(/[\\/?*[\]:]/g, " ").trim().slice(0, 31) || "brand";
   let n = base, i = 2;
@@ -66,13 +57,10 @@ function addDataRows(ws, rows) {
   });
 }
 
-// Build a workbook with a Summary tab, one tab per brand, and (optionally) an
-// alerts tab. `rows` are mismatch products; `alerts` are price-move rows.
 function buildWorkbook(rows, alerts) {
   const wb = new ExcelJS.Workbook();
   const used = new Set();
 
-  // Group mismatches by brand, preserving the brand-sorted order from the query.
   const byBrand = new Map();
   for (const r of rows) {
     const b = (r.brand || "(no brand)").replace(/^www\./, "");
@@ -80,7 +68,6 @@ function buildWorkbook(rows, alerts) {
     byBrand.get(b).push(r);
   }
 
-  // Summary tab.
   const summary = wb.addWorksheet(safeSheetName("Summary", used));
   summary.addRow(["brand", "mismatches"]);
   styleHeader(summary);
@@ -90,7 +77,6 @@ function buildWorkbook(rows, alerts) {
   summary.addRow([]);
   summary.addRow(["TOTAL", rows.length]);
 
-  // One tab per brand.
   for (const [b, list] of byBrand) {
     const ws = wb.addWorksheet(safeSheetName(b, used));
     ws.addRow(COLS);
@@ -98,7 +84,6 @@ function buildWorkbook(rows, alerts) {
     addDataRows(ws, list);
   }
 
-  // Alerts tab (only when there are alert rows).
   if (alerts && alerts.length) {
     const ws = wb.addWorksheet(safeSheetName("Price Alerts", used));
     ws.addRow(["brand", "url", "prev_price", "live_price", "pct_change"]);
@@ -118,8 +103,6 @@ function recipient(to) {
   return (to || config.smtp.to || "").trim();
 }
 
-// Manual "Email sheet" button. `brands` (optional) scopes the report to the
-// selected brands; omitted/empty means every mismatch.
 export async function sendMismatchReport(to, brands) {
   const { user, pass, from } = config.smtp;
   to = recipient(to);
@@ -139,9 +122,6 @@ export async function sendMismatchReport(to, brands) {
   return { ok: true, count: rows.length, to };
 }
 
-// Auto-report fired when a pipeline run terminates. Sends ONLY when there is
-// something to report — pending mismatches and/or price alerts. Returns a status
-// object; never throws (the caller is a background pipeline).
 export async function sendPipelineReport({ to, threshold = 5 } = {}) {
   const { user, pass, from } = config.smtp;
   to = recipient(to);

@@ -32,10 +32,9 @@ run **one** instance (pipeline state, rate limits, and the live log are in memor
 
 ## Deploy
 
-1. Data + region migration: see [MIGRATE-REGION.md](MIGRATE-REGION.md).
-2. Build command: `cd web/client && npm ci && npm run build && cd ../server && npm ci`
-3. Start command: `cd web/server && npm start`
-4. Health check path: `/api/health` (returns `{ ok: true }`).
+1. Build command: `cd web/client && npm ci && npm run build && cd ../server && npm ci`
+2. Start command: `cd web/server && npm start`
+3. Health check path: `/api/health` (returns `{ ok: true }`).
 
 ## Post-deploy verification
 

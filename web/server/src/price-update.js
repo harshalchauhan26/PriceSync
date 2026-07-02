@@ -1,5 +1,3 @@
-// Resolves the product URL used for Shopify writes.
-// The preference is persisted in Supabase meta and applies to every push path.
 import { getMeta, setMeta } from './store.js';
 import { pushPrice } from './shopify.js';
 

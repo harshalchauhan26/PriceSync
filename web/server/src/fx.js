@@ -1,12 +1,9 @@
-// Live USD/CAD -> INR conversion (port of fx.py).
 import axios from "axios";
 
 const TTL = 6 * 3600 * 1000;
 let cache = { at: 0, rates: {} };
 const FALLBACK = { INR: 1, USD: 83, CAD: 61, EUR: 90, GBP: 105, AUD: 55, AED: 22.6 };
 
-// Manual rate overrides (e.g. USD/CAD set from the Review page). When present they
-// take precedence over the live feed everywhere (rateOf / toInr / snapshot).
 let overrides = {};
 export function setOverrides(o = {}) {
   const next = {};

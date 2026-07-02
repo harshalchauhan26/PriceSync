@@ -1,9 +1,3 @@
-// Pipeline runner (port of saas.py _pipeline): concurrency, safe-retry, live log.
-// Per-user engines: each logged-in admin gets their OWN { config, state, log,
-// logmeta } context so multiple admins can run the scraper at the same time and
-// see only their own progress + console. All results still write to the SHARED
-// products / price_history tables via store.saveResult — the database is shared,
-// only the run is private.
 import pLimit from "p-limit";
 import { Fetcher, extractRow } from "./engine.js";
 import { toInr } from "./fx.js";
@@ -14,7 +8,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const LOG_MAX = 5000;
 
-// Defaults new engines start from. data_source is seeded at boot from meta.
 const DEFAULTS = { data_source: 'database' };
 export function setDefault(key, val) { DEFAULTS[key] = val; }
 
@@ -39,7 +32,6 @@ function newEngine() {
   return { config: newConfig(), state: newState(), log: [], logmeta: { offset: 0 } };
 }
 
-// uid -> engine context. Bounded by the (small) number of admin accounts.
 const ENGINES = new Map();
 export function getEngine(uid) {
   const k = String(uid);
@@ -67,11 +59,7 @@ async function processOne(eng, fetcher, prod, runId) {
   const url = (prod.url || "").trim();
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
-  // Brands configured for USD fetch (meta 'fetch_usd_brands') are scraped through
-  // the store's currency switcher so we record the designer's USD price.
   const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
-  // Brands configured for high-price capture (meta 'range_high_brands') record the
-  // full set price from a variable product's lowPrice/highPrice range.
   const preferHigh = eng.rangeHighBrands ? eng.rangeHighBrands.has(normBrand(brand)) : false;
   let live, currency;
   if (cfg.simulation) {
@@ -110,11 +98,6 @@ async function processOne(eng, fetcher, prod, runId) {
     await store.saveResult(prod, "Fetch Error", live, cur, "error", runId);
     return "error";
   }
-  // USD-fetch brands: compare the store's own USD price against a frozen USD baseline
-  // (USD-to-USD). No FX round-trip — this is the designer's real international price,
-  // so an INR-converted comparison would flag every row as a mismatch. The baseline is
-  // seeded on the first observation; after that a mismatch means the store's USD price
-  // actually changed vs the recorded baseline.
   if (fetchCur === "USD" && cur === "USD") {
     const baseUsd = prod.base_usd;
     let state, status, msg;
@@ -174,7 +157,6 @@ export async function startPipeline(eng, runId) {
   const mode = cfg.fresh_start ? "fresh" : "update";
   const vendors = (cfg.vendors && cfg.vendors.length) ? cfg.vendors : null;
   try {
-    // Snapshot the USD-fetch + range-high brand sets once per run (cheap, cached in store).
     eng.usdFetchBrands = await store.usdFetchBrandSet();
     eng.rangeHighBrands = await store.rangeHighBrandSet();
     const source = cfg.data_source === 'imported' ? 'imported' : 'database';
@@ -212,9 +194,6 @@ export async function startPipeline(eng, runId) {
   } finally {
     st.running = false;
   }
-  // Pipeline has terminated — email a per-brand report if anything needs review
-  // (pending mismatches and/or price alerts). Fire-and-forget: the mailer decides
-  // whether there's anything to send and never throws. Skipped on a user abort.
   if (!st.abort) {
     sendPipelineReport()
       .then((r) => {

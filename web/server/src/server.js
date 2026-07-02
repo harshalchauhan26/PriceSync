@@ -1,4 +1,3 @@
-// MBO Tracker — Express server (Supabase-backed). Mirrors the Flask API surface.
 import express from "express";
 import compression from "compression";
 import session from "express-session";
@@ -28,9 +27,7 @@ const pendingUploads = new Map();
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
-app.use(compression());                 // gzip responses (bundle ~393KB -> ~128KB)
-// Baseline security headers (no extra dependency). Same-origin SPA, so a strict
-// frame policy and nosniff are safe and block clickjacking / MIME sniffing.
+app.use(compression());
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
@@ -39,10 +36,6 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: "2mb" }));
-// Sessions live in Postgres (not in-memory) so concurrent users stay logged in
-// across server restarts/redeploys and across multiple cloud instances. The
-// session table is auto-created on boot. Secure cookies only on cloud (HTTPS);
-// `trust proxy` above lets express-session honor Render's X-Forwarded-Proto.
 app.use(session({
   store: new (connectPgSimple(session))({ pool, createTableIfMissing: true }),
   secret: config.secret, resave: false, saveUninitialized: false,
@@ -72,7 +65,6 @@ app.post("/api/register", wrap(async (req, res) => {
 }));
 app.get("/api/health", (req, res) => { const active = pipe.runningCount(); res.json({ ok: true, running: active > 0, active_runs: active }); });
 
-// gate everything else
 app.use("/api", sec.guard);
 
 app.get("/api/me", (req, res) => res.json(sec.currentUser(req) || {}));
@@ -80,8 +72,6 @@ app.get("/api/logout", (req, res) => { sec.logoutUser(req); res.json({ ok: true 
 
 // ---------- meta / fx / insights ----------
 app.get("/api/meta", wrap(async (req, res) => {
-  // Fire all five independent reads in parallel — one network round-trip instead
-  // of five serial ones (matters most when the DB is in a far region).
   const [counts, alerts, imported_count, last_import, last_import_rows] = await Promise.all([
     store.counts(), store.alertCount(5), store.countImported(),
     store.getMeta("last_import"), store.getMeta("last_import_rows"),
@@ -93,7 +83,6 @@ async function fxState() {
     markup: Number(await store.getMeta("default_markup", 0)) || 0 };
 }
 app.get("/api/fx", wrap(async (req, res) => res.json(await fxState())));
-// Set manual USD/CAD rates and the global default markup (admin only via guard).
 app.post("/api/fx/override", wrap(async (req, res) => {
   const norm = (v) => {
     const n = v === "" || v == null ? null : Number(v);
@@ -111,12 +100,9 @@ app.get("/api/vendors", wrap(async (req, res) => res.json({
 })));
 
 app.get("/api/insights", wrap(async (req, res) => {
-  // Optional ?brand= filters every KPI/chart to one brand.
   const brand = (req.query.brand || "").trim();
-  const bw = brand ? "AND brand=$1" : "";        // appended to queries that already have a WHERE
+  const bw = brand ? "AND brand=$1" : "";
   const bp = brand ? [brand] : [];
-  // All six reads are independent — run them concurrently so the Insights page
-  // costs one round-trip's worth of latency instead of six stacked serially.
   const [c, topMis, topProd, agg, vendRow, av] = await Promise.all([
     store.counts(brand),
     q(`SELECT brand, COUNT(*) c FROM products WHERE state='mismatch' AND brand<>'' ${bw} GROUP BY brand ORDER BY c DESC LIMIT 10`, bp),
@@ -137,8 +123,7 @@ app.get("/api/insights", wrap(async (req, res) => {
     approved_value: Number(av.v), approved_count: Number(av.c), fx: await snapshot() });
 }));
 
-// ---------- pipeline (per-user: each admin drives their OWN engine) ----------
-// Cap simultaneous runs to protect the host; overridable via env.
+// ---------- pipeline (per-user engine) ----------
 const MAX_CONCURRENT_RUNS = parseInt(process.env.MAX_CONCURRENT_RUNS || "3", 10);
 app.post("/api/pipe/config", wrap(async (req, res) => {
   const eng = pipe.getEngine(req.session.uid);
@@ -147,14 +132,9 @@ app.post("/api/pipe/config", wrap(async (req, res) => {
     return res.status(400).json({ ok: false, error: 'invalid pipeline data source' });
   }
   Object.assign(eng.config, next);
-  // Persist data_source as the default seed for future engines (shared default).
   if (next.data_source) await store.setMeta('pipeline_data_source', next.data_source);
   res.json({ ok: true, config: eng.config });
 }));
-// Set the currency CODE on products without changing the scraped price number.
-// delta/state/status are recomputed from the existing live_price using the new
-// currency's FX rate so the comparison stays consistent. Error rows (no price)
-// are left untouched. Scope: all products, or brand IN vendors.
 app.post("/api/products/set_currency", wrap(async (req, res) => {
   const cur = String(req.body.currency || "").trim().toUpperCase();
   if (!["INR", "USD", "CAD"].includes(cur)) return res.status(400).json({ ok: false, error: "currency must be INR, USD or CAD" });
@@ -197,7 +177,6 @@ app.post("/api/pipe/start", wrap(async (req, res) => {
   Object.assign(eng.state, { running: true, abort: false, phase: "main", completed: 0, matched: 0,
     mismatch: 0, errors: 0, retry_total: 0, retry_completed: 0, retry_recovered: 0, started_at: Date.now() });
   eng.log.length = 0; eng.logmeta.offset = 0;
-  // Unique per concurrent run so two admins don't collide in price_history.run_id.
   const runId = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 13) + "-" + req.session.uid;
   pipe.startPipeline(eng, runId);
   res.json({ ok: true });
@@ -244,7 +223,6 @@ app.post("/api/import", upload.single("file"), wrap(async (req, res) => {
   }
   catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 }));
-// Promote staged sheet products into the fixed products DB (add-only).
 app.post("/api/import/commit", wrap(async (req, res) => {
   const r = await store.commitImportToProducts();
   res.json({ ok: true, ...r, counts: await store.counts() });
@@ -258,7 +236,6 @@ app.get("/api/review/items", wrap(async (req, res) => {
 app.get("/api/review/brands", wrap(async (req, res) => res.json({ brands: (await store.vendors(req.query.kind)).map((v) => ({ brand: v.vendor, count: v.count })) })));
 
 async function approveOne(client, prow, body) {
-  // markup is now a flat AMOUNT in the chosen target currency (USD/CAD), not a percent.
   const markup = body.markup_pct === "" || body.markup_pct == null ? 0 : Number(body.markup_pct);
   const custom = body.custom_price === "" || body.custom_price == null ? null : Number(body.custom_price);
   const amount = body.price_amount === "" || body.price_amount == null ? null : Number(body.price_amount);
@@ -267,25 +244,15 @@ async function approveOne(client, prow, body) {
   const amountRate = ["INR", "UNKNOWN", ""].includes(amountCurrency) ? 1 : (fx[amountCurrency] || 1);
   const hasAmount = amount != null && Number.isFinite(amount) && amount > 0;
   const ref = hasAmount ? `amount:${amountCurrency}` : (body.ref || "live");
-  // The price pushed to Shopify is ALWAYS in the brand's store currency — USD by
-  // default, CAD for brands configured in meta 'push_cad_brands'. The Review
-  // display toggle does NOT affect what is sent. Everything is computed in INR
-  // first, then divided by the push-currency rate (INR per 1 unit of that currency).
-  const targetCur = await store.pushCurrencyFor(prow.brand);   // "USD" | "CAD"
+  const targetCur = await store.pushCurrencyFor(prow.brand);
   const targetRate = fx[targetCur] || 1;
   const convert = true;
   const liveInr = await toInr(prow.live_price, prow.currency);
   const finalRaw = hasAmount
-    ? Math.round((amount * amountRate / targetRate) * 100) / 100   // amount -> INR -> target
+    ? Math.round((amount * amountRate / targetRate) * 100) / 100
     : store.computeFinal(prow.base_price, liveInr, ref, markup, custom, convert, targetRate);
-  // Round to a clean price ending (units 0-2 -> 0, 3-5 -> 5, 6-9 -> next 10) before archiving/pushing.
   const final = store.roundFinal(finalRaw);
   const archived = await store.archiveApproved(client, prow, final, markup, ref, body.note || "", body._by);
-  // The approved live price (raw INR, before markup/conversion) becomes this
-  // product's new baseline. Persist it in BOTH products and the staged sheet
-  // (import_catalog) so a later sync won't overwrite it back. The product stays in
-  // the catalog and now reads as matched; it leaves Review because decision is now
-  // 'approved' (set by archiveApproved). The approval is also kept in review_history.
   if (liveInr != null && Number.isFinite(liveInr) && liveInr > 0) {
     await client.query(`UPDATE products SET base_price=$1, state='matched',
       status='Price Matched (INR)', delta=0 WHERE id=$2`, [liveInr, prow.id]);
@@ -319,8 +286,6 @@ app.post("/api/review/decide", wrap(async (req, res) => {
     res.json({ ok: true });
   }
 }));
-// Delete a product from the DB permanently (the ✗ button in Review). Removes it
-// from both products and the staged sheet so a later sync won't re-add it.
 app.post("/api/review/delete", wrap(async (req, res) => {
   const it = await one("SELECT key FROM products WHERE id=$1", [req.body.row]);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
@@ -345,19 +310,11 @@ app.post("/api/review/approve_all", wrap(async (req, res) => {
     }
     await client.query("COMMIT");
   } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
-  // Push in the background through the serial queue (shopify.js) — one at a time,
-  // each waiting for the prior to confirm — so a large batch neither hangs this
-  // response nor 429s Shopify. Each push writes its status to review_history/
-  // products; the UI reflects it on refresh.
   (async () => { for (const item of archived) {
     try { await pushApprovedToStore(item); } catch (e) { console.error("[MBO] approve_all push:", e.message); }
   } })();
   res.json({ ok: true, approved: n, queued: archived.length });
 }));
-// Reject ALL rows in the current Review view: mark them decided=rejected so they
-// leave the review queue. The product rows stay in products + the staged sheet
-// (the catalog is NOT touched). Same filter as the visible list (state + brands +
-// pending). Nothing is pushed to Shopify.
 app.post("/api/review/reject_all", wrap(async (req, res) => {
   const kind = req.body.kind || "mismatch";
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
@@ -379,10 +336,6 @@ app.post("/api/history/push", wrap(async (req, res) => {
   res.json({ ok: r.ok, status: r.status });
 }));
 app.post("/api/history/push_all", wrap(async (req, res) => {
-  // Retry everything not yet SUCCESSFULLY pushed: rows with no status AND rows that
-  // errored (e.g. the 429s). Successful rows ('updated%' / 'DRY RUN%') are skipped.
-  // Background loop feeding the serial queue (one at a time) so it can't 429 again
-  // or hang HTTP.
   const rows = await q(`SELECT * FROM review_history
     WHERE shopify_status IS NULL OR NOT (shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')
     ORDER BY approved_at LIMIT 1000`);
@@ -460,13 +413,8 @@ app.post("/api/integration/save", wrap(async (req, res) => {
 }));
 app.post("/api/integration/verify", wrap(async (req, res) => res.json(await verifyStore())));
 app.get("/api/integrations", wrap(async (req, res) => res.json({ brands: await store.integrationBrands() })));
-// Push currency config: default is USD; brands listed here push CAD instead.
-// GET returns the current CAD brand list; POST {brands:[...] | "a.com,b.com"} replaces it (admin).
 app.get("/api/push/cad", wrap(async (req, res) => res.json({ default: "USD", cad_brands: [...(await store.cadBrandSet())] })));
 app.post("/api/push/cad", wrap(async (req, res) => res.json({ ok: true, cad_brands: await store.setCadBrands(req.body.brands ?? req.body.list ?? "") })));
-// Fetch-currency config: brands listed here are scraped through their store's
-// currency switcher (?wmc-currency=USD) so we record the designer's USD price.
-// GET returns the current list; POST {brands:[...] | "a.com,b.com"} replaces it.
 app.get("/api/fetch/usd", wrap(async (req, res) => res.json({ default: "native", usd_brands: [...(await store.usdFetchBrandSet())] })));
 app.post("/api/fetch/usd", wrap(async (req, res) => res.json({ ok: true, usd_brands: await store.setUsdFetchBrands(req.body.brands ?? req.body.list ?? "") })));
 app.post("/api/shopify/update_price", wrap(async (req, res) => {
@@ -496,8 +444,6 @@ async function sendXlsx(res, name, rows) {
 app.get("/api/export", wrap(async (req, res) => {
   const kind = req.query.kind || "all";
   let where = { all: "1=1", mismatch: "state='mismatch'", error: "state='error'", approved: "decision='approved'" }[kind] || "1=1";
-  // Optional brand scope (the Review "Export" button passes the selected brands so
-  // the sheet covers only those brands, not the whole catalog).
   const brands = (req.query.brands || "").split(",").map((b) => b.trim()).filter(Boolean);
   const params = [];
   if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 1}`).join(",")})`; params.push(...brands); }
@@ -507,8 +453,6 @@ app.get("/api/export", wrap(async (req, res) => {
   await sendXlsx(res, `mbo_${kind}${suffix}`, rows);
 }));
 
-
-
 app.post("/api/db/empty", sec.ownerOnly, wrap(async (req, res) => {
   const tables = ["price_history", "review_history", "import_catalog", "products"];
   let removed = 0;
@@ -516,12 +460,9 @@ app.post("/api/db/empty", sec.ownerOnly, wrap(async (req, res) => {
     const r = await q(`DELETE FROM ${t}`);
     removed += (r.rowCount || 0);
   }
-  // Also reset meta keys that track import state
   await q("DELETE FROM meta WHERE k IN ('last_import','last_import_rows','last_import_contains','last_import_domains')");
   res.json({ ok: true, removed, tables });
 }));
-
-
 
 // ---------- owner console ----------
 app.get("/api/admin/sessions", sec.ownerOnly, (req, res) => res.json({ sessions: sec.activeSessions() }));
@@ -530,20 +471,18 @@ app.post("/api/admin/users/role", sec.ownerOnly, wrap(async (req, res) => {
   const role = String(req.body.role || "");
   if (!sec.ROLES.has(role)) return res.status(400).json({ ok: false, error: "invalid role" });
   await sec.setRole(req.body.email, role);
-  sec.clearRoleCache();                       // apply the new role on the user's next request
+  sec.clearRoleCache();
   res.json({ ok: true });
 }));
 app.post("/api/admin/users/delete", sec.ownerOnly, wrap(async (req, res) => {
   if (req.body.email === sec.currentUser(req)?.email) return res.status(400).json({ ok: false, error: "can't delete yourself" });
   await sec.deleteUser(req.body.email);
-  sec.clearRoleCache();                        // revoke the deleted user's access immediately
+  sec.clearRoleCache();
   res.json({ ok: true });
 }));
 
 // ---------- client (SPA) ----------
 if (fs.existsSync(CLIENT_DIST)) {
-  // Hashed assets (index-*.js/css) are immutable -> cache hard. index.html is
-  // never cached so a new deploy is picked up immediately (no stale UI).
   app.use(express.static(CLIENT_DIST, {
     index: false, maxAge: "1y", immutable: true,
     setHeaders: (res, p) => {
@@ -557,7 +496,7 @@ if (fs.existsSync(CLIENT_DIST)) {
 } else {
   app.get("/", (req, res) => res.type("html").send(
     "<h2 style='font-family:sans-serif'>MBO Tracker API (Node) is running.</h2>" +
-    "<p>Client build not found — run the Vite client build (Phase 4).</p>"));
+    "<p>Client build not found — run the Vite client build.</p>"));
 }
 
 // ---------- boot ----------
@@ -579,9 +518,6 @@ server.on('error', (error) => {
   process.exit(1);
 });
 
-// Graceful shutdown: Render sends SIGTERM on every redeploy. Stop accepting new
-// connections, drain the PG pool, then exit — so in-flight requests finish and we
-// don't leak DB connections. Hard cap at 10s so a stuck request can't hang the deploy.
 let shuttingDown = false;
 function shutdown(signal) {
   if (shuttingDown) return; shuttingDown = true;
@@ -591,8 +527,5 @@ function shutdown(signal) {
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-// Never let a stray async error take down the single process. Route handlers are
-// already wrapped (wrap()) and the pipeline has its own try/catch; this is a last
-// resort so a background rejection is logged, not fatal.
 process.on("unhandledRejection", (reason) => console.error("[MBO] unhandledRejection:", reason));
 process.on("uncaughtException", (err) => console.error("[MBO] uncaughtException:", err));

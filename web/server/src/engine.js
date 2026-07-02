@@ -1,5 +1,3 @@
-// Price scraping engine — faithful port of price_tracker.py.
-// Pure-regex extraction (no DOM lib), per-domain pacing, retries, Shopify .js.
 import axios from "axios";
 import http from "node:http";
 import https from "node:https";
@@ -20,7 +18,6 @@ const USER_AGENTS = [
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (a, b) => a + Math.random() * (b - a);
 
-// keep-alive agents (connection pooling)
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 24 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 24 });
 
@@ -73,7 +70,6 @@ export class Fetcher {
           validateStatus: () => true,
         });
       } catch (err) {
-        // connection/timeout: retry a couple of times then surface
         if (attempt >= this.maxRetries) throw err;
         await sleep((2 ** attempt) * 1000 + rand(300, 1200));
         continue;
@@ -100,7 +96,7 @@ export function sanitizePrice(raw) {
   let text = String(raw);
   text = text.replace(/\b(USD|CAD|INR|Rs\.?|MRP)\b/gi, "");
   text = text.replace(/₹/g, "").replace(/C\$/g, "").replace(/\$/g, "");
-  text = text.replace(/[,  ' ]/g, "");
+  text = text.replace(/[,  ' ]/g, "");
   const m = text.match(/\d+(?:\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
 }
@@ -117,8 +113,6 @@ export function detectCurrency(text) {
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   m = text.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Z]{3})["']/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
-  // Shopify storefronts expose the shop's ACTIVE currency authoritatively:
-  //   Shopify.currency = {"active":"CAD","rate":"1.0"}
   m = text.match(/Shopify\.currency\s*=\s*\{[^}]*?["']active["']\s*:\s*["']([A-Z]{3})["']/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   if (text.includes("₹") || /\bRs\.?\s*\d/i.test(text)) return "INR";
@@ -132,13 +126,9 @@ export function extractPriceFromHtml(html, customRegex = null, preferHigh = fals
     try {
       const m = html.match(new RegExp(customRegex, "s"));
       if (m) return sanitizePrice(m[1] !== undefined ? m[1] : m[0]);
-    } catch { /* bad regex */ }
+    } catch {}
     return null;
   }
-  // Some brands publish sets/variable products as a price RANGE (AggregateOffer:
-  // lowPrice/highPrice). By default we take the low (see below), but brands flagged
-  // for high-price capture record the FULL set price — match highPrice first, then
-  // fall through to the normal single-"price" path for non-range products.
   if (preferHigh) {
     const h = html.match(/"highPrice"\s*:\s*"?([0-9][0-9,.]*)"?/);
     if (h) return sanitizePrice(h[1]);
@@ -165,11 +155,7 @@ function shopifyJsUrl(url) {
 
 const DOMAIN_CURRENCY = new Map();
 
-// Shopify .js prices are integer cents (e.g. 4950000 -> 49500.00). We record the
-// ORIGINAL price: when the product is on sale, variants[0].compare_at_price is the
-// struck-through "was" price and that's what we want. When there is no sale,
-// compare_at_price is null/0, so we fall back to variants[0].price (the selling
-// price). Rule: compare_at_price > 0 ? compare_at_price : price.
+// ---- platform extractors ----
 export async function extractShopify(fetcher, url) {
   const domain = new URL(url).host;
   try {
@@ -179,7 +165,7 @@ export async function extractShopify(fetcher, url) {
     const v0 = variants[0];
     let raw;
     if (v0) {
-      const cmp = v0.compare_at_price;          // original "was" price (cents), or null/0 when not on sale
+      const cmp = v0.compare_at_price;
       raw = (cmp != null && Number(cmp) > 0) ? cmp : v0.price;
     } else {
       raw = data.price;
@@ -187,19 +173,15 @@ export async function extractShopify(fetcher, url) {
     let price;
     if (typeof raw === "number" && Number.isInteger(raw)) price = raw / 100;
     else price = descaleIfCents(sanitizePrice(raw));
-    // Shopify .js carries NO currency, and guessing from the product JSON text
-    // risks a false "$"->USD on a CAD/INR store. Resolve the shop's authoritative
-    // currency from the storefront HTML (Shopify.currency.active / og:price:currency)
-    // once per domain and cache it.
     let currency = DOMAIN_CURRENCY.get(domain) || null;
     if (price != null && !currency) {
-      try { currency = detectCurrency((await fetcher.get(url)).data); } catch { /* ignore */ }
+      try { currency = detectCurrency((await fetcher.get(url)).data); } catch {}
     }
     if (price != null) {
       if (currency) DOMAIN_CURRENCY.set(domain, currency);
       return [price, currency];
     }
-  } catch { /* blocked / non-JSON / 404 -> HTML fallback */ }
+  } catch {}
   let html;
   try { html = (await fetcher.get(url)).data; }
   catch (e) {
@@ -223,18 +205,12 @@ export async function extractCustom(fetcher, url, customRegex, preferHigh = fals
   return [extractPriceFromHtml(html, customRegex, preferHigh), detectCurrency(html)];
 }
 
-// Append a currency-switcher query param (e.g. ?wmc-currency=USD for the WMC /
-// "Multi Currency for WooCommerce" plugin) so the store serves that currency's
-// prices. Preserves any existing query string.
 export function withCurrencyParam(url, param, currency) {
   if (!currency || !param) return url;
   try { const u = new URL(url); u.searchParams.set(param, currency); return u.toString(); }
   catch { return url; }
 }
 
-// opts.fetchCurrency: when set (e.g. "USD"), fetch the store in that currency via
-// opts.currencyParam (default "wmc-currency"). If the page doesn't expose a
-// currency of its own, we trust the requested one (the switcher served those prices).
 export async function extractRow(fetcher, url, platform, customRegex, opts = {}) {
   const p = (platform || "").trim().toLowerCase();
   const u = opts.fetchCurrency

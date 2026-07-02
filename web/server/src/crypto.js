@@ -1,4 +1,3 @@
-// Token encryption at rest (AES-256-GCM, key derived from SECRET_KEY).
 import crypto from "node:crypto";
 import { config } from "./config.js";
 

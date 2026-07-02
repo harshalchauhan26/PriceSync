@@ -1,14 +1,11 @@
-// Data + business helpers over Supabase (mirrors store.py / saas.py logic).
 import * as XLSX from "xlsx";
 import { q, one, pool } from "./db.js";
 import { toInr } from "./fx.js";
 
 const REQUIRED = ["MBO Product URL", "Designer Product URL", "Platform Type",
   "Custom Regex", "Studio East Price"];
-const STORE_KEY = '__store__';   // single global Shopify integration
+const STORE_KEY = '__store__';
 
-// Strip currency-switcher fetch params (e.g. wmc-currency) so the stored url stays
-// canonical. Leaves other params (e.g. ?variant=) intact.
 export function canonicalUrl(url) {
   const s = String(url || "").trim();
   if (!s) return s;
@@ -33,9 +30,6 @@ const SCHEMA = [
     'rerun_at TEXT, updated_at TEXT)',
   'CREATE INDEX IF NOT EXISTS ix_products_state ON products(state)',
   'CREATE INDEX IF NOT EXISTS ix_products_brand ON products(brand)',
-  // Frozen USD baseline for brands scraped in their store's own USD (fetch_usd_brands).
-  // These rows compare live store-USD vs this baseline (USD-to-USD) instead of FX-ing
-  // the INR base_price. Seeded from the first USD scrape and kept until a human resets it.
   'ALTER TABLE products ADD COLUMN IF NOT EXISTS base_usd DOUBLE PRECISION',
   'CREATE TABLE IF NOT EXISTS import_catalog (' +
     'key TEXT PRIMARY KEY, mbo_url TEXT, url TEXT, platform TEXT,' +
@@ -121,9 +115,6 @@ export async function counts(brand) {
   const o = {}; for (const k of Object.keys(r)) o[k] = num(r[k]); return o;
 }
 
-// The badge count runs a window function over all of price_history, so it is
-// cached briefly — every connected client polls /api/meta and we don't want each
-// poll to re-run this heavy query against Supabase.
 let _alertCache = { at: 0, threshold: null, value: 0 };
 export async function alertCount(threshold = 5) {
   const now = Date.now();
@@ -207,17 +198,8 @@ export async function workRows(mode = "fresh", vendorList = null, source = 'data
 }
 
 // ---- pipeline result write (+ history snapshot) ----
-// Scrape results are UPSERTED into products so the rows being scraped (from the
-// sheet or the DB) always carry their live price + state — that's how a freshly
-// found mismatch reaches Review. The product source is always the sheet/DB, so
-// this never invents junk. decision is reset to pending so a row that flips back
-// to mismatch reappears in Review even if it was decided in a previous cycle.
 export async function saveResult(prod, status, live, cur, state, runId, extra = {}) {
   const base = prod.base_price;
-  // USD-fetch brands compare live store-USD against a frozen USD baseline (seeded on
-  // first sight, kept after). delta is then the USD change vs that baseline — NOT an
-  // FX'd INR gap. base_usd is written with COALESCE so it freezes on the first run and
-  // never clobbers an existing baseline; non-USD rows pass null and keep base_usd as-is.
   const usdBaseline = extra.usdBaseline === true;
   const baseUsd = usdBaseline ? (prod.base_usd != null ? prod.base_usd : live) : null;
   const delta = usdBaseline
@@ -225,10 +207,6 @@ export async function saveResult(prod, status, live, cur, state, runId, extra = 
     : ((live != null && base != null) ? (await toInr(live, cur)) - base : null);
   const baseUsdVal = usdBaseline ? live : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  // Persist the CANONICAL url only. The currency switcher param (?wmc-currency=USD)
-  // is a fetch-time detail added by the engine — it must never leak into the stored
-  // url, which is the row's identity and the Shopify handle source. This strips it
-  // defensively so a bad caller can't corrupt products.url again.
   const cleanUrl = canonicalUrl(prod.url);
   await q(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,
       live_price,currency,status,state,delta,decision,decided_at,updated_at,base_usd)
@@ -257,9 +235,6 @@ export async function reviewItems(kind, brands) {
   return { items, counts: await counts() };
 }
 
-// baseInr / liveInr are already in INR. `rate` is INR-per-1-unit of the target
-// currency (USD/CAD), so to express the price in that currency we DIVIDE. `markup`
-// is a flat amount in the target currency (not a percentage) added after conversion.
 export function computeFinal(baseInr, liveInr, ref, markup, custom, convert, rate) {
   if (custom != null && Number(custom) > 0) return Math.round(Number(custom) * 100) / 100;
   let reference = ref === "base" ? baseInr : liveInr;
@@ -269,11 +244,6 @@ export function computeFinal(baseInr, liveInr, ref, markup, custom, convert, rat
   return Math.round((converted + Number(markup || 0)) * 100) / 100;
 }
 
-// Round a final price to a "clean" ending based on its units digit:
-//   0,1,2 -> round DOWN to the ...0   (1121,1122 -> 1120)
-//   3,4,5 -> ...5                      (1123,1124,1125 -> 1125)
-//   6,7,8,9 -> round UP to next ...0   (1126..1129 -> 1130)
-// Applied to the approved/pushed final price in Review.
 export function roundFinal(n) {
   const v = Number(n);
   if (n == null || !Number.isFinite(v)) return n;
@@ -284,9 +254,6 @@ export function roundFinal(n) {
 }
 
 // ---- push currency per brand ----
-// The price pushed to Shopify is ALWAYS in the brand's store currency: USD by
-// default, CAD for brands listed in meta 'push_cad_brands' (comma-separated
-// domains, host without www). The list is editable at runtime; cached briefly.
 let _cadCache = { at: 0, set: null };
 const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
 export async function cadBrandSet() {
@@ -301,7 +268,7 @@ export async function setCadBrands(list) {
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
   await setMeta("push_cad_brands", uniq.join(","));
-  _cadCache = { at: 0, set: null };          // invalidate cache
+  _cadCache = { at: 0, set: null };
   return uniq;
 }
 export async function pushCurrencyFor(brand) {
@@ -309,13 +276,6 @@ export async function pushCurrencyFor(brand) {
 }
 
 // ---- per-brand FETCH currency ----
-// Most designer stores serve their native currency (INR) and we scrape that. A few
-// WooCommerce stores (e.g. saakshakinni.com) run the "Multi Currency for
-// WooCommerce" (WMC) switcher and expose the designer's international USD price via
-// the ?wmc-currency=USD URL param. Brands listed in meta 'fetch_usd_brands'
-// (comma-separated domains, host without www) are scraped with that param so we
-// record the store's real USD price — which is what gets pushed to a USD storefront
-// on approval, instead of a generic FX conversion of the INR price.
 let _usdFetchCache = { at: 0, set: null };
 export async function usdFetchBrandSet() {
   if (_usdFetchCache.set && Date.now() - _usdFetchCache.at < 30_000) return _usdFetchCache.set;
@@ -329,21 +289,14 @@ export async function setUsdFetchBrands(list) {
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
   await setMeta("fetch_usd_brands", uniq.join(","));
-  _usdFetchCache = { at: 0, set: null };       // invalidate cache
+  _usdFetchCache = { at: 0, set: null };
   return uniq;
 }
-// Returns the currency to FETCH for this brand ("USD") or null for native scrape.
 export async function fetchCurrencyFor(brand) {
   return (await usdFetchBrandSet()).has(normBrand(brand)) ? "USD" : null;
 }
 
 // ---- per-brand RANGE price preference ----
-// Most stores expose a single product price. A few (e.g. saakshakinni.com) sell
-// multi-piece SETS as a variable product whose JSON-LD is an AggregateOffer with a
-// lowPrice/highPrice RANGE. Our default extractor takes the low (cheapest piece);
-// brands listed in meta 'range_high_brands' record the highPrice (the full set)
-// instead. Single-price products on the same brand are unaffected (they have no
-// highPrice, so the extractor falls through to the normal single-"price" path).
 let _rangeHighCache = { at: 0, set: null };
 export async function rangeHighBrandSet() {
   if (_rangeHighCache.set && Date.now() - _rangeHighCache.at < 30_000) return _rangeHighCache.set;
@@ -357,10 +310,11 @@ export async function setRangeHighBrands(list) {
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
   await setMeta("range_high_brands", uniq.join(","));
-  _rangeHighCache = { at: 0, set: null };       // invalidate cache
+  _rangeHighCache = { at: 0, set: null };
   return uniq;
 }
 
+// ---- approval archive ----
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
 export async function archiveApproved(client, prow, final, markup, ref, note, by) {
@@ -377,9 +331,6 @@ export async function archiveApproved(client, prow, final, markup, ref, note, by
 }
 
 // ---- history ----
-// A push counts as SUCCESS only when Shopify confirmed the update (or dry-run).
-// Anything else with a status (e.g. "Shopify API error: 429", "PARTIAL/FAILED")
-// is a FAILURE worth retrying; a NULL status means it was never pushed.
 const PUSH_SUCCESS = "(shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')";
 export async function historyList(brand, status) {
   const cl = []; const p = [];
@@ -389,7 +340,6 @@ export async function historyList(brand, status) {
   else if (status === "not_pushed") cl.push("shopify_status IS NULL");
   const where = cl.length ? "WHERE " + cl.join(" AND ") : "";
   const rows = await q(`SELECT * FROM review_history ${where} ORDER BY approved_at DESC LIMIT 2000`, p);
-  // Summary stats are over the whole archive (not the filtered view).
   const s = await one(`SELECT COUNT(*) c, COALESCE(SUM(final_price),0) v,
     COUNT(*) FILTER (WHERE ${PUSH_SUCCESS}) pushed,
     COUNT(*) FILTER (WHERE shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}) failed,
@@ -398,7 +348,6 @@ export async function historyList(brand, status) {
     pushed: num(s.pushed), failed: num(s.failed), not_pushed: num(s.not_pushed) };
 }
 
-// Empty the review/approval archive (the "review DB"). Products are NOT touched.
 export async function clearHistory() {
   const n = num((await one("SELECT COUNT(*) c FROM review_history")).c);
   await q("DELETE FROM review_history");
@@ -470,9 +419,6 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
   let n = 0, removed = 0;
   try {
     await client.query("BEGIN");
-    // Sheet upload only stages into import_catalog. Products enter the fixed
-    // catalog later, on demand, via commitImportToProducts(). `replace` clears
-    // the staging view only — the products table is never deleted here.
     if (replace) {
       const r = await client.query("DELETE FROM import_catalog");
       removed = r.rowCount;
@@ -506,13 +452,6 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
   return { rows: n, removed, at: now };
 }
 
-// Mirror the staged sheet (import_catalog) into the products table so the DB
-// holds EXACTLY the MBO Shopify products from the scraped xlsx:
-//   - add sheet products that are new
-//   - refresh catalog fields on ones that remain (live_price/state/decision kept)
-//   - drop products no longer present in the sheet
-// review_history is a separate archive and is never touched here. If the sheet is
-// empty we do nothing (so an accidental empty import can't wipe the catalog).
 export async function commitImportToProducts() {
   const staged = num((await one("SELECT COUNT(*) c FROM import_catalog")).c);
   if (!staged) return { added: 0, removed: 0, staged: 0, total: num((await one("SELECT COUNT(*) c FROM products")).c), skipped: true };
