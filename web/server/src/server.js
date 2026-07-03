@@ -274,9 +274,13 @@ app.post("/api/review/decide", wrap(async (req, res) => {
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
   const by = sec.currentUser(req)?.email;
   if (req.body.decision === "approved") {
-    const client = await (await import("./db.js")).pool.connect();
+    const client = await pool.connect();
     let approved;
-    try { approved = await approveOne(client, it, { ...req.body, _by: by }); }
+    try {
+      await client.query("BEGIN");
+      approved = await approveOne(client, it, { ...req.body, _by: by });
+      await client.query("COMMIT");
+    } catch (e) { await client.query("ROLLBACK"); throw e; }
     finally { client.release(); }
     const shopify = await pushApprovedToStore(approved.archived);
     res.json({ ok: true, final_price: approved.final, push_currency: approved.pushCur, archived: true, shopify });
@@ -301,7 +305,7 @@ app.post("/api/review/approve_all", wrap(async (req, res) => {
   if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands); }
   const rows = await q(`SELECT * FROM products WHERE ${where}`, p);
   const by = sec.currentUser(req)?.email;
-  const { pool } = await import("./db.js"); const client = await pool.connect();
+  const client = await pool.connect();
   let n = 0; const archived = [];
   try { await client.query("BEGIN");
     for (const r of rows) {

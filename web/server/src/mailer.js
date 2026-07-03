@@ -96,7 +96,7 @@ function buildWorkbook(rows, alerts) {
 
 function transport() {
   const { host, port, user, pass } = config.smtp;
-  return nodemailer.createTransport({ host, port, secure: false, auth: { user, pass } });
+  return nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass } });
 }
 
 function recipient(to) {

@@ -264,7 +264,7 @@ function Home({go, admin}) {
 ═══════════════════════════════════════════════════════════════ */
 function Pipeline({admin}) {
   const [st,setSt]=useState({entries:[],matched:0,mismatch:0,errors:0,total_rows:0,current_row:0,elapsed:0,message:"Idle.",running:false,phase:"idle",log_total:0});
-  const [cfg,setCfg]=useState({concurrency:8,timeout_ms:12000,batch_size:250,rest_between:2,safe_retry:true,simulation:false,data_source:"database"});
+  const [cfg,setCfg]=useState({concurrency:16,timeout_ms:12000,batch_size:250,rest_between:2,threads:4,safe_retry:true,simulation:false,data_source:"database"});
   const [vendors,setVendors]=useState([]); const [vsel,setVsel]=useState([]); const [cat,setCat]=useState({total:0}); const [curSel,setCurSel]=useState("INR");
   const cursor=useRef(0), logRef=useRef(null);
 
@@ -392,7 +392,7 @@ function Pipeline({admin}) {
       <div className="card" style={{padding:14}}>
         <div className="lbl" style={{marginBottom:10}}>Engine Settings</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-          {[["Concurrency","concurrency"],["Timeout (ms)","timeout_ms"],["Batch Size","batch_size"],["Interval (s)","rest_between"]],  ["Threads (1-4)","threads"].map(([l,k])=>
+          {[["Concurrency","concurrency"],["Timeout (ms)","timeout_ms"],["Batch Size","batch_size"],["Interval (s)","rest_between"],["Threads (1-4)","threads"]].map(([l,k])=>
             <div key={k}>
               <div className="lbl" style={{marginBottom:4}}>{l}</div>
               <input type="number" className="inp mono" style={{width:"100%"}} value={cfg[k]} onChange={e=>setCfg({...cfg,[k]:+e.target.value})}/>

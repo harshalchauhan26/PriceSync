@@ -18,8 +18,8 @@ export function setDefault(key, val) { DEFAULTS[key] = val; }
 
 function newConfig() {
   return {
-    concurrency: 8, timeout_ms: 12000, batch_size: 500, rest_between: 2,
-    threads:1,
+    concurrency: 16, timeout_ms: 12000, batch_size: 500, rest_between: 2,
+    threads: 4, cooldown_min: 0.4, cooldown_max: 1.2,
     simulation: false, fresh_start: true, retry_errors: false,
     safe_retry: true, safe_concurrency: 1, safe_cooldown_min: 4,
     safe_cooldown_max: 8, safe_rest_between: 30, safe_batch_size: 25,
@@ -60,41 +60,15 @@ function log(eng, e) {
 
 const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
 
-async function processOne(eng, fetcher, prod, runId) {
-  const cfg = eng.config;
+// Compare a fetched price against the baseline, persist and log it.
+// Shared by the inline path and the worker-thread path (workers only fetch).
+async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   const url = (prod.url || "").trim();
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
   const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
-  const preferHigh = eng.rangeHighBrands ? eng.rangeHighBrands.has(normBrand(brand)) : false;
-  let live, currency;
-  if (cfg.simulation) {
-    await sleep(30 + Math.random() * 90);
-    const roll = Math.random();
-    if (roll < 0.05 || base == null) {
-      log(eng, { row: tag, domain: brand, url, currency: '-', price: '-',
-        status: 'Fetch Error', msg: 'simulated failure' });
-      await store.saveResult(prod, 'Fetch Error', null, null, 'error', runId);
-      return 'error';
-    }
-    live = roll > 0.12 ? base :
-      Math.round(base * (Math.random() > 0.5 ? 1.1 : 0.9) * 100) / 100;
-    currency = brand?.endsWith('.in') ? 'INR' : 'USD';
-    const liveInr = await toInr(live, currency);
-    const state = Math.abs(liveInr - base) <= engTol(base, currency) ? 'matched' : 'mismatch';
-    const status = state === 'matched' ? 'Price Matched (simulation)' : 'Price Mismatch! (simulation)';
-    log(eng, { row: tag, domain: brand, url, currency, price: liveInr.toFixed(2),
-      status: state === 'matched' ? 'Price Matched' : 'Price Mismatch!', msg: 'simulation' });
-    await store.saveResult(prod, status, live, currency, state, runId);
-    return state;
-  }
-  try {
-    [live, currency] = await extractRow(fetcher, url, (prod.platform || "").trim(),
-      prod.custom_regex || null,
-      (fetchCur || preferHigh) ? { fetchCurrency: fetchCur || undefined, preferHighPrice: preferHigh } : undefined);
-    if (live == null) throw new Error("price not found");
-  } catch (e) {
-    log(eng, { row: tag, domain: brand, url, currency: "-", price: "-", status: "Fetch Error", msg: e.message });
+  if (errMsg != null || live == null) {
+    log(eng, { row: tag, domain: brand, url, currency: "-", price: "-", status: "Fetch Error", msg: errMsg || "price not found" });
     await store.saveResult(prod, "Fetch Error", null, null, "error", runId);
     return "error";
   }
@@ -132,29 +106,92 @@ async function processOne(eng, fetcher, prod, runId) {
   await store.saveResult(prod, status, live, cur, state, runId);
   return state;
 }
+
+async function processOne(eng, fetcher, prod, runId) {
+  const cfg = eng.config;
+  const url = (prod.url || "").trim();
+  const base = prod.base_price, brand = prod.brand;
+  const tag = prod.key || url;
+  const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
+  const preferHigh = eng.rangeHighBrands ? eng.rangeHighBrands.has(normBrand(brand)) : false;
+  let live, currency;
+  if (cfg.simulation) {
+    await sleep(30 + Math.random() * 90);
+    const roll = Math.random();
+    if (roll < 0.05 || base == null) {
+      log(eng, { row: tag, domain: brand, url, currency: '-', price: '-',
+        status: 'Fetch Error', msg: 'simulated failure' });
+      await store.saveResult(prod, 'Fetch Error', null, null, 'error', runId);
+      return 'error';
+    }
+    live = roll > 0.12 ? base :
+      Math.round(base * (Math.random() > 0.5 ? 1.1 : 0.9) * 100) / 100;
+    currency = brand?.endsWith('.in') ? 'INR' : 'USD';
+    const liveInr = await toInr(live, currency);
+    const state = Math.abs(liveInr - base) <= engTol(base, currency) ? 'matched' : 'mismatch';
+    const status = state === 'matched' ? 'Price Matched (simulation)' : 'Price Mismatch! (simulation)';
+    log(eng, { row: tag, domain: brand, url, currency, price: liveInr.toFixed(2),
+      status: state === 'matched' ? 'Price Matched' : 'Price Mismatch!', msg: 'simulation' });
+    await store.saveResult(prod, status, live, currency, state, runId);
+    return state;
+  }
+  let errMsg = null;
+  live = null; currency = null;
+  try {
+    [live, currency] = await extractRow(fetcher, url, (prod.platform || "").trim(),
+      prod.custom_regex || null,
+      (fetchCur || preferHigh) ? { fetchCurrency: fetchCur || undefined, preferHighPrice: preferHigh } : undefined);
+  } catch (e) { errMsg = e.message; }
+  return finalizeOne(eng, prod, live, currency, errMsg, runId);
+}
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.resolve(__dirname, "./worker.js");
 
-// Split array into N chunks
+// Deal rows round-robin across N chunks so products from one hot domain are
+// spread over every worker — each worker paces domains independently, so a
+// single-store run gets N× the per-domain throughput of contiguous chunks.
 function chunkArray(arr, n) {
-  const size = Math.ceil(arr.length / n);
-  return Array.from({ length: n }, (_, i) => arr.slice(i * size, (i + 1) * size)).filter(c => c.length);
+  const chunks = Array.from({ length: n }, () => []);
+  arr.forEach((item, i) => chunks[i % n].push(item));
+  return chunks.filter((c) => c.length);
 }
 
-// Run a batch via worker threads (true multi-threading)
-function runWorker(rows, config, runId) {
+// Run one chunk in a worker thread. The worker only fetches; each result is
+// finalized (compared/saved/logged) here on the main thread as it streams in.
+function runWorker(eng, rows, fetchOpts, runId, onDone) {
+  const st = eng.state;
   return new Promise((resolve, reject) => {
     const worker = new Worker(WORKER_PATH, {
-      workerData: { rows, config, runId }
+      workerData: {
+        rows, fetch: fetchOpts,
+        usdFetch: [...(eng.usdFetchBrands || [])],
+        rangeHigh: [...(eng.rangeHighBrands || [])],
+      },
     });
-    const results = [];
+    let chain = Promise.resolve();
+    let chainError = null;
+    let abortSent = false;
+    const abortWatch = setInterval(() => {
+      if (st.abort && !abortSent) {
+        abortSent = true;
+        try { worker.postMessage({ type: "abort" }); } catch {}
+      }
+    }, 300);
     worker.on("message", (msg) => {
-      if (msg.type === "progress") results.push(msg.result);
+      if (!msg || msg.type !== "result") return;
+      chain = chain.then(async () => {
+        const state = await finalizeOne(eng, msg.prod, msg.live, msg.currency, msg.error ?? null, runId);
+        onDone(state);
+      }).catch((e) => { chainError = chainError || e; });
     });
-    worker.on("error", reject);
+    worker.on("error", (e) => { chainError = chainError || e; });
     worker.on("exit", (code) => {
-      if (code !== 0) reject(new Error(`Worker exited with code ${code}`));
-      else resolve(results);
+      clearInterval(abortWatch);
+      chain.then(() => {
+        if (chainError) return reject(chainError);
+        if (code !== 0 && !st.abort) return reject(new Error(`worker exited with code ${code}`));
+        resolve();
+      });
     });
   });
 }
@@ -166,28 +203,23 @@ async function runPass(eng, rows, workers, fetcher, runId, onDone) {
   const batchSize = Math.max(1, Number(safe ? cfg.safe_batch_size : cfg.batch_size) || rows.length || 1);
   const restSeconds = Math.max(0, Number(safe ? cfg.safe_rest_between : cfg.rest_between) || 0);
 
-  // Use worker threads if more than 1 thread configured (new behaviour)
+  // Use worker threads if more than 1 thread configured (new behaviour).
+  // Safe-retry stays on the inline path so its gentle pacing is preserved.
   const numThreads = Math.min(4, Math.max(1, cfg.threads || 1)); // max 4 threads
-  const useThreads = numThreads > 1 && !cfg.simulation;
+  const useThreads = numThreads > 1 && !cfg.simulation && !safe;
 
   for (let start = 0; start < rows.length && !st.abort; start += batchSize) {
     const batch = rows.slice(start, start + batchSize);
 
     if (useThreads) {
-      // Split batch across worker threads
+      // Split batch across worker threads; each worker gets its share of the
+      // concurrency budget and the current fetcher's timeout/cooldown profile.
       const chunks = chunkArray(batch, numThreads);
-      const workerPromises = chunks.map(chunk => runWorker(chunk, cfg, runId));
-      const allResults = await Promise.all(workerPromises);
-      for (const results of allResults) {
-        for (const r of results) {
-          if (st.abort) break;
-          onDone(r.state);
-          log(eng, { t: new Date().toISOString().slice(11, 19),
-            row: r.tag, domain: r.brand, url: r.url,
-            currency: r.currency || "-", price: r.price || "-",
-            status: r.status, msg: r.msg || "" });
-        }
-      }
+      const fetchOpts = {
+        timeout: fetcher.timeout, cooldown: fetcher.cooldown,
+        concurrency: Math.max(1, Math.ceil(workers / chunks.length)),
+      };
+      await Promise.all(chunks.map((chunk) => runWorker(eng, chunk, fetchOpts, runId, onDone)));
     } else {
       // Original pLimit path (single-threaded async, unchanged)
       const limit = pLimit(Math.max(1, workers));
@@ -210,8 +242,6 @@ async function runPass(eng, rows, workers, fetcher, runId, onDone) {
   }
 }
 
-File
-
 export async function startPipeline(eng, runId) {
   const cfg = eng.config, st = eng.state;
   const mode = cfg.fresh_start ? "fresh" : "update";
@@ -226,7 +256,10 @@ export async function startPipeline(eng, runId) {
       : await store.countProducts(vendors);
     Object.assign(st, { total_rows: total, pre_done: Math.max(0, total - rows.length),
       phase: "main", message: `Main pass — ${rows.length} product(s) from ${source}` });
-    const fetcher = new Fetcher({ timeout: cfg.timeout_ms });
+    const sec = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n * 1000 : d; };
+    const cdMin = sec(cfg.cooldown_min, 400);
+    const cdMax = Math.max(cdMin, sec(cfg.cooldown_max, 1200));
+    const fetcher = new Fetcher({ timeout: cfg.timeout_ms, cooldown: [cdMin, cdMax] });
     await runPass(eng, rows, Math.min(25, Math.max(1, cfg.concurrency)), fetcher, runId, (r) => {
       st.completed++; st[r === "matched" ? "matched" : r === "mismatch" ? "mismatch" : "errors"]++;
     });
