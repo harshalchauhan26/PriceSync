@@ -169,7 +169,7 @@ function shopifyNum(raw) {
   return descaleIfCents(sanitizePrice(raw));
 }
 
-export async function extractShopify(fetcher, url) {
+export async function extractShopify(fetcher, url, preferHigh = false) {
   const domain = new URL(url).host;
   try {
     const resp = await fetcher.get(shopifyJsUrl(url));
@@ -179,8 +179,12 @@ export async function extractShopify(fetcher, url) {
     // Main (pre-sale) price = max(compare_at, price) on the first variant:
     // on-sale stores put the original in compare_at (price holds the sale),
     // and some stores carry junk compare_at BELOW price, which max() ignores.
+    // Range-high brands track the top variant (e.g. "with pants" sets), so
+    // include the product-level maxima for them.
     const src = v0 || data;
-    const price = Math.max(shopifyNum(src.compare_at_price) || 0, shopifyNum(src.price) || 0) || null;
+    const cands = [src.compare_at_price, src.price];
+    if (preferHigh) cands.push(data.compare_at_price_max, data.price_max);
+    const price = Math.max(...cands.map((x) => shopifyNum(x) || 0)) || null;
     let currency = DOMAIN_CURRENCY.get(domain) || null;
     if (price != null && !currency) {
       try { currency = detectCurrency((await fetcher.get(url)).data); } catch {}
@@ -197,7 +201,7 @@ export async function extractShopify(fetcher, url) {
     if (code === 404) throw new Error("product unavailable (removed / 404)");
     throw new Error(`store returned HTTP ${code}`);
   }
-  let price = descaleIfCents(extractPriceFromHtml(html));
+  let price = descaleIfCents(extractPriceFromHtml(html, null, preferHigh));
   // HTML meta/JSON-LD advertise the SALE price; the theme's embedded product
   // JSON carries the original. First occurrence belongs to the main product.
   const cm = html.match(/"compare_at_price"\s*:\s*"?(\d+(?:\.\d+)?)"?/);
@@ -233,7 +237,7 @@ export async function extractRow(fetcher, url, platform, customRegex, opts = {})
     : url;
   const hi = opts.preferHighPrice === true;
   let res;
-  if (p === "shopify") res = await extractShopify(fetcher, u);
+  if (p === "shopify") res = await extractShopify(fetcher, u, hi);
   else if (customRegex) res = await extractCustom(fetcher, u, customRegex, hi); // regex wins for wordpress/custom/unknown
   else res = await extractWordpress(fetcher, u, hi);
   if (opts.fetchCurrency && res && res[1] == null) res = [res[0], opts.fetchCurrency];
