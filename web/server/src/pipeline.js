@@ -112,7 +112,11 @@ async function processOne(eng, fetcher, prod, runId) {
   const url = (prod.url || "").trim();
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
-  const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
+  const platformKind = (prod.platform || "").trim().toLowerCase();
+  // Pin non-USD wordpress/custom fetches to INR so geo-detecting currency
+  // plugins (wmc) can't serve foreign prices when the server runs abroad.
+  const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD"
+    : (platformKind !== "shopify" ? "INR" : null);
   const preferHigh = eng.rangeHighBrands ? eng.rangeHighBrands.has(normBrand(brand)) : false;
   let live, currency;
   if (cfg.simulation) {

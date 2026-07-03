@@ -23,7 +23,9 @@ const limit = pLimit(Math.max(1, fopts.concurrency || 1));
 await Promise.all(rows.map((prod) => limit(async () => {
   if (aborted) return;
   const brand = normBrand(prod.brand);
-  const fetchCur = usdSet.has(brand) ? "USD" : null;
+  const platformKind = (prod.platform || "").trim().toLowerCase();
+  // Same INR pin as pipeline.js processOne — keep the two in sync.
+  const fetchCur = usdSet.has(brand) ? "USD" : (platformKind !== "shopify" ? "INR" : null);
   const preferHigh = rangeSet.has(brand);
   try {
     const [live, currency] = await extractRow(

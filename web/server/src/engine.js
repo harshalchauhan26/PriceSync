@@ -163,6 +163,12 @@ function shopifyJsUrl(url) {
 const DOMAIN_CURRENCY = new Map();
 
 // ---- platform extractors ----
+function shopifyNum(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "number" && Number.isInteger(raw)) return raw / 100;
+  return descaleIfCents(sanitizePrice(raw));
+}
+
 export async function extractShopify(fetcher, url) {
   const domain = new URL(url).host;
   try {
@@ -170,16 +176,11 @@ export async function extractShopify(fetcher, url) {
     const data = JSON.parse(resp.data);
     const variants = data.variants || [];
     const v0 = variants[0];
-    let raw;
-    if (v0) {
-      const cmp = v0.compare_at_price;
-      raw = (cmp != null && Number(cmp) > 0) ? cmp : v0.price;
-    } else {
-      raw = data.price;
-    }
-    let price;
-    if (typeof raw === "number" && Number.isInteger(raw)) price = raw / 100;
-    else price = descaleIfCents(sanitizePrice(raw));
+    // Main (pre-sale) price = max(compare_at, price) on the first variant:
+    // on-sale stores put the original in compare_at (price holds the sale),
+    // and some stores carry junk compare_at BELOW price, which max() ignores.
+    const src = v0 || data;
+    const price = Math.max(shopifyNum(src.compare_at_price) || 0, shopifyNum(src.price) || 0) || null;
     let currency = DOMAIN_CURRENCY.get(domain) || null;
     if (price != null && !currency) {
       try { currency = detectCurrency((await fetcher.get(url)).data); } catch {}
@@ -196,7 +197,14 @@ export async function extractShopify(fetcher, url) {
     if (code === 404) throw new Error("product unavailable (removed / 404)");
     throw new Error(`store returned HTTP ${code}`);
   }
-  const price = descaleIfCents(extractPriceFromHtml(html));
+  let price = descaleIfCents(extractPriceFromHtml(html));
+  // HTML meta/JSON-LD advertise the SALE price; the theme's embedded product
+  // JSON carries the original. First occurrence belongs to the main product.
+  const cm = html.match(/"compare_at_price"\s*:\s*"?(\d+(?:\.\d+)?)"?/);
+  if (cm && price != null) {
+    const cmp = descaleIfCents(parseFloat(cm[1]));
+    if (cmp > price && cmp < price * 5) price = cmp;
+  }
   const currency = detectCurrency(html) || DOMAIN_CURRENCY.get(domain) || null;
   if (price != null && currency) DOMAIN_CURRENCY.set(domain, currency);
   return [price, currency];
