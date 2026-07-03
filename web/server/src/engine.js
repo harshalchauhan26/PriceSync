@@ -129,9 +129,14 @@ export function extractPriceFromHtml(html, customRegex = null, preferHigh = fals
     if (h) return sanitizePrice(h[1]);
   }
   if (customRegex) {
+    // No generic fallback on regex miss: removed/redirected product pages must
+    // surface as "price not found", never as a random price from the page.
     try {
       const m = html.match(new RegExp(customRegex, "s"));
-      if (m) return sanitizePrice(m[1] !== undefined ? m[1] : m[0]);
+      if (m) {
+        const g = m.slice(1).find((x) => x !== undefined); // first group that matched (supports alternation)
+        return sanitizePrice(g !== undefined ? g : m[0]);
+      }
     } catch {}
     return null;
   }
@@ -204,9 +209,7 @@ export async function extractWordpress(fetcher, url, preferHigh = false) {
 
 export async function extractCustom(fetcher, url, customRegex, preferHigh = false) {
   const html = (await fetcher.get(url)).data;
-  const price = extractPriceFromHtml(html, customRegex, preferHigh)
-    ?? extractPriceFromHtml(html, null, preferHigh); // fall back to generic selectors
-  return [price, detectCurrency(html)];
+  return [extractPriceFromHtml(html, customRegex, preferHigh), detectCurrency(html)];
 }
 
 export function withCurrencyParam(url, param, currency) {

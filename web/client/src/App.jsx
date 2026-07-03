@@ -171,7 +171,25 @@ function PageBar({title, subtitle, admin, vendor, onVendor, onClear, extraLeft, 
 ═══════════════════════════════════════════════════════════════ */
 function Auth({onIn}) {
   const [mode,setMode]=useState("login"); const [email,setE]=useState(""); const [pw,setPw]=useState(""); const [err,setErr]=useState(""); const [busy,setBusy]=useState(false);
+  const gRef=useRef(null); const [gReady,setGReady]=useState(false);
   const submit=async(e)=>{ e.preventDefault(); setBusy(true); setErr(""); const d=await aj(mode==="login"?"/api/login":"/api/register",{email,password:pw}); setBusy(false); if(d.ok) onIn(d); else setErr(d.error||"Failed"); };
+  useEffect(()=>{
+    let dead=false;
+    api("/api/auth/google/config").then(cfg=>{
+      if(dead||!cfg.client_id) return;
+      const init=()=>{ if(dead||!gRef.current) return;
+        window.google.accounts.id.initialize({client_id:cfg.client_id,callback:async(resp)=>{
+          const d=await aj("/api/auth/google",{credential:resp.credential});
+          d.ok?onIn(d):setErr(d.error||"Google sign-in failed");
+        }});
+        window.google.accounts.id.renderButton(gRef.current,{theme:"outline",size:"large",width:286});
+        setGReady(true);
+      };
+      if(window.google?.accounts?.id) init();
+      else{ const s=document.createElement("script"); s.src="https://accounts.google.com/gsi/client"; s.async=true; s.onload=init; document.head.appendChild(s); }
+    });
+    return()=>{dead=true;};
+  },[]);
   return <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)"}}>
     <form onSubmit={submit} className="card" style={{width:360,padding:36}}>
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
@@ -188,6 +206,12 @@ function Auth({onIn}) {
       <button disabled={busy} style={{width:"100%",marginTop:20,padding:"11px 0",borderRadius:8,background:"#3b82f6",color:"#fff",fontWeight:700,fontSize:14,border:"none",cursor:"pointer"}}>
         {busy?"…":(mode==="login"?"Sign in":"Create account")}
       </button>
+      <div style={{marginTop:14}}>
+        {gReady&&<div style={{display:"flex",alignItems:"center",gap:8,color:"var(--on3)",fontSize:11,marginBottom:10}}>
+          <div style={{flex:1,height:1,background:"var(--border)"}}/>or<div style={{flex:1,height:1,background:"var(--border)"}}/>
+        </div>}
+        <div ref={gRef} style={{display:"flex",justifyContent:"center"}}/>
+      </div>
       <div style={{marginTop:10,fontSize:12,color:"#ef4444",minHeight:16}}>{err}</div>
       <div style={{fontSize:12,color:"var(--on3)"}}>
         {mode==="login"
@@ -474,7 +498,7 @@ function Pipeline({admin}) {
           <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(34,197,94,.12)",color:"var(--green)",fontWeight:700}}>WebSocket Active</span>
         </div>
         <div style={{display:"flex",gap:6}}>
-          <button className="btn btn-ghost btn-sm" onClick={()=>window.location="/api/export?kind=all"} title="Export"><Icon n="dl" s={12}/></button>
+          <button className="btn btn-ghost btn-sm" onClick={()=>{const bq=vsel.length?`&brands=${encodeURIComponent(vsel.join(","))}`:""; window.location=`/api/export?kind=all${bq}`;}} title={vsel.length?`Export ${vsel.length} selected brand(s)`:"Export all brands"}><Icon n="dl" s={12}/>{vsel.length?` ${vsel.length}`:""}</button>
           <button className="btn btn-ghost btn-sm" onClick={clearLog} title="Clear"><Icon n="trash" s={12}/></button>
         </div>
       </div>
@@ -522,6 +546,11 @@ function Review({admin}) {
   const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,cad,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");setCad(r.overrides.CAD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
   const decide=async(it,decision)=>{ setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision,markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.ok?toast(decision==="approved"?`Approved ${fmt(r.final_price)} ${r.push_currency||""}`:".Rejected",r.shopify&&!r.shopify.ok?"err":"ok"):toast(r.error,"err"); load(); };
   const del=async(it)=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Remove ${trunc(it.url,56)}?`)) return; setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/delete",{row:it.id}); r.ok?toast("Removed","ok"):toast(r.error||"Failed","err"); load(); };
+  const setBase=async(it)=>{ if(!admin) return toast("Admin only","err"); if(it.live_price==null) return toast("No live price on this row","err");
+    if(!confirm(`Set base price = ${fmt(it.live_price)} ${it._cur}${it._cur==="INR"?"":" (converted to ₹)"} and clear live price?`)) return;
+    setItems(xs=>xs.filter(x=>x.id!==it.id));
+    const r=await aj("/api/review/update_base",{row:it.id,currency:it._cur});
+    r.ok?toast(`Base updated to ₹${fmt(r.base_price)} — live cleared`,"ok"):toast(r.error||"Failed","err"); load(); };
   const approveSel=async()=>{ if(!sel.size) return toast("Select rows first","err"); let pushed=0,failed=0; for(const id of sel){ const it=items.find(x=>x.id===id); const r=await aj("/api/review/decide",{row:id,decision:"approved",markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.shopify?.ok?pushed++:failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed?`, ${failed} failed`:""}`,failed?"err":"ok"); load(); };
   const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); r.ok?toast(`Approved ${r.approved}`,"ok"):toast(r.error,"err"); load(); };
   const rejectAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Reject ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/reject_all",{kind:tab,brands:bList}); r.ok?toast(`Rejected ${r.rejected}`,"ok"):toast(r.error||"Failed","err"); load(); };
@@ -594,6 +623,7 @@ function Review({admin}) {
             <td className="mono" style={{textAlign:"right",color:"var(--green)"}}>{fmt(previewFinal(it))}</td>
             <td><div style={{display:"flex",gap:6}}>{it.decision==="approved"?<span style={{color:"var(--green)"}}>✓</span>:<>
               <button title="Approve" onClick={()=>decide(it,"approved")} style={{color:"var(--green)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="check" s={15}/></button>
+              <button title={`Update base price: live ${fmt(it.live_price)} ${it._cur} becomes the new base (uses the Cur column), live is cleared`} onClick={()=>setBase(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="up" s={15}/></button>
               <button title="Delete" onClick={()=>del(it)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="x" s={15}/></button>
             </>}</div></td>
           </tr>;})}

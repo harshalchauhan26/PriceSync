@@ -6,16 +6,18 @@ import { config } from "./config.js";
 const COLS = ["brand", "url", "base_price", "live_price", "currency", "status", "state",
   "delta", "decision", "final_price"];
 
-async function mismatchRows(brands) {
-  let where = "state='mismatch'"; const p = [];
+async function stateRows(states, brands) {
+  const p = [...states];
+  let where = `state IN (${states.map((_, i) => `$${i + 1}`).join(",")})`;
   if (brands && brands.length) {
-    where += ` AND brand IN (${brands.map((_, i) => `$${i + 1}`).join(",")})`;
+    where += ` AND brand IN (${brands.map((_, i) => `$${i + 1 + states.length}`).join(",")})`;
     p.push(...brands);
   }
   return q(`SELECT brand,url,base_price,live_price,currency,status,state,delta,
     decision,final_price FROM products WHERE ${where}
-    ORDER BY brand, ABS(COALESCE(delta,0)) DESC`, p);
+    ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, p);
 }
+const mismatchRows = (brands) => stateRows(["mismatch"], brands);
 
 async function alertRows(threshold = 5) {
   try {
@@ -68,14 +70,16 @@ function buildWorkbook(rows, alerts) {
     byBrand.get(b).push(r);
   }
 
+  const nMis = (list) => list.filter((r) => r.state === "mismatch").length;
+  const nErr = (list) => list.filter((r) => r.state === "error").length;
   const summary = wb.addWorksheet(safeSheetName("Summary", used));
-  summary.addRow(["brand", "mismatches"]);
+  summary.addRow(["brand", "mismatches", "errors"]);
   styleHeader(summary);
   [...byBrand.entries()]
     .sort((a, b) => b[1].length - a[1].length)
-    .forEach(([b, list]) => summary.addRow([b, list.length]));
+    .forEach(([b, list]) => summary.addRow([b, nMis(list), nErr(list)]));
   summary.addRow([]);
-  summary.addRow(["TOTAL", rows.length]);
+  summary.addRow(["TOTAL", nMis(rows), nErr(rows)]);
 
   for (const [b, list] of byBrand) {
     const ws = wb.addWorksheet(safeSheetName(b, used));
@@ -122,27 +126,44 @@ export async function sendMismatchReport(to, brands) {
   return { ok: true, count: rows.length, to };
 }
 
-export async function sendPipelineReport({ to, threshold = 5 } = {}) {
+// Always sends after a pipeline run (any number of products). Attaches a
+// per-brand workbook covering mismatches AND fetch errors when any exist.
+export async function sendPipelineReport({ to, threshold = 5, stats = null } = {}) {
   const { user, pass, from } = config.smtp;
   to = recipient(to);
   if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
   if (!to) return { ok: false, error: "no recipient (ALERT_TO)" };
-  const [rows, alerts] = await Promise.all([mismatchRows(null), alertRows(threshold)]);
-  if (!rows.length && !alerts.length) return { ok: true, skipped: true, count: 0, alerts: 0 };
-  const wb = buildWorkbook(rows, alerts);
+  const [rows, alerts] = await Promise.all([stateRows(["mismatch", "error"]), alertRows(threshold)]);
+  const mism = rows.filter((r) => r.state === "mismatch").length;
+  const errs = rows.filter((r) => r.state === "error").length;
   const today = new Date().toISOString().slice(0, 10);
   const brandCount = new Set(rows.map((r) => (r.brand || "").replace(/^www\./, ""))).size;
   const parts = [];
-  if (rows.length) parts.push(`${rows.length} price mismatch(es) across ${brandCount} brand(s)`);
+  if (stats) parts.push(
+    `${stats.completed ?? 0} product(s) checked — ${stats.matched ?? 0} matched, ` +
+    `${stats.mismatch ?? 0} mismatched, ${stats.errors ?? 0} error(s)` +
+    (stats.recovered ? ` (${stats.recovered} recovered on retry)` : "") +
+    (stats.elapsed != null ? ` in ${stats.elapsed}s` : ""));
+  if (mism) parts.push(`${mism} price mismatch(es) pending review across ${brandCount} brand(s)`);
+  if (errs) parts.push(`${errs} fetch error(s) needing attention`);
   if (alerts.length) parts.push(`${alerts.length} price alert(s) (>=${threshold}% move)`);
+  if (!mism && !errs && !alerts.length) parts.push("all prices matched — nothing pending");
+  const attach = (rows.length || alerts.length)
+    ? [{ filename: `pipeline_report_${today}.xlsx`,
+        content: Buffer.from(await buildWorkbook(rows, alerts).xlsx.writeBuffer()) }]
+    : [];
   await transport().sendMail({
-    from, to, subject: `MBO Tracker — pipeline finished: ${parts.join(", ")} (${today})`,
+    from, to,
+    subject: `MBO Tracker — pipeline finished: ${stats ? `${stats.completed ?? 0} checked, ` : ""}${mism} mismatch, ${errs} error (${today})`,
     text: `A pricing pipeline run just finished.\n\n` +
       parts.map((p) => `• ${p}`).join("\n") + `\n\n` +
-      `The attached workbook has one sheet per brand for every mismatch (plus a Summary tab` +
-      (alerts.length ? ` and a Price Alerts tab` : ``) + `). Mismatches are PENDING APPROVAL ` +
-      `— nothing has been pushed to any store.\n\n— MBO Tracker`,
-    attachments: [{ filename: `pipeline_report_${today}.xlsx`, content: Buffer.from(await wb.xlsx.writeBuffer()) }],
+      (attach.length
+        ? `The attached workbook has one sheet per brand covering every mismatch and fetch error (plus a Summary tab` +
+          (alerts.length ? ` and a Price Alerts tab` : ``) + `). Mismatches are PENDING APPROVAL ` +
+          `— nothing has been pushed to any store.`
+        : `No attachment — there were no mismatches, errors or alerts.`) +
+      `\n\n— MBO Tracker`,
+    attachments: attach,
   });
-  return { ok: true, count: rows.length, alerts: alerts.length, brands: brandCount, to };
+  return { ok: true, count: mism, errors: errs, alerts: alerts.length, brands: brandCount, to };
 }

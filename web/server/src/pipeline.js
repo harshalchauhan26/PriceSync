@@ -288,10 +288,12 @@ export async function startPipeline(eng, runId) {
     st.running = false;
   }
   if (!st.abort) {
-    sendPipelineReport()
+    const stats = { completed: st.completed, matched: st.matched, mismatch: st.mismatch,
+      errors: st.errors, recovered: st.retry_recovered,
+      elapsed: st.started_at ? Math.floor((Date.now() - st.started_at) / 1000) : null };
+    sendPipelineReport({ stats })
       .then((r) => {
-        if (r?.skipped) log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: "nothing to report — no email sent" });
-        else if (r?.ok) log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: `report sent to ${r.to} (${r.count} mismatch, ${r.alerts} alert)` });
+        if (r?.ok) log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: `report sent to ${r.to} (${r.count} mismatch, ${r.errors} error, ${r.alerts} alert)` });
         else log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: `not sent: ${r?.error || "unknown"}` });
       })
       .catch((e) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: "send failed: " + e.message }));

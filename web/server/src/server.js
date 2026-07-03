@@ -1,5 +1,6 @@
 import express from "express";
 import compression from "compression";
+import crypto from "node:crypto";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import multer from "multer";
@@ -64,6 +65,25 @@ app.post("/api/register", wrap(async (req, res) => {
   res.json({ ok: true, email: u.email, role: u.role });
 }));
 app.get("/api/health", (req, res) => { const active = pipe.runningCount(); res.json({ ok: true, running: active > 0, active_runs: active }); });
+app.get("/api/auth/google/config", (req, res) => res.json({ client_id: config.googleClientId }));
+app.post("/api/auth/google", wrap(async (req, res) => {
+  if (!config.googleClientId) {
+    return res.status(400).json({ ok: false, error: "Google sign-in not configured (set GOOGLE_CLIENT_ID in .env)" });
+  }
+  const credential = String(req.body.credential || "").trim();
+  if (!credential) return res.status(400).json({ ok: false, error: "missing Google credential" });
+  const g = await fetch("https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(credential));
+  if (!g.ok) return res.status(401).json({ ok: false, error: "invalid or expired Google token" });
+  const info = await g.json();
+  if (info.aud !== config.googleClientId) return res.status(401).json({ ok: false, error: "Google token issued for a different app" });
+  if (String(info.email_verified) !== "true") return res.status(401).json({ ok: false, error: "Google email not verified" });
+  const email = String(info.email || "").toLowerCase().trim();
+  if (!email.includes("@")) return res.status(400).json({ ok: false, error: "no email in Google account" });
+  let u = await sec.getUser(email);
+  if (!u) u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer");
+  sec.loginUser(req, u);
+  res.json({ ok: true, email: u.email, role: u.role });
+}));
 
 app.use("/api", sec.guard);
 
@@ -289,6 +309,25 @@ app.post("/api/review/decide", wrap(async (req, res) => {
       [req.body.decision, req.body.note || "", new Date().toISOString(), req.body.row]);
     res.json({ ok: true });
   }
+}));
+app.post("/api/review/update_base", wrap(async (req, res) => {
+  const it = await one("SELECT * FROM products WHERE id=$1", [req.body.row]);
+  if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
+  if (it.live_price == null) return res.status(400).json({ ok: false, error: "row has no live price" });
+  const cur = String(req.body.currency || it.currency || "INR").trim().toUpperCase();
+  const baseInr = await toInr(it.live_price, cur);
+  if (baseInr == null || !Number.isFinite(baseInr) || baseInr <= 0) {
+    return res.status(400).json({ ok: false, error: "could not convert live price to INR" });
+  }
+  // USD baseline only makes sense when the live price itself is USD; otherwise
+  // clear it so the next USD-fetch run freezes a fresh baseline.
+  const baseUsd = cur === "USD" ? it.live_price : null;
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  await q(`UPDATE products SET base_price=$1, base_usd=$2, live_price=NULL, currency=NULL,
+      delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$3
+    WHERE id=$4`, [baseInr, baseUsd, now, it.id]);
+  await q("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [baseInr, it.key]);
+  res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, currency: cur, counts: await store.counts() });
 }));
 app.post("/api/review/delete", wrap(async (req, res) => {
   const it = await one("SELECT key FROM products WHERE id=$1", [req.body.row]);
