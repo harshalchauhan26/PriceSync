@@ -314,6 +314,24 @@ export async function setRangeHighBrands(list) {
   return uniq;
 }
 
+// ---- per-brand GENTLE fetch (bot-protected domains) ----
+let _gentleCache = { at: 0, set: null };
+export async function gentleBrandSet() {
+  if (_gentleCache.set && Date.now() - _gentleCache.at < 30_000) return _gentleCache.set;
+  const raw = await getMeta("gentle_brands", "");
+  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  _gentleCache = { at: Date.now(), set };
+  return set;
+}
+export async function setGentleBrands(list) {
+  const arr = (Array.isArray(list) ? list : String(list || "").split(","))
+    .map(normBrand).filter(Boolean);
+  const uniq = [...new Set(arr)];
+  await setMeta("gentle_brands", uniq.join(","));
+  _gentleCache = { at: 0, set: null };
+  return uniq;
+}
+
 // ---- approval archive ----
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;

@@ -274,8 +274,12 @@ async function approveOne(client, prow, body) {
   const final = store.roundFinal(finalRaw);
   const archived = await store.archiveApproved(client, prow, final, markup, ref, body.note || "", body._by);
   if (liveInr != null && Number.isFinite(liveInr) && liveInr > 0) {
-    await client.query(`UPDATE products SET base_price=$1, state='matched',
-      status='Price Matched (INR)', delta=0 WHERE id=$2`, [liveInr, prow.id]);
+    // Baseline follows the approved live price (markup only affects final_price).
+    // USD-baseline brands compare against base_usd, so sync it too — otherwise
+    // the next run re-flags the same mismatch against the stale USD baseline.
+    const baseUsd = String(prow.currency || "").trim().toUpperCase() === "USD" ? prow.live_price : null;
+    await client.query(`UPDATE products SET base_price=$1, base_usd=$2, state='matched',
+      status='Price Matched (INR)', delta=0 WHERE id=$3`, [liveInr, baseUsd, prow.id]);
     await client.query("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [liveInr, prow.key]);
   }
   return { final, archived, pushCur: targetCur };
@@ -460,6 +464,8 @@ app.get("/api/push/cad", wrap(async (req, res) => res.json({ default: "USD", cad
 app.post("/api/push/cad", wrap(async (req, res) => res.json({ ok: true, cad_brands: await store.setCadBrands(req.body.brands ?? req.body.list ?? "") })));
 app.get("/api/fetch/usd", wrap(async (req, res) => res.json({ default: "native", usd_brands: [...(await store.usdFetchBrandSet())] })));
 app.post("/api/fetch/usd", wrap(async (req, res) => res.json({ ok: true, usd_brands: await store.setUsdFetchBrands(req.body.brands ?? req.body.list ?? "") })));
+app.get("/api/fetch/gentle", wrap(async (req, res) => res.json({ gentle_brands: [...(await store.gentleBrandSet())] })));
+app.post("/api/fetch/gentle", wrap(async (req, res) => res.json({ ok: true, gentle_brands: await store.setGentleBrands(req.body.brands ?? req.body.list ?? "") })));
 app.post("/api/shopify/update_price", wrap(async (req, res) => {
   const productUrl = String(req.body.product_url || "").trim();
   const newPrice = req.body.new_price;

@@ -68,14 +68,17 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   const tag = prod.key || url;
   const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
   if (errMsg != null || live == null) {
-    log(eng, { row: tag, domain: brand, url, currency: "-", price: "-", status: "Fetch Error", msg: errMsg || "price not found" });
-    await store.saveResult(prod, "Fetch Error", null, null, "error", runId);
+    const detail = String(errMsg || "price not found").slice(0, 80);
+    log(eng, { row: tag, domain: brand, url, currency: "-", price: "-", status: "Fetch Error", msg: detail });
+    // Keep the "Fetch Error" prefix — stateOf() keys off it — but persist the
+    // cause so the dashboard can distinguish a block/timeout from a regex miss.
+    await store.saveResult(prod, `Fetch Error (${detail})`, null, null, "error", runId);
     return "error";
   }
   const cur = currency || "UNKNOWN";
   if (base == null) {
     log(eng, { row: tag, domain: brand, url, currency: cur, price: String(live), status: "Fetch Error", msg: "baseline unreadable" });
-    await store.saveResult(prod, "Fetch Error", live, cur, "error", runId);
+    await store.saveResult(prod, "Fetch Error (baseline unreadable)", live, cur, "error", runId);
     return "error";
   }
   if (fetchCur === "USD" && cur === "USD") {
@@ -154,9 +157,22 @@ const WORKER_PATH = path.resolve(__dirname, "./worker.js");
 // Deal rows round-robin across N chunks so products from one hot domain are
 // spread over every worker — each worker paces domains independently, so a
 // single-store run gets N× the per-domain throughput of contiguous chunks.
-function chunkArray(arr, n) {
+// EXCEPT gentle brands (bot-protected, e.g. Akamai): all their rows stay on
+// ONE worker so the per-domain cooldown is truthful process-wide — the N×
+// rate is exactly what gets the server's IP rate-banned on those domains.
+function chunkArray(arr, n, gentleSet = null) {
   const chunks = Array.from({ length: n }, () => []);
-  arr.forEach((item, i) => chunks[i % n].push(item));
+  const gentleChunk = new Map();
+  let i = 0;
+  for (const item of arr) {
+    const b = normBrand(item.brand);
+    if (gentleSet && gentleSet.has(b)) {
+      if (!gentleChunk.has(b)) gentleChunk.set(b, gentleChunk.size % n);
+      chunks[gentleChunk.get(b)].push(item);
+    } else {
+      chunks[i++ % n].push(item);
+    }
+  }
   return chunks.filter((c) => c.length);
 }
 
@@ -218,7 +234,7 @@ async function runPass(eng, rows, workers, fetcher, runId, onDone) {
     if (useThreads) {
       // Split batch across worker threads; each worker gets its share of the
       // concurrency budget and the current fetcher's timeout/cooldown profile.
-      const chunks = chunkArray(batch, numThreads);
+      const chunks = chunkArray(batch, numThreads, eng.gentleBrands);
       const fetchOpts = {
         timeout: fetcher.timeout, cooldown: fetcher.cooldown,
         concurrency: Math.max(1, Math.ceil(workers / chunks.length)),
@@ -253,6 +269,7 @@ export async function startPipeline(eng, runId) {
   try {
     eng.usdFetchBrands = await store.usdFetchBrandSet();
     eng.rangeHighBrands = await store.rangeHighBrandSet();
+    eng.gentleBrands = await store.gentleBrandSet();
     const source = cfg.data_source === 'imported' ? 'imported' : 'database';
     const rows = await store.workRows(mode, vendors, source);
     const total = source === 'imported'

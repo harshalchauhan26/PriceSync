@@ -36,11 +36,18 @@ export class Fetcher {
   static _domainNext = new Map();
 
   _headers() {
+    // No X-Forwarded-For: browsers never send it, so bot filters (Akamai)
+    // read a forged one as a scraper signal — and it never influenced geo
+    // pricing anyway (foreign-IP runs still got USD with it set).
     return {
       "User-Agent": USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
       Accept: "text/html,application/json;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-IN,en;q=0.9",
-      "X-Forwarded-For": "103.48.196.1",
+      "Upgrade-Insecure-Requests": "1",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
     };
   }
 

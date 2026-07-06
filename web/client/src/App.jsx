@@ -349,16 +349,16 @@ function Pipeline({admin}) {
   const sourceTotal=cfg.data_source==="imported"?cat.imported:cat.total;
   const getTagClass=(status)=>{
     if(!status) return "tag tag-info";
-    if(status==="Price Matched"||status==="MATCH"||status==="DONE") return "tag tag-done";
-    if(status==="Fetch Error"||status==="ERR"||status==="FAIL") return "tag tag-fail";
-    if(status==="Price Mismatch!") return "tag tag-warn";
+    if(status.startsWith("Price Matched")||status==="MATCH"||status==="DONE") return "tag tag-done";
+    if(status.startsWith("Fetch Error")||status==="ERR"||status==="FAIL") return "tag tag-fail";
+    if(status.startsWith("Price Mismatch!")) return "tag tag-warn";
     return "tag tag-info";
   };
   const getTagLabel=(status)=>{
     if(!status) return "INFO";
-    if(status==="Price Matched") return "DONE";
-    if(status==="Fetch Error") return "FAIL";
-    if(status==="Price Mismatch!") return "WARN";
+    if(status.startsWith("Price Matched")) return "DONE";
+    if(status.startsWith("Fetch Error")) return "FAIL";
+    if(status.startsWith("Price Mismatch!")) return "WARN";
     return "INFO";
   };
 
