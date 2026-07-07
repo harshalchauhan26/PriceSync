@@ -5,12 +5,13 @@ import { workerData, parentPort } from "node:worker_threads";
 import pLimit from "p-limit";
 import { Fetcher, extractRow } from "./engine.js";
 
-const { rows, fetch: fopts, usdFetch, rangeHigh, proxyBrands, proxyUrl } = workerData;
+const { rows, fetch: fopts, usdFetch, rangeHigh, proxyBrands, proxyUrl, localOnly, relay } = workerData;
 
 const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
 const usdSet = new Set(usdFetch || []);
 const rangeSet = new Set(rangeHigh || []);
 const proxySet = new Set(proxyBrands || []);
+const localOnlySet = new Set(localOnly || []);
 
 let aborted = false;
 parentPort.on("message", (m) => { if (m && m.type === "abort") aborted = true; });
@@ -28,7 +29,8 @@ await Promise.all(rows.map((prod) => limit(async () => {
   // Same INR pin as pipeline.js processOne — keep the two in sync.
   const fetchCur = usdSet.has(brand) ? "USD" : (platformKind !== "shopify" ? "INR" : null);
   const preferHigh = rangeSet.has(brand);
-  const f = proxySet.has(brand) ? fetcher.proxied(proxyUrl) : fetcher;
+  const f = (relay && localOnlySet.has(brand)) ? fetcher.relayed(relay.url, relay.secret)
+    : proxySet.has(brand) ? fetcher.proxied(proxyUrl) : fetcher;
   try {
     const [live, currency] = await extractRow(
       f, (prod.url || "").trim(),

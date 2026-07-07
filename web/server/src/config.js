@@ -14,6 +14,8 @@ export const config = {
       : ""),
   secret: e.SECRET_KEY || "dev-insecure-change-me",
   fetchProxyUrl: (e.FETCH_PROXY_URL || "").trim(),
+  fetchRelayUrl: (e.FETCH_RELAY_URL || "").trim().replace(/\/+$/, ""),
+  fetchRelaySecret: (e.FETCH_RELAY_SECRET || "").trim(),
   googleClientId: (e.GOOGLE_CLIENT_ID || "").trim(),
   adminEmail: (e.ADMIN_EMAIL || "admin@pricesync.local").toLowerCase(),
   adminPassword: e.ADMIN_PASSWORD || "admin",

@@ -1,0 +1,8 @@
+name = "pricesync-relay"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+ALLOWED_HOSTS = "anitadongre.com,saakshakinni.com"
+# RELAY_SECRET is a secret, not a var: `npx wrangler secret put RELAY_SECRET`
+# (or add it under Worker -> Settings -> Variables -> Encrypted in the dashboard)

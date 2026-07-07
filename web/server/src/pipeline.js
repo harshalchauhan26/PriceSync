@@ -145,9 +145,11 @@ async function processOne(eng, fetcher, prod, runId) {
   }
   let errMsg = null;
   live = null; currency = null;
-  const f = (eng.proxyBrands && eng.proxyBrands.has(normBrand(brand)))
-    ? fetcher.proxied(config.fetchProxyUrl)
-    : fetcher;
+  const f = (eng.relay && eng.localOnlyBrands && eng.localOnlyBrands.has(normBrand(brand)))
+    ? fetcher.relayed(eng.relay.url, eng.relay.secret)
+    : (eng.proxyBrands && eng.proxyBrands.has(normBrand(brand)))
+      ? fetcher.proxied(config.fetchProxyUrl)
+      : fetcher;
   try {
     [live, currency] = await extractRow(f, url, (prod.platform || "").trim(),
       prod.custom_regex || null,
@@ -192,6 +194,8 @@ function runWorker(eng, rows, fetchOpts, runId, onDone) {
         rangeHigh: [...(eng.rangeHighBrands || [])],
         proxyBrands: [...(eng.proxyBrands || [])],
         proxyUrl: config.fetchProxyUrl || null,
+        localOnly: [...(eng.localOnlyBrands || [])],
+        relay: eng.relay || null,
       },
     });
     let chain = Promise.resolve();
@@ -286,17 +290,22 @@ export async function startPipeline(eng, runId) {
     let total = source === 'imported'
       ? await store.countImported(vendors)
       : await store.countProducts(vendors);
-    // Local-only brands: their sites ban the cloud server's IP, so cloud runs
-    // skip them entirely (a blocked fetch would only clobber good local data
-    // with errors). Refresh them from a local run — run-local-only.mjs.
-    const localOnly = await store.localOnlyBrandSet();
-    if (config.isCloud && localOnly.size) {
+    // Local-only brands: their sites ban the cloud server's IP. With a fetch
+    // relay configured (FETCH_RELAY_URL -> web/relay/worker.js) cloud runs
+    // fetch them through it; without one they are skipped entirely (a blocked
+    // fetch would only clobber good local data with errors) and must be
+    // refreshed from a local run — run-local-only.mjs.
+    eng.localOnlyBrands = await store.localOnlyBrandSet();
+    eng.relay = (config.isCloud && config.fetchRelayUrl)
+      ? { url: config.fetchRelayUrl, secret: config.fetchRelaySecret }
+      : null;
+    if (config.isCloud && eng.localOnlyBrands.size && !eng.relay) {
       const before = rows.length;
-      rows = rows.filter((r) => !localOnly.has(normBrand(r.brand)));
+      rows = rows.filter((r) => !eng.localOnlyBrands.has(normBrand(r.brand)));
       const skipped = before - rows.length;
       total -= skipped;
       if (skipped) log(eng, { row: "—", domain: "local-only", url: "", currency: "-", price: "-",
-        status: "Skipped", msg: `${skipped} row(s) of ${localOnly.size} local-only brand(s) — refresh them from the local machine` });
+        status: "Skipped", msg: `${skipped} row(s) of ${eng.localOnlyBrands.size} local-only brand(s) — set FETCH_RELAY_URL or refresh from the local machine` });
     }
     Object.assign(st, { total_rows: total, pre_done: Math.max(0, total - rows.length),
       phase: "main", message: `Main pass — ${rows.length} product(s) from ${source}` });

@@ -27,7 +27,8 @@ export class HttpError extends Error {
 }
 
 export class Fetcher {
-  constructor({ timeout = 12000, cooldown = COOLDOWN_MS, maxRetries = 3, proxyUrl = null } = {}) {
+  constructor({ timeout = 12000, cooldown = COOLDOWN_MS, maxRetries = 3, proxyUrl = null,
+    relayUrl = null, relaySecret = null } = {}) {
     this.timeout = timeout;
     this.cooldown = cooldown;
     this.maxRetries = maxRetries;
@@ -36,6 +37,24 @@ export class Fetcher {
     // One tunnel agent per Fetcher; axios `proxy: false` stops env-var proxy
     // detection from double-proxying the request.
     this.proxyAgent = this.proxyUrl ? new HttpsProxyAgent(this.proxyUrl) : null;
+    // Relay = HTTPS fetch-relay endpoint (web/relay/worker.js contract:
+    // GET <relayUrl>?url=<target>, Bearer auth, origin body/status passthrough).
+    this.relayUrl = relayUrl || null;
+    this.relaySecret = relaySecret || null;
+  }
+
+  // Twin that sends requests through the fetch relay. Pacing/backoff stay
+  // keyed on the TARGET domain (shared static _domainNext), so relayed and
+  // direct fetchers honor one per-domain schedule.
+  relayed(relayUrl, relaySecret) {
+    if (!relayUrl) return this;
+    if (!this._relayedTwin || this._relayedTwin.relayUrl !== relayUrl) {
+      this._relayedTwin = new Fetcher({
+        timeout: this.timeout, cooldown: this.cooldown,
+        maxRetries: this.maxRetries, relayUrl, relaySecret,
+      });
+    }
+    return this._relayedTwin;
   }
 
   // Same timeout/cooldown profile but egressing via proxyUrl; domain pacing
@@ -88,9 +107,14 @@ export class Fetcher {
     let resp = null;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       await this._awaitDomainSlot(url);
+      const reqUrl = this.relayUrl
+        ? `${this.relayUrl}/?url=${encodeURIComponent(url)}`
+        : url;
+      const headers = this._headers();
+      if (this.relayUrl && this.relaySecret) headers.Authorization = `Bearer ${this.relaySecret}`;
       try {
-        resp = await axios.get(url, {
-          timeout: this.timeout, headers: this._headers(), maxRedirects: 5,
+        resp = await axios.get(reqUrl, {
+          timeout: this.timeout, headers, maxRedirects: 5,
           responseType: "text", transformResponse: (x) => x,
           validateStatus: () => true,
           ...(this.proxyAgent
