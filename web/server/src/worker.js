@@ -5,13 +5,15 @@ import { workerData, parentPort } from "node:worker_threads";
 import pLimit from "p-limit";
 import { Fetcher, extractRow } from "./engine.js";
 
-const { rows, fetch: fopts, usdFetch, rangeHigh, proxyBrands, proxyUrl, localOnly, relay } = workerData;
+const { rows, fetch: fopts, usdFetch, rangeHigh, proxyBrands, proxyUrl, localOnly, relay,
+  wooApi, relayParams } = workerData;
 
 const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
 const usdSet = new Set(usdFetch || []);
 const rangeSet = new Set(rangeHigh || []);
 const proxySet = new Set(proxyBrands || []);
 const localOnlySet = new Set(localOnly || []);
+const wooApiSet = new Set(wooApi || []);
 
 let aborted = false;
 parentPort.on("message", (m) => { if (m && m.type === "abort") aborted = true; });
@@ -29,16 +31,21 @@ await Promise.all(rows.map((prod) => limit(async () => {
   // Same INR pin as pipeline.js processOne — keep the two in sync.
   const fetchCur = usdSet.has(brand) ? "USD" : (platformKind !== "shopify" ? "INR" : null);
   const preferHigh = rangeSet.has(brand);
-  const f = (relay && localOnlySet.has(brand)) ? fetcher.relayed(relay.url, relay.secret)
+  const viaRelay = !!(relay && localOnlySet.has(brand));
+  const f = viaRelay ? fetcher.relayed(relay.url, relay.secret)
     : proxySet.has(brand) ? fetcher.proxied(proxyUrl) : fetcher;
   try {
     const [live, currency] = await extractRow(
       f, (prod.url || "").trim(),
       (prod.platform || "").trim(),
-      prod.custom_regex || null,
-      (fetchCur || preferHigh)
-        ? { fetchCurrency: fetchCur || undefined, preferHighPrice: preferHigh }
-        : undefined
+      prod.custom_regex || null, {
+        fetchCurrency: fetchCur || undefined,
+        preferHighPrice: preferHigh || undefined,
+        ...(viaRelay ? {
+          wooApi: wooApiSet.has(brand) || undefined,
+          appendParams: (relayParams && relayParams[brand]) || undefined,
+        } : {}),
+      }
     );
     parentPort.postMessage({ type: "result", prod, live, currency });
   } catch (e) {

@@ -368,6 +368,37 @@ export async function setLocalOnlyBrands(list) {
   return uniq;
 }
 
+// ---- per-brand relay fetch tweaks (only applied when fetching via relay) ----
+let _wooApiCache = { at: 0, set: null };
+export async function wooApiBrandSet() {
+  if (_wooApiCache.set && Date.now() - _wooApiCache.at < 30_000) return _wooApiCache.set;
+  const raw = await getMeta("woo_api_brands", "");
+  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  _wooApiCache = { at: Date.now(), set };
+  return set;
+}
+export async function setWooApiBrands(list) {
+  const arr = (Array.isArray(list) ? list : String(list || "").split(","))
+    .map(normBrand).filter(Boolean);
+  const uniq = [...new Set(arr)];
+  await setMeta("woo_api_brands", uniq.join(","));
+  _wooApiCache = { at: 0, set: null };
+  return uniq;
+}
+export async function relayAppendParams() {
+  const raw = await getMeta("relay_append_params", "");
+  try {
+    const obj = JSON.parse(raw || "{}");
+    const out = {};
+    for (const [b, params] of Object.entries(obj)) out[normBrand(b)] = params;
+    return out;
+  } catch { return {}; }
+}
+export async function setRelayAppendParams(obj) {
+  await setMeta("relay_append_params", JSON.stringify(obj || {}));
+  return obj || {};
+}
+
 // ---- approval archive ----
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;

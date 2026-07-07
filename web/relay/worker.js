@@ -29,7 +29,8 @@ export default {
 
     const fwd = new Headers();
     for (const h of ["user-agent", "accept", "accept-language", "upgrade-insecure-requests",
-      "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user"]) {
+      "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user",
+      "referer", "cookie"]) {
       const v = req.headers.get(h);
       if (v) fwd.set(h, v);
     }
@@ -48,6 +49,7 @@ export default {
         // tracker side diagnose geo/bot redirects without guessing
         "x-relay-final-url": resp.url || "",
         "x-relay-redirected": String(resp.redirected || false),
+        "x-relay-set-cookie": (resp.headers.get("set-cookie") || "").slice(0, 500),
       },
     });
   },

@@ -271,6 +271,32 @@ export async function extractWordpress(fetcher, url, preferHigh = false) {
   return [extractPriceFromHtml(html, null, preferHigh), detectCurrency(html)];
 }
 
+// WooCommerce Store API (public, no auth). Used for woo_api_brands when
+// fetching via the relay: bot rules that redirect /product/ pages off
+// datacenter IPs typically leave /wp-json/ alone, and the JSON carries
+// explicit currency + minor-unit scaling.
+export function wooApiUrl(url) {
+  const u = new URL(url);
+  const segs = u.pathname.replace(/\/+$/, "").split("/").filter(Boolean);
+  const slug = segs[segs.length - 1] || "";
+  return `${u.origin}/wp-json/wc/store/v1/products?slug=${encodeURIComponent(slug)}`;
+}
+
+export async function extractWooApi(fetcher, url, preferHigh = false) {
+  const resp = await fetcher.get(wooApiUrl(url));
+  let arr;
+  try { arr = JSON.parse(resp.data); } catch { return [null, null]; }
+  const p = Array.isArray(arr) ? arr[0]?.prices : null;
+  if (!p) return [null, null];
+  const scale = 10 ** (Number(p.currency_minor_unit) || 0);
+  // Main (pre-sale) price = max(regular, current); range-high brands also
+  // consider the top of the variant price range — mirrors the Shopify rule.
+  const cands = [p.regular_price, p.price];
+  if (preferHigh && p.price_range) cands.push(p.price_range.max_amount);
+  const raw = Math.max(...cands.map((x) => (x == null ? 0 : parseFloat(x))).filter(Number.isFinite), 0);
+  return raw > 0 ? [raw / scale, p.currency_code || null] : [null, p.currency_code || null];
+}
+
 export async function extractCustom(fetcher, url, customRegex, preferHigh = false) {
   const html = (await fetcher.get(url)).data;
   return [extractPriceFromHtml(html, customRegex, preferHigh), detectCurrency(html)];
@@ -284,12 +310,18 @@ export function withCurrencyParam(url, param, currency) {
 
 export async function extractRow(fetcher, url, platform, customRegex, opts = {}) {
   const p = (platform || "").trim().toLowerCase();
-  const u = opts.fetchCurrency
+  let u = opts.fetchCurrency
     ? withCurrencyParam(url, opts.currencyParam || "wmc-currency", opts.fetchCurrency)
     : url;
+  // Per-brand extra query params (e.g. anitadongre's switch=true suppresses
+  // its geo-redirect when fetching from a foreign/relay IP).
+  if (opts.appendParams) {
+    for (const [k, v] of Object.entries(opts.appendParams)) u = withCurrencyParam(u, k, v);
+  }
   const hi = opts.preferHighPrice === true;
   let res;
   if (p === "shopify") res = await extractShopify(fetcher, u, hi);
+  else if (opts.wooApi) res = await extractWooApi(fetcher, u, hi); // relay path: JSON API instead of bot-blocked /product/ HTML
   else if (customRegex) res = await extractCustom(fetcher, u, customRegex, hi); // regex wins for wordpress/custom/unknown
   else res = await extractWordpress(fetcher, u, hi);
   if (opts.fetchCurrency && res && res[1] == null) res = [res[0], opts.fetchCurrency];

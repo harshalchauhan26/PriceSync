@@ -145,15 +145,23 @@ async function processOne(eng, fetcher, prod, runId) {
   }
   let errMsg = null;
   live = null; currency = null;
-  const f = (eng.relay && eng.localOnlyBrands && eng.localOnlyBrands.has(normBrand(brand)))
+  const nb = normBrand(brand);
+  const viaRelay = !!(eng.relay && eng.localOnlyBrands && eng.localOnlyBrands.has(nb));
+  const f = viaRelay
     ? fetcher.relayed(eng.relay.url, eng.relay.secret)
-    : (eng.proxyBrands && eng.proxyBrands.has(normBrand(brand)))
+    : (eng.proxyBrands && eng.proxyBrands.has(nb))
       ? fetcher.proxied(config.fetchProxyUrl)
       : fetcher;
   try {
     [live, currency] = await extractRow(f, url, (prod.platform || "").trim(),
-      prod.custom_regex || null,
-      (fetchCur || preferHigh) ? { fetchCurrency: fetchCur || undefined, preferHighPrice: preferHigh } : undefined);
+      prod.custom_regex || null, {
+        fetchCurrency: fetchCur || undefined,
+        preferHighPrice: preferHigh || undefined,
+        ...(viaRelay ? {
+          wooApi: (eng.wooApiBrands && eng.wooApiBrands.has(nb)) || undefined,
+          appendParams: (eng.relayParams && eng.relayParams[nb]) || undefined,
+        } : {}),
+      });
   } catch (e) { errMsg = e.message; }
   return finalizeOne(eng, prod, live, currency, errMsg, runId);
 }
@@ -196,6 +204,8 @@ function runWorker(eng, rows, fetchOpts, runId, onDone) {
         proxyUrl: config.fetchProxyUrl || null,
         localOnly: [...(eng.localOnlyBrands || [])],
         relay: eng.relay || null,
+        wooApi: [...(eng.wooApiBrands || [])],
+        relayParams: eng.relayParams || {},
       },
     });
     let chain = Promise.resolve();
@@ -299,6 +309,8 @@ export async function startPipeline(eng, runId) {
     eng.relay = (config.isCloud && config.fetchRelayUrl)
       ? { url: config.fetchRelayUrl, secret: config.fetchRelaySecret }
       : null;
+    eng.wooApiBrands = await store.wooApiBrandSet();
+    eng.relayParams = await store.relayAppendParams();
     if (config.isCloud && eng.localOnlyBrands.size && !eng.relay) {
       const before = rows.length;
       rows = rows.filter((r) => !eng.localOnlyBrands.has(normBrand(r.brand)));
