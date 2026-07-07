@@ -1,6 +1,7 @@
 import axios from "axios";
 import http from "node:http";
 import https from "node:https";
+import { HttpsProxyAgent } from "https-proxy-agent";
 
 export const COOLDOWN_MS = [1200, 2800];
 export const SHOPIFY_CENTS_THRESHOLD = 1_000_000;
@@ -26,11 +27,28 @@ export class HttpError extends Error {
 }
 
 export class Fetcher {
-  constructor({ timeout = 12000, cooldown = COOLDOWN_MS, maxRetries = 3 } = {}) {
+  constructor({ timeout = 12000, cooldown = COOLDOWN_MS, maxRetries = 3, proxyUrl = null } = {}) {
     this.timeout = timeout;
     this.cooldown = cooldown;
     this.maxRetries = maxRetries;
     this.firstCall = true;
+    this.proxyUrl = proxyUrl || null;
+    // One tunnel agent per Fetcher; axios `proxy: false` stops env-var proxy
+    // detection from double-proxying the request.
+    this.proxyAgent = this.proxyUrl ? new HttpsProxyAgent(this.proxyUrl) : null;
+  }
+
+  // Same timeout/cooldown profile but egressing via proxyUrl; domain pacing
+  // (_domainNext) is static so direct + proxied fetchers share one schedule.
+  proxied(proxyUrl) {
+    if (!proxyUrl) return this;
+    if (!this._proxiedTwin || this._proxiedTwin.proxyUrl !== proxyUrl) {
+      this._proxiedTwin = new Fetcher({
+        timeout: this.timeout, cooldown: this.cooldown,
+        maxRetries: this.maxRetries, proxyUrl,
+      });
+    }
+    return this._proxiedTwin;
   }
 
   static _domainNext = new Map();
@@ -73,8 +91,11 @@ export class Fetcher {
       try {
         resp = await axios.get(url, {
           timeout: this.timeout, headers: this._headers(), maxRedirects: 5,
-          httpAgent, httpsAgent, responseType: "text", transformResponse: (x) => x,
+          responseType: "text", transformResponse: (x) => x,
           validateStatus: () => true,
+          ...(this.proxyAgent
+            ? { httpAgent: this.proxyAgent, httpsAgent: this.proxyAgent, proxy: false }
+            : { httpAgent, httpsAgent }),
         });
       } catch (err) {
         if (attempt >= this.maxRetries) throw err;

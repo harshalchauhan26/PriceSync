@@ -1,6 +1,7 @@
 import pLimit from "p-limit";
 import { Fetcher, extractRow } from "./engine.js";
 import { toInr } from "./fx.js";
+import { config } from "./config.js";
 import * as store from "./store.js";
 import { sendPipelineReport } from "./mailer.js";
 
@@ -144,8 +145,11 @@ async function processOne(eng, fetcher, prod, runId) {
   }
   let errMsg = null;
   live = null; currency = null;
+  const f = (eng.proxyBrands && eng.proxyBrands.has(normBrand(brand)))
+    ? fetcher.proxied(config.fetchProxyUrl)
+    : fetcher;
   try {
-    [live, currency] = await extractRow(fetcher, url, (prod.platform || "").trim(),
+    [live, currency] = await extractRow(f, url, (prod.platform || "").trim(),
       prod.custom_regex || null,
       (fetchCur || preferHigh) ? { fetchCurrency: fetchCur || undefined, preferHighPrice: preferHigh } : undefined);
   } catch (e) { errMsg = e.message; }
@@ -186,6 +190,8 @@ function runWorker(eng, rows, fetchOpts, runId, onDone) {
         rows, fetch: fetchOpts,
         usdFetch: [...(eng.usdFetchBrands || [])],
         rangeHigh: [...(eng.rangeHighBrands || [])],
+        proxyBrands: [...(eng.proxyBrands || [])],
+        proxyUrl: config.fetchProxyUrl || null,
       },
     });
     let chain = Promise.resolve();
@@ -270,6 +276,11 @@ export async function startPipeline(eng, runId) {
     eng.usdFetchBrands = await store.usdFetchBrandSet();
     eng.rangeHighBrands = await store.rangeHighBrandSet();
     eng.gentleBrands = await store.gentleBrandSet();
+    eng.proxyBrands = await store.proxyBrandSet();
+    if (eng.proxyBrands.size && !config.fetchProxyUrl) {
+      log(eng, { row: "—", domain: "proxy", url: "", currency: "-", price: "-", status: "Warning",
+        msg: `${eng.proxyBrands.size} brand(s) flagged for proxy but FETCH_PROXY_URL is not set — fetching directly` });
+    }
     const source = cfg.data_source === 'imported' ? 'imported' : 'database';
     const rows = await store.workRows(mode, vendors, source);
     const total = source === 'imported'

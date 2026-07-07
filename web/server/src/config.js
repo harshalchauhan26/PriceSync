@@ -13,6 +13,7 @@ export const config = {
       ? `postgresql://postgres:${encodeURIComponent(e.SUPABASE_DB_PASSWORD)}@db.${e.SUPABASE_PROJECT_REF}.supabase.co:${e.SUPABASE_DB_PORT || 5432}/postgres`
       : ""),
   secret: e.SECRET_KEY || "dev-insecure-change-me",
+  fetchProxyUrl: (e.FETCH_PROXY_URL || "").trim(),
   googleClientId: (e.GOOGLE_CLIENT_ID || "").trim(),
   adminEmail: (e.ADMIN_EMAIL || "admin@pricesync.local").toLowerCase(),
   adminPassword: e.ADMIN_PASSWORD || "admin",

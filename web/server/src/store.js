@@ -332,6 +332,24 @@ export async function setGentleBrands(list) {
   return uniq;
 }
 
+// ---- per-brand PROXY fetch (IP-banned domains; needs FETCH_PROXY_URL) ----
+let _proxyCache = { at: 0, set: null };
+export async function proxyBrandSet() {
+  if (_proxyCache.set && Date.now() - _proxyCache.at < 30_000) return _proxyCache.set;
+  const raw = await getMeta("proxy_brands", "");
+  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  _proxyCache = { at: Date.now(), set };
+  return set;
+}
+export async function setProxyBrands(list) {
+  const arr = (Array.isArray(list) ? list : String(list || "").split(","))
+    .map(normBrand).filter(Boolean);
+  const uniq = [...new Set(arr)];
+  await setMeta("proxy_brands", uniq.join(","));
+  _proxyCache = { at: 0, set: null };
+  return uniq;
+}
+
 // ---- approval archive ----
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
