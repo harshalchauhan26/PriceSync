@@ -42,7 +42,13 @@ export default {
     if (resp.status === 204 || resp.status === 304) return new Response(null, { status: resp.status });
     return new Response(await resp.arrayBuffer(), {
       status: resp.status,
-      headers: { "content-type": resp.headers.get("content-type") || "text/html" },
+      headers: {
+        "content-type": resp.headers.get("content-type") || "text/html",
+        // where the origin actually landed us after redirects — lets the
+        // tracker side diagnose geo/bot redirects without guessing
+        "x-relay-final-url": resp.url || "",
+        "x-relay-redirected": String(resp.redirected || false),
+      },
     });
   },
 };
