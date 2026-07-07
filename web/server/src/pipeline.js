@@ -282,10 +282,22 @@ export async function startPipeline(eng, runId) {
         msg: `${eng.proxyBrands.size} brand(s) flagged for proxy but FETCH_PROXY_URL is not set — fetching directly` });
     }
     const source = cfg.data_source === 'imported' ? 'imported' : 'database';
-    const rows = await store.workRows(mode, vendors, source);
-    const total = source === 'imported'
+    let rows = await store.workRows(mode, vendors, source);
+    let total = source === 'imported'
       ? await store.countImported(vendors)
       : await store.countProducts(vendors);
+    // Local-only brands: their sites ban the cloud server's IP, so cloud runs
+    // skip them entirely (a blocked fetch would only clobber good local data
+    // with errors). Refresh them from a local run — run-local-only.mjs.
+    const localOnly = await store.localOnlyBrandSet();
+    if (config.isCloud && localOnly.size) {
+      const before = rows.length;
+      rows = rows.filter((r) => !localOnly.has(normBrand(r.brand)));
+      const skipped = before - rows.length;
+      total -= skipped;
+      if (skipped) log(eng, { row: "—", domain: "local-only", url: "", currency: "-", price: "-",
+        status: "Skipped", msg: `${skipped} row(s) of ${localOnly.size} local-only brand(s) — refresh them from the local machine` });
+    }
     Object.assign(st, { total_rows: total, pre_done: Math.max(0, total - rows.length),
       phase: "main", message: `Main pass — ${rows.length} product(s) from ${source}` });
     const sec = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n * 1000 : d; };

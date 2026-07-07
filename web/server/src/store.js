@@ -350,6 +350,24 @@ export async function setProxyBrands(list) {
   return uniq;
 }
 
+// ---- per-brand LOCAL-ONLY fetch (cloud IP banned; refresh from local runs) ----
+let _localOnlyCache = { at: 0, set: null };
+export async function localOnlyBrandSet() {
+  if (_localOnlyCache.set && Date.now() - _localOnlyCache.at < 30_000) return _localOnlyCache.set;
+  const raw = await getMeta("local_only_brands", "");
+  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  _localOnlyCache = { at: Date.now(), set };
+  return set;
+}
+export async function setLocalOnlyBrands(list) {
+  const arr = (Array.isArray(list) ? list : String(list || "").split(","))
+    .map(normBrand).filter(Boolean);
+  const uniq = [...new Set(arr)];
+  await setMeta("local_only_brands", uniq.join(","));
+  _localOnlyCache = { at: 0, set: null };
+  return uniq;
+}
+
 // ---- approval archive ----
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
