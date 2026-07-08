@@ -6,7 +6,7 @@ import pLimit from "p-limit";
 import { Fetcher, extractRow } from "./engine.js";
 
 const { rows, fetch: fopts, usdFetch, rangeHigh, proxyBrands, proxyUrl, localOnly, relay,
-  wooApi, relayParams } = workerData;
+  wooApi, relayParams, nativeCurrency } = workerData;
 
 const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
 const usdSet = new Set(usdFetch || []);
@@ -14,6 +14,7 @@ const rangeSet = new Set(rangeHigh || []);
 const proxySet = new Set(proxyBrands || []);
 const localOnlySet = new Set(localOnly || []);
 const wooApiSet = new Set(wooApi || []);
+const nativeCur = nativeCurrency || {};
 
 let aborted = false;
 parentPort.on("message", (m) => { if (m && m.type === "abort") aborted = true; });
@@ -29,7 +30,8 @@ await Promise.all(rows.map((prod) => limit(async () => {
   const brand = normBrand(prod.brand);
   const platformKind = (prod.platform || "").trim().toLowerCase();
   // Same INR pin as pipeline.js processOne — keep the two in sync.
-  const fetchCur = usdSet.has(brand) ? "USD" : (platformKind !== "shopify" ? "INR" : null);
+  const fetchCur = nativeCur[brand] ? undefined
+    : usdSet.has(brand) ? "USD" : (platformKind !== "shopify" ? "INR" : null);
   const preferHigh = rangeSet.has(brand);
   const viaRelay = !!(relay && localOnlySet.has(brand));
   const f = viaRelay ? fetcher.relayed(relay.url, relay.secret)

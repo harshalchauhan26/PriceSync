@@ -68,6 +68,13 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
   const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
+  const nativeCur = eng.nativeCurrency && eng.nativeCurrency[normBrand(brand)];
+  // Force the label for native-currency brands regardless of what extraction
+  // detected — geo-dependent stores (Shopify Markets etc.) can mislabel the
+  // same untouched number under a different currency depending on the
+  // fetcher's IP, and base_price for these brands is already stored in
+  // nativeCur, not INR.
+  if (nativeCur && live != null) currency = nativeCur;
   if (errMsg != null || live == null) {
     const detail = String(errMsg || "price not found").slice(0, 80);
     log(eng, { row: tag, domain: brand, url, currency: "-", price: "-", status: "Fetch Error", msg: detail });
@@ -98,6 +105,16 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
     await store.saveResult(prod, status, live, cur, state, runId, { usdBaseline: true });
     return state;
   }
+  if (nativeCur && cur === nativeCur) {
+    const delta = live - base;
+    let state, status;
+    if (Math.abs(delta) <= engTol(base, nativeCur)) { state = "matched"; status = `Price Matched (${nativeCur})`; }
+    else { state = "mismatch"; status = `Price Mismatch! (${nativeCur})`; }
+    log(eng, { row: tag, domain: brand, url, currency: nativeCur, price: String(live),
+      status: state === "matched" ? "Price Matched" : "Price Mismatch!", msg: `${nativeCur} ${live} vs baseline ${base}` });
+    await store.saveResult(prod, status, live, cur, state, runId);
+    return state;
+  }
   const liveInr = await toInr(live, cur);
   const delta = liveInr - base;
   const disp = ["INR", "UNKNOWN"].includes(cur) ? cur : `${cur}->INR`;
@@ -117,9 +134,12 @@ async function processOne(eng, fetcher, prod, runId) {
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
   const platformKind = (prod.platform || "").trim().toLowerCase();
+  const isNativeCur = !!(eng.nativeCurrency && eng.nativeCurrency[normBrand(brand)]);
   // Pin non-USD wordpress/custom fetches to INR so geo-detecting currency
   // plugins (wmc) can't serve foreign prices when the server runs abroad.
-  const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD"
+  // Native-currency brands are exempt — their own currency IS the baseline.
+  const fetchCur = isNativeCur ? undefined
+    : eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD"
     : (platformKind !== "shopify" ? "INR" : null);
   const preferHigh = eng.rangeHighBrands ? eng.rangeHighBrands.has(normBrand(brand)) : false;
   let live, currency;
@@ -206,6 +226,7 @@ function runWorker(eng, rows, fetchOpts, runId, onDone) {
         relay: eng.relay || null,
         wooApi: [...(eng.wooApiBrands || [])],
         relayParams: eng.relayParams || {},
+        nativeCurrency: eng.nativeCurrency || {},
       },
     });
     let chain = Promise.resolve();
@@ -311,6 +332,7 @@ export async function startPipeline(eng, runId) {
       : null;
     eng.wooApiBrands = await store.wooApiBrandSet();
     eng.relayParams = await store.relayAppendParams();
+    eng.nativeCurrency = await store.nativeCurrencyBrands();
     if (config.isCloud && eng.localOnlyBrands.size && !eng.relay) {
       const before = rows.length;
       rows = rows.filter((r) => !eng.localOnlyBrands.has(normBrand(r.brand)));

@@ -399,6 +399,30 @@ export async function setRelayAppendParams(obj) {
   return obj || {};
 }
 
+// ---- per-brand NATIVE currency (base_price is stored directly in this
+// currency, not INR — skip FX conversion and force this currency label
+// instead of trusting geo-dependent detection, e.g. Shopify Markets serving
+// USD-labeled prices to a foreign-IP fetcher for a shop whose real/base
+// currency is CAD) ----
+export async function nativeCurrencyBrands() {
+  const raw = await getMeta("native_currency_brands", "");
+  try {
+    const obj = JSON.parse(raw || "{}");
+    const out = {};
+    for (const [b, cur] of Object.entries(obj)) out[normBrand(b)] = String(cur || "").toUpperCase();
+    return out;
+  } catch { return {}; }
+}
+export async function setNativeCurrencyBrands(obj) {
+  const clean = {};
+  for (const [b, cur] of Object.entries(obj || {})) {
+    const nb = normBrand(b); const nc = String(cur || "").trim().toUpperCase();
+    if (nb && nc) clean[nb] = nc;
+  }
+  await setMeta("native_currency_brands", JSON.stringify(clean));
+  return clean;
+}
+
 // ---- approval archive ----
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
