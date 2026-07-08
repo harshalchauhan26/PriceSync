@@ -333,6 +333,28 @@ app.post("/api/review/update_base", wrap(async (req, res) => {
   await q("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [baseInr, it.key]);
   res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, currency: cur, counts: await store.counts() });
 }));
+app.post("/api/review/update_base_all", wrap(async (req, res) => {
+  const stateMap = { mismatch: "mismatch", error: "error", resolved: "matched" };
+  const state = stateMap[req.body.kind] || "mismatch";
+  const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
+  const cl = ["state=$1", "live_price IS NOT NULL"]; const p = [state];
+  if (brands.length) { cl.push(`brand IN (${brands.map((_, i) => `$${p.length + i + 1}`).join(",")})`); p.push(...brands); }
+  const rows = await q(`SELECT id,key,live_price,currency FROM products WHERE ${cl.join(" AND ")}`, p);
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  let updated = 0;
+  for (const r of rows) {
+    const cur = String(r.currency || "INR").trim().toUpperCase();
+    const baseInr = await toInr(r.live_price, cur);
+    if (baseInr == null || !Number.isFinite(baseInr) || baseInr <= 0) continue;
+    const baseUsd = cur === "USD" ? r.live_price : null;
+    await q(`UPDATE products SET base_price=$1, base_usd=$2, live_price=NULL, currency=NULL,
+        delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$3
+      WHERE id=$4`, [baseInr, baseUsd, now, r.id]);
+    await q("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [baseInr, r.key]);
+    updated++;
+  }
+  res.json({ ok: true, updated, counts: await store.counts() });
+}));
 app.post("/api/review/delete", wrap(async (req, res) => {
   const it = await one("SELECT key FROM products WHERE id=$1", [req.body.row]);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
@@ -515,6 +537,25 @@ app.post("/api/db/empty", sec.ownerOnly, wrap(async (req, res) => {
   }
   await q("DELETE FROM meta WHERE k IN ('last_import','last_import_rows','last_import_contains','last_import_domains')");
   res.json({ ok: true, removed, tables });
+}));
+
+// Scoped delete for a page's current view (tab/state + vendor filter) — the
+// non-nuclear alternative to /api/db/empty. Refuses an unscoped call so a
+// stray click can't wipe the whole products table from a data page; the
+// full wipe stays owner-only in the Settings console.
+app.post("/api/db/clear_scope", wrap(async (req, res) => {
+  const stateMap = { mismatch: "mismatch", error: "error", resolved: "matched" };
+  const state = stateMap[req.body.kind] || null;
+  const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
+  const cl = []; const p = [];
+  if (state) { cl.push(`state=$${p.length + 1}`); p.push(state); }
+  if (brands.length) { cl.push(`brand IN (${brands.map((_, i) => `$${p.length + i + 1}`).join(",")})`); p.push(...brands); }
+  if (!cl.length) return res.status(400).json({ ok: false, error: "select a vendor or tab to scope the clear" });
+  const where = "WHERE " + cl.join(" AND ");
+  const deleted = await q(`DELETE FROM products ${where} RETURNING key`, p);
+  const keys = deleted.map((r) => r.key);
+  if (keys.length) await q("DELETE FROM import_catalog WHERE key = ANY($1)", [keys]);
+  res.json({ ok: true, removed: keys.length });
 }));
 
 // ---------- owner console ----------

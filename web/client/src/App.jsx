@@ -144,7 +144,27 @@ function EmptyDbBtn({admin}) {
   </button>;
 }
 
-/* ─── Page toolbar (vendor filter + clear + empty DB) ─────── */
+/* ─── Clear-scope button (page-scoped delete; replaces the old global
+       Empty DB button everywhere except the owner-only Settings console) ── */
+function ClearScopeBtn({admin, kind, brands, label, disabled, onDone}) {
+  const [busy,setBusy]=useState(false);
+  const scope = brands?.length ? (brands.length===1?brands[0]:`${brands.length} vendors`) : "ALL vendors";
+  const go=async()=>{
+    if(!admin) return toast("Admin only","err");
+    if(!confirm(`Delete every product row in this view${kind?` (${label||kind})`:""} for ${scope} from the database?\n\nThis removes the rows entirely, not just marks them reviewed. Cannot be undone.`)) return;
+    setBusy(true);
+    const r=await aj("/api/db/clear_scope",{kind, brands});
+    setBusy(false);
+    r.ok?toast(`Cleared ${fmtInt(r.removed)} row(s)`,"ok"):toast(r.error||"Failed","err");
+    onDone && onDone();
+  };
+  return <button className="btn btn-sm btn-empty" onClick={go} disabled={busy||!admin||disabled}
+    title={disabled?"Select a vendor first":"Delete rows matching this view from the database"}>
+    <Icon n="trash" s={12}/>{busy?"Clearing…":"Clear this view"}
+  </button>;
+}
+
+/* ─── Page toolbar (vendor filter + clear) ─────────────────── */
 function PageBar({title, subtitle, admin, vendor, onVendor, onClear, extraLeft, extraRight, kind, source}) {
   return <div style={{marginBottom:20}}>
     <div style={{marginBottom:12}}>
@@ -159,8 +179,6 @@ function PageBar({title, subtitle, admin, vendor, onVendor, onClear, extraLeft, 
       <button className="btn btn-sm btn-ghost" onClick={onClear} title="Clear filters & screen">
         <Icon n="x" s={12}/>Clear
       </button>
-      <div className="toolbar-sep"/>
-      <EmptyDbBtn admin={admin}/>
       {extraRight}
     </div>
   </div>;
@@ -470,7 +488,7 @@ function Pipeline({admin}) {
         <button className="btn btn-ghost btn-sm" onClick={setCurrency} disabled={!admin}><Icon n="check" s={12}/>Set currency</button>
         <div style={{marginLeft:"auto",display:"flex",gap:8}}>
           <button className="btn btn-ghost btn-sm" onClick={clearLog}><Icon n="x" s={12}/>Clear log</button>
-          <EmptyDbBtn admin={admin}/>
+          <ClearScopeBtn admin={admin} brands={vsel} disabled={!vsel.length} onDone={refreshMeta}/>
         </div>
       </div>
 
@@ -554,6 +572,7 @@ function Review({admin}) {
   const approveSel=async()=>{ if(!sel.size) return toast("Select rows first","err"); let pushed=0,failed=0; for(const id of sel){ const it=items.find(x=>x.id===id); const r=await aj("/api/review/decide",{row:id,decision:"approved",markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.shopify?.ok?pushed++:failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed?`, ${failed} failed`:""}`,failed?"err":"ok"); load(); };
   const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); r.ok?toast(`Approved ${r.approved}`,"ok"):toast(r.error,"err"); load(); };
   const rejectAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Reject ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/reject_all",{kind:tab,brands:bList}); r.ok?toast(`Rejected ${r.rejected}`,"ok"):toast(r.error||"Failed","err"); load(); };
+  const updateBaseAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!items.length) return toast("Nothing to update","err"); if(!confirm(`Set base price = live price (currency-converted, no markup) for ALL ${items.length} ${tab} rows, then clear live?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/update_base_all",{kind:tab,brands:bList}); r.ok?toast(`Base updated on ${r.updated} row(s)`,"ok"):toast(r.error||"Failed","err"); load(); };
   const emailReport=async()=>{ const bList=vendor?[vendor]:brands; const scope=bList.length?`${bList.length} brand(s)`:"all brands"; if(!confirm(`Email a per-brand mismatch sheet for ${scope}?`)) return; toast("Sending…","ok"); const r=await aj("/api/alerts/email_mismatch",{brands:bList}); r.ok?toast(`Emailed ${r.count} mismatch(es) to ${r.to}`,"ok"):toast(r.error||"Email failed","err"); };
   const clear=()=>{ setBrands([]); setVendor(""); setTab("mismatch"); setSel(new Set()); };
   const tog=(id)=>{ const n=new Set(sel); n.has(id)?n.delete(id):n.add(id); setSel(n); };
@@ -589,6 +608,12 @@ function Review({admin}) {
       </div>
       <button className="btn btn-success btn-sm" onClick={approveAll} disabled={!admin||!items.length}><Icon n="check" s={12}/>Approve all ({items.length})</button>
       <button className="btn btn-danger btn-sm" onClick={rejectAll} disabled={!admin||!items.length}><Icon n="x" s={12}/>Reject all</button>
+      <button className="btn btn-ghost btn-sm" onClick={updateBaseAll} disabled={!admin||!items.length}
+        title="Set base price = current live price (currency-converted, no markup) for every row below, then clear live">
+        <Icon n="up" s={12}/>Update base = live (all)
+      </button>
+      <div className="toolbar-sep"/>
+      <ClearScopeBtn admin={admin} kind={tab} label={tabs.find(t=>t[0]===tab)?.[1]} brands={vendor?[vendor]:brands} onDone={load}/>
     </div>
 
     {/* Tabs */}
