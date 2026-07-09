@@ -20,10 +20,16 @@ function productRefOf(url) {
     };
   } catch { return { handle: "", productId: "", variantId: "" }; }
 }
+// The integration row rarely changes but was re-read from the DB (a remote
+// round-trip) for every single push — cache it and invalidate on save.
+let _cfgCache = { at: 0, val: null };
+export function invalidateShopifyCfg() { _cfgCache = { at: 0, val: null }; }
 async function cfg() {
+  if (_cfgCache.val && Date.now() - _cfgCache.at < 30000) return _cfgCache.val;
   const c = await getStoreIntegration();
-  if (!c) return null;
-  return { ...c, access_token: decrypt(c.access_token) };
+  const val = c ? { ...c, access_token: decrypt(c.access_token) } : null;
+  _cfgCache = { at: Date.now(), val };
+  return val;
 }
 
 let _pushChain = Promise.resolve();
@@ -77,58 +83,64 @@ async function _pushPrice(url, price) {
   const base = `https://${c.shop_domain}/admin/api/${ver}`;
   const headers = { "X-Shopify-Access-Token": c.access_token, "Content-Type": "application/json" };
   try {
-    const product = ref.productId
-      ? (await shopReq(() => axios.get(`${base}/products/${ref.productId}.json`, { params: { fields: "id,variants" }, headers, timeout: 20000 }))).data.product
-      : ((await shopReq(() => axios.get(`${base}/products.json`, { params: { handle: ref.handle, fields: "id,variants" }, headers, timeout: 20000 }))).data.products || [])[0];
-    if (!product) return {
-      ok: false, product_url: url, old_price: null, new_price: price,
-      update_status: `${label} not found in store`, status: `${label} not found in store`,
-    };
-    const variants = ref.variantId
-      ? (product.variants || []).filter((v) => String(v.id) === ref.variantId)
-      : (product.variants || []);
-    if (!variants.length) {
-      const msg = ref.variantId ? `variant ${ref.variantId} not found in ${label}` : `${label} has no variants`;
-      return { ok: false, product_url: url, product_id: product.id, variant_id: ref.variantId || null,
-        variant_ids: [], old_price: null, old_prices: [], new_price: price, update_status: msg, status: msg };
-    }
-    const oldPrices = variants.map((v) => ({ variant_id: String(v.id), old_price: v.price }));
-    const variantLabel = ref.variantId ? `variant ${variants[0].id}` : `all ${variants.length} variant(s)`;
-    if (c.dry_run) {
-      const msg = `DRY RUN: would set ${label} ${variantLabel} -> ${price}`;
-      return { ok: true, product_url: url, product_id: product.id,
-        variant_id: String(variants[0].id), variant_ids: variants.map((v) => String(v.id)),
-        old_price: variants[0].price, old_prices: oldPrices, new_price: price,
-        update_status: msg, status: msg };
-    }
-    const updated = [];
-    const failed = [];
-    for (const variant of variants) {
-      try {
-        const pr = await shopReq(() => axios.put(`${base}/variants/${variant.id}.json`,
-          { variant: { id: variant.id, price: String(price) } }, { headers, timeout: 20000 }));
-        if ([200, 201].includes(pr.status)) updated.push(String(variant.id));
-        else failed.push({ variant_id: String(variant.id), error: `HTTP ${pr.status}` });
-      } catch (error) {
-        failed.push({ variant_id: String(variant.id), error: String(error.response?.status || error.message) });
+    let productId = ref.productId || null;
+    let variantIds = [];
+    let oldPrices = [];
+    if (ref.variantId && !c.dry_run) {
+      // Fast path: a live push to a known variant id needs no product lookup.
+      variantIds = [ref.variantId];
+    } else {
+      const product = ref.productId
+        ? (await shopReq(() => axios.get(`${base}/products/${ref.productId}.json`, { params: { fields: "id,variants" }, headers, timeout: 20000 }))).data.product
+        : ((await shopReq(() => axios.get(`${base}/products.json`, { params: { handle: ref.handle, fields: "id,variants" }, headers, timeout: 20000 }))).data.products || [])[0];
+      if (!product) return {
+        ok: false, product_url: url, old_price: null, new_price: price,
+        update_status: `${label} not found in store`, status: `${label} not found in store`,
+      };
+      const variants = ref.variantId
+        ? (product.variants || []).filter((v) => String(v.id) === ref.variantId)
+        : (product.variants || []);
+      if (!variants.length) {
+        const msg = ref.variantId ? `variant ${ref.variantId} not found in ${label}` : `${label} has no variants`;
+        return { ok: false, product_url: url, product_id: product.id, variant_id: ref.variantId || null,
+          variant_ids: [], old_price: null, old_prices: [], new_price: price, update_status: msg, status: msg };
+      }
+      productId = product.id;
+      variantIds = variants.map((v) => String(v.id));
+      oldPrices = variants.map((v) => ({ variant_id: String(v.id), old_price: v.price }));
+      if (c.dry_run) {
+        const variantLabel = ref.variantId ? `variant ${variants[0].id}` : `all ${variants.length} variant(s)`;
+        const msg = `DRY RUN: would set ${label} ${variantLabel} -> ${price}`;
+        return { ok: true, product_url: url, product_id: product.id,
+          variant_id: variantIds[0], variant_ids: variantIds,
+          old_price: variants[0].price, old_prices: oldPrices, new_price: price,
+          update_status: msg, status: msg };
       }
     }
-    const verified = [];
-    const verifyFailed = [];
-    for (const id of updated) {
-      const check = await shopReq(() => axios.get(`${base}/variants/${id}.json`, { headers, timeout: 20000 }));
-      const verifiedPrice = check.data.variant?.price;
-      if (Number(verifiedPrice) === Number(price)) verified.push({ variant_id: id, price: verifiedPrice });
-      else verifyFailed.push({ variant_id: id, expected: price, found: verifiedPrice });
-    }
-    const ok = failed.length === 0 && verifyFailed.length === 0 && verified.length === variants.length;
+    // Update variants concurrently; the PUT response echoes the saved price,
+    // which doubles as verification — no extra GET round-trip per variant.
+    const results = await Promise.all(variantIds.map(async (id) => {
+      try {
+        const pr = await shopReq(() => axios.put(`${base}/variants/${id}.json`,
+          { variant: { id: Number(id), price: String(price) } }, { headers, timeout: 20000 }));
+        const saved = pr.data?.variant?.price;
+        if (Number(saved) === Number(price)) return { verified: { variant_id: id, price: saved } };
+        return { verifyFailed: { variant_id: id, expected: price, found: saved } };
+      } catch (error) {
+        return { failed: { variant_id: id, error: String(error.response?.status || error.message) } };
+      }
+    }));
+    const verified = results.filter((r) => r.verified).map((r) => r.verified);
+    const failed = results.filter((r) => r.failed).map((r) => r.failed);
+    const verifyFailed = results.filter((r) => r.verifyFailed).map((r) => r.verifyFailed);
+    const ok = failed.length === 0 && verifyFailed.length === 0 && verified.length === variantIds.length;
     const msg = ok
       ? `updated all ${verified.length} variant(s) -> ${Number(price).toFixed(2)}`
-      : `PARTIAL/FAILED: updated ${verified.length}/${variants.length}, failed ${failed.length + verifyFailed.length}`;
-    return { ok, product_url: url, product_id: product.id,
-      variant_id: String(variants[0].id), variant_ids: variants.map((v) => String(v.id)),
+      : `PARTIAL/FAILED: updated ${verified.length}/${variantIds.length}, failed ${failed.length + verifyFailed.length}`;
+    return { ok, product_url: url, product_id: productId,
+      variant_id: variantIds[0], variant_ids: variantIds,
       updated_variants: verified, failed_variants: failed, verification_errors: verifyFailed,
-      old_price: variants[0].price, old_prices: oldPrices, new_price: price,
+      old_price: oldPrices[0]?.old_price ?? null, old_prices: oldPrices, new_price: price,
       update_status: msg, status: msg };
   } catch (e) {
     const msg = "Shopify API error: " + (e.response?.status || e.message);

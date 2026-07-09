@@ -2,10 +2,10 @@ import { q } from "./db.js";
 import { pushRowPrice } from "./price-update.js";
 
 // Batched Shopify push with live progress. One job at a time; batches of 10
-// run in order, items inside a batch run with small concurrency (safe under
-// Shopify's 2 req/s + burst-40 REST limit given shopReq's 429 backoff).
+// run in order, items inside a batch run concurrently (Shopify's burst-40
+// REST bucket plus shopReq's 429 backoff keep this safe).
 const BATCH_SIZE = 10;
-const BATCH_CONCURRENCY = 3;
+const BATCH_CONCURRENCY = 5;
 const KEEP_JOBS = 5;
 
 const jobs = new Map(); // insertion-ordered: oldest first
@@ -88,10 +88,12 @@ async function pushOne(job, batch, item) {
   job.done++;
   const at = new Date().toISOString();
   try {
-    await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
-      [result.status, at, item.id]);
-    if (item.key) await q("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE key=$3",
-      [result.status, at, item.key]);
+    await Promise.all([
+      q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
+        [result.status, at, item.id]),
+      item.key ? q("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE key=$3",
+        [result.status, at, item.key]) : null,
+    ]);
   } catch (e) { console.error("[MBO] push job status write:", e.message); }
 }
 

@@ -17,7 +17,7 @@ import { encrypt } from "./crypto.js";
 import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
 import { sendMismatchReport } from "./mailer.js";
-import { pushPrice, verifyStore } from "./shopify.js";
+import { pushPrice, verifyStore, invalidateShopifyCfg } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
 import { startPushJob, getPushJob, runningPushJob } from './push-job.js';
 
@@ -479,6 +479,7 @@ app.post("/api/integration/save", wrap(async (req, res) => {
     [store.STORE_KEY, (d.shop_domain || "").trim(), token, (d.api_version || "2024-10").trim(),
       d.dry_run ? 1 : 0, new Date().toISOString()]);
   if (d.price_url_source) await setPriceUrlSource(d.price_url_source);
+  invalidateShopifyCfg();
   res.json({ ok: true });
 }));
 app.post("/api/integration/verify", wrap(async (req, res) => res.json(await verifyStore())));
