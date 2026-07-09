@@ -2,8 +2,8 @@ import { q } from "./db.js";
 import { pushRowPrice } from "./price-update.js";
 
 // Batched Shopify push with live progress. One job at a time; batches of 10
-// run in order, items inside a batch run concurrently (Shopify's burst-40
-// REST bucket plus shopReq's 429 backoff keep this safe).
+// run in order, items inside a batch run concurrently. Pushes go over the
+// GraphQL Admin API (2 calls per product, cost-aware throttle retry in gql()).
 const BATCH_SIZE = 10;
 const BATCH_CONCURRENCY = 5;
 const KEEP_JOBS = 5;
