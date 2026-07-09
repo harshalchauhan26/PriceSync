@@ -19,6 +19,7 @@ import * as pipe from "./pipeline.js";
 import { sendMismatchReport } from "./mailer.js";
 import { pushPrice, verifyStore } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
+import { startPushJob, getPushJob, runningPushJob } from './push-job.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.resolve(__dirname, "../../client/dist");
@@ -363,6 +364,8 @@ app.post("/api/review/delete", wrap(async (req, res) => {
   res.json({ ok: true, counts: await store.counts() });
 }));
 app.post("/api/review/approve_all", wrap(async (req, res) => {
+  const busy = runningPushJob();
+  if (busy) return res.status(409).json({ ok: false, error: "a Shopify push is already running — wait for it to finish", job: busy });
   const kind = req.body.kind || "mismatch";
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
   const brands = (req.body.brands || []).filter(Boolean);
@@ -379,10 +382,8 @@ app.post("/api/review/approve_all", wrap(async (req, res) => {
     }
     await client.query("COMMIT");
   } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
-  (async () => { for (const item of archived) {
-    try { await pushApprovedToStore(item); } catch (e) { console.error("[MBO] approve_all push:", e.message); }
-  } })();
-  res.json({ ok: true, approved: n, queued: archived.length });
+  const push = archived.length ? startPushJob(archived, `Approve all · ${kind}`) : null;
+  res.json({ ok: true, approved: n, queued: archived.length, job: push?.job || null });
 }));
 app.post("/api/review/reject_all", wrap(async (req, res) => {
   const kind = req.body.kind || "mismatch";
@@ -405,17 +406,17 @@ app.post("/api/history/push", wrap(async (req, res) => {
   res.json({ ok: r.ok, status: r.status });
 }));
 app.post("/api/history/push_all", wrap(async (req, res) => {
+  const busy = runningPushJob();
+  if (busy) return res.status(409).json({ ok: false, error: "a Shopify push is already running — wait for it to finish", job: busy });
   const rows = await q(`SELECT * FROM review_history
     WHERE shopify_status IS NULL OR NOT (shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')
     ORDER BY approved_at LIMIT 1000`);
-  (async () => { for (const it of rows) {
-    try {
-      const r = await pushRowPrice(it, it.final_price);
-      await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3", [r.status, new Date().toISOString(), it.id]);
-    } catch (e) { console.error("[MBO] push_all:", e.message); }
-  } })();
-  res.json({ ok: true, queued: rows.length });
+  const push = rows.length ? startPushJob(rows, "Retry / Push all") : null;
+  res.json({ ok: true, queued: rows.length, job: push?.job || null });
 }));
+
+// ---------- push job progress ----------
+app.get("/api/push/job", wrap(async (req, res) => res.json({ ok: true, job: getPushJob(req.query.id) })));
 app.post("/api/history/clear", wrap(async (req, res) => {
   const removed = await store.clearHistory();
   res.json({ ok: true, removed });

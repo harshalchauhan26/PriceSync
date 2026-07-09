@@ -1,5 +1,5 @@
 import { getMeta, setMeta } from './store.js';
-import { pushPrice } from './shopify.js';
+import { pushPrice, pushPriceNow } from './shopify.js';
 
 export const URL_SOURCES = new Set(['mbo', 'designer']);
 
@@ -23,13 +23,13 @@ export function resolvePriceUpdateUrl(row, source) {
     (fallback ? (source === 'mbo' ? 'designer' : 'mbo') : 'none') };
 }
 
-export async function pushRowPrice(row, price) {
+export async function pushRowPrice(row, price, { queued = true } = {}) {
   const requested = await getPriceUrlSource();
   const selected = resolvePriceUpdateUrl(row, requested);
   if (!selected.url) return {
     ok: false, status: 'no MBO or Designer URL available', requested, used: 'none',
   };
-  const result = await pushPrice(selected.url, price);
+  const result = await (queued ? pushPrice : pushPriceNow)(selected.url, price);
   const label = selected.used === 'mbo' ? 'MBO URL' : 'Designer URL';
   return { ...result, status: result.status + ' · ' + label,
     requested, used: selected.used, source_url: selected.url };

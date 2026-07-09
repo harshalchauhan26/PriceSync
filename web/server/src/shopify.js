@@ -33,8 +33,28 @@ function enqueuePush(task) {
   return run;
 }
 
+// Shopify REST leaks 2 req/s (burst 40) — back off on 429/5xx instead of failing the row.
+const RETRY_LIMIT = 3;
+async function shopReq(fn) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      const status = e.response?.status;
+      const retriable = status === 429 || (status >= 500 && status < 600);
+      if (!retriable || attempt >= RETRY_LIMIT) throw e;
+      const after = Number(e.response?.headers?.["retry-after"]);
+      const wait = Number.isFinite(after) && after > 0 ? after * 1000 : 1500 * (attempt + 1);
+      await new Promise((r) => setTimeout(r, Math.min(wait, 15000)));
+    }
+  }
+}
+
 export function pushPrice(url, price) {
   return enqueuePush(() => _pushPrice(url, price));
+}
+// Unqueued variant for the batch push job, which manages its own concurrency.
+export function pushPriceNow(url, price) {
+  return _pushPrice(url, price);
 }
 async function _pushPrice(url, price) {
   const c = await cfg();
@@ -58,8 +78,8 @@ async function _pushPrice(url, price) {
   const headers = { "X-Shopify-Access-Token": c.access_token, "Content-Type": "application/json" };
   try {
     const product = ref.productId
-      ? (await axios.get(`${base}/products/${ref.productId}.json`, { params: { fields: "id,variants" }, headers, timeout: 20000 })).data.product
-      : ((await axios.get(`${base}/products.json`, { params: { handle: ref.handle, fields: "id,variants" }, headers, timeout: 20000 })).data.products || [])[0];
+      ? (await shopReq(() => axios.get(`${base}/products/${ref.productId}.json`, { params: { fields: "id,variants" }, headers, timeout: 20000 }))).data.product
+      : ((await shopReq(() => axios.get(`${base}/products.json`, { params: { handle: ref.handle, fields: "id,variants" }, headers, timeout: 20000 }))).data.products || [])[0];
     if (!product) return {
       ok: false, product_url: url, old_price: null, new_price: price,
       update_status: `${label} not found in store`, status: `${label} not found in store`,
@@ -85,8 +105,8 @@ async function _pushPrice(url, price) {
     const failed = [];
     for (const variant of variants) {
       try {
-        const pr = await axios.put(`${base}/variants/${variant.id}.json`,
-          { variant: { id: variant.id, price: String(price) } }, { headers, timeout: 20000 });
+        const pr = await shopReq(() => axios.put(`${base}/variants/${variant.id}.json`,
+          { variant: { id: variant.id, price: String(price) } }, { headers, timeout: 20000 }));
         if ([200, 201].includes(pr.status)) updated.push(String(variant.id));
         else failed.push({ variant_id: String(variant.id), error: `HTTP ${pr.status}` });
       } catch (error) {
@@ -96,7 +116,7 @@ async function _pushPrice(url, price) {
     const verified = [];
     const verifyFailed = [];
     for (const id of updated) {
-      const check = await axios.get(`${base}/variants/${id}.json`, { headers, timeout: 20000 });
+      const check = await shopReq(() => axios.get(`${base}/variants/${id}.json`, { headers, timeout: 20000 }));
       const verifiedPrice = check.data.variant?.price;
       if (Number(verifiedPrice) === Number(price)) verified.push({ variant_id: id, price: verifiedPrice });
       else verifyFailed.push({ variant_id: id, expected: price, found: verifiedPrice });

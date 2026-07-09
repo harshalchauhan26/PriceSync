@@ -104,6 +104,72 @@ function BrandMultiSelect({value, onChange, kind}) {
   </div>;
 }
 
+/* ─── Shopify push job progress (batches of 10) ────────────── */
+function PushJobPanel({job:initial, onDone, onClose}) {
+  const [job,setJob]=useState(initial);
+  const cbRef=useRef({onDone}); cbRef.current={onDone};
+  useEffect(()=>{
+    setJob(initial);
+    if(!initial?.id||initial.state==="done") return;
+    let alive=true, t=null;
+    const tick=async()=>{
+      const r=await api(`/api/push/job?id=${encodeURIComponent(initial.id)}`);
+      if(!alive) return;
+      const j=r.job;
+      if(j) setJob(j);
+      if(!j||j.state==="done"){
+        if(j) toast(j.fail?`Shopify push finished — ${j.ok} ok, ${j.fail} failed`:`Shopify push finished — all ${j.ok} updated`, j.fail?"err":"ok");
+        cbRef.current.onDone?.(); return;
+      }
+      t=setTimeout(tick,1200);
+    };
+    t=setTimeout(tick,700);
+    return ()=>{ alive=false; clearTimeout(t); };
+  },[initial?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  if(!job) return null;
+  const pct=job.total?Math.round(job.done/job.total*100):100;
+  const running=job.state==="running";
+  const itemDot=(s)=>s==="ok"?["✓","var(--green)"]:s==="failed"?["✗","var(--red)"]:s==="pushing"?["●","var(--blue)"]:["·","var(--on3)"];
+  return <div className="card" style={{padding:"12px 16px",marginBottom:12,border:"1px solid "+(running?"rgba(59,130,246,.35)":job.fail?"rgba(239,68,68,.35)":"rgba(34,197,94,.3)")}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <span className="lbl">Shopify Push</span>
+      <span style={{fontSize:12,color:"var(--on2)"}}>{job.label}</span>
+      <span className="mono" style={{fontSize:12}}>{job.done}/{job.total}</span>
+      <span className="mono" style={{fontSize:12,color:"var(--green)"}}>✓ {job.ok}</span>
+      {job.fail>0&&<span className="mono" style={{fontSize:12,color:"var(--red)"}}>✗ {job.fail}</span>}
+      <span style={{fontSize:11,color:running?"var(--blue)":"var(--on3)"}}>{running?"pushing in batches of "+(job.batch_size||10)+"…":"finished"}</span>
+      {job.error&&<span style={{fontSize:11,color:"var(--red)"}}>{job.error}</span>}
+      <div style={{flex:1}}/>
+      {!running&&<button className="btn btn-ghost btn-sm" onClick={onClose}><Icon n="x" s={12}/>Dismiss</button>}
+    </div>
+    <div className="progress-track" style={{margin:"10px 0"}}>
+      <div className="progress-fill" style={{width:pct+"%"}}/>
+    </div>
+    <div style={{maxHeight:280,overflowY:"auto",display:"flex",flexDirection:"column",gap:10}}>
+      {job.batches.map(b=>{
+        const c=b.status==="done"?(b.fail?"var(--red)":"var(--green)"):b.status==="running"?"var(--blue)":"var(--on3)";
+        return <div key={b.n}>
+          <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,fontWeight:700,letterSpacing:.4,color:c}}>
+            <span>BATCH {b.n}</span>
+            <span className="mono" style={{fontWeight:400,fontSize:11.5}}>
+              {b.status==="waiting"?"waiting":b.status==="running"?`pushing ${b.ok+b.fail}/${b.items.length}…`:`done · ${b.ok} ok${b.fail?` · ${b.fail} failed`:""}`}
+            </span>
+          </div>
+          {b.status!=="waiting"&&<div style={{marginTop:4,display:"flex",flexDirection:"column",gap:2}}>
+            {b.items.map((it,i)=>{ const [dot,dc]=itemDot(it.status); return <div key={i} style={{display:"flex",gap:8,alignItems:"center",fontSize:11.5,paddingLeft:14}}>
+              <span className="mono" style={{width:10,textAlign:"center",color:dc}}>{dot}</span>
+              <span className="mono" style={{color:"var(--on3)",minWidth:100,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(it.brand||"").replace(/^www\./,"")}</span>
+              <span style={{color:"var(--on2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:300}}>{trunc(it.url,44)}</span>
+              <span className="mono" style={{color:"var(--green)"}}>{fmt(it.price)}</span>
+              <span style={{color:it.status==="failed"?"var(--red)":"var(--on3)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{it.message}</span>
+            </div>;})}
+          </div>}
+        </div>;
+      })}
+    </div>
+  </div>;
+}
+
 /* ─── Stat card ────────────────────────────────────────────── */
 const Stat = ({k,v,c}) =>
   <div className="stat-card">
@@ -545,6 +611,7 @@ function Review({admin}) {
   const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
   const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
   const [vendor,setVendor]=useState("");
+  const [pushJob,setPushJob]=useState(null);
   const convOn=convCur!=="INR";
 
   const load=useCallback(async()=>{
@@ -570,7 +637,7 @@ function Review({admin}) {
     const r=await aj("/api/review/update_base",{row:it.id,currency:it._cur});
     r.ok?toast(`Base updated to ₹${fmt(r.base_price)} — live cleared`,"ok"):toast(r.error||"Failed","err"); load(); };
   const approveSel=async()=>{ if(!sel.size) return toast("Select rows first","err"); let pushed=0,failed=0; for(const id of sel){ const it=items.find(x=>x.id===id); const r=await aj("/api/review/decide",{row:id,decision:"approved",markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.shopify?.ok?pushed++:failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed?`, ${failed} failed`:""}`,failed?"err":"ok"); load(); };
-  const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); r.ok?toast(`Approved ${r.approved}`,"ok"):toast(r.error,"err"); load(); };
+  const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}? Prices are pushed to Shopify in batches of 10.`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); if(r.ok){ toast(`Approved ${r.approved}${r.job?` — pushing ${r.queued} to Shopify`:""}`,"ok"); if(r.job) setPushJob(r.job); } else { toast(r.error,"err"); if(r.job) setPushJob(r.job); } load(); };
   const rejectAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Reject ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/reject_all",{kind:tab,brands:bList}); r.ok?toast(`Rejected ${r.rejected}`,"ok"):toast(r.error||"Failed","err"); load(); };
   const updateBaseAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!items.length) return toast("Nothing to update","err"); if(!confirm(`Set base price = live price (currency-converted, no markup) for ALL ${items.length} ${tab} rows, then clear live?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/update_base_all",{kind:tab,brands:bList}); r.ok?toast(`Base updated on ${r.updated} row(s)`,"ok"):toast(r.error||"Failed","err"); load(); };
   const emailReport=async()=>{ const bList=vendor?[vendor]:brands; const scope=bList.length?`${bList.length} brand(s)`:"all brands"; if(!confirm(`Email a per-brand mismatch sheet for ${scope}?`)) return; toast("Sending…","ok"); const r=await aj("/api/alerts/email_mismatch",{brands:bList}); r.ok?toast(`Emailed ${r.count} mismatch(es) to ${r.to}`,"ok"):toast(r.error||"Email failed","err"); };
@@ -615,6 +682,9 @@ function Review({admin}) {
       <div className="toolbar-sep"/>
       <ClearScopeBtn admin={admin} kind={tab} label={tabs.find(t=>t[0]===tab)?.[1]} brands={vendor?[vendor]:brands} onDone={load}/>
     </div>
+
+    {/* Shopify push progress (batches of 10) */}
+    {pushJob&&<PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/>}
 
     {/* Tabs */}
     <div className="tab-bar" style={{marginBottom:10}}>
@@ -664,10 +734,11 @@ function Review({admin}) {
 ═══════════════════════════════════════════════════════════════ */
 function History({admin}) {
   const [d,setD]=useState({items:[],count:0,value:0,pushed:0,failed:0}); const [brand,setBrand]=useState(""); const [status,setStatus]=useState("");
+  const [pushJob,setPushJob]=useState(null);
   const load=useCallback(()=>api(`/api/history?brand=${encodeURIComponent(brand)}&status=${status}`).then(setD),[brand,status]);
   useEffect(()=>{ load(); },[load]);
   const push=async(it)=>{ if(!admin) return toast("Admin only","err"); toast("Pushing…"); const r=await aj("/api/history/push",{row:it.id}); toast(r.status||"done",r.ok?"ok":"err"); load(); };
-  const pushAll=async()=>{ if(!admin||!confirm("Re-push all prices not yet successfully pushed?")) return; const r=await aj("/api/history/push_all",{}); toast(`Queued ${fmtInt(r.queued)}`,"ok"); setTimeout(load,1000); };
+  const pushAll=async()=>{ if(!admin||!confirm("Re-push all prices not yet successfully pushed? Runs in batches of 10.")) return; const r=await aj("/api/history/push_all",{}); if(r.ok){ if(!r.queued) return toast("Nothing to push — everything is already up to date","ok"); toast(`Pushing ${fmtInt(r.queued)} in batches of 10`,"ok"); setPushJob(r.job); } else { toast(r.error||"Failed","err"); if(r.job) setPushJob(r.job); } };
   const clearDb=async()=>{ if(!admin) return toast("Admin only","err"); if(!d.count) return toast("History already empty","ok"); if(!confirm(`Delete ALL ${fmtInt(d.count)} review history records?`)) return; const r=await aj("/api/history/clear",{}); r.ok?toast(`Cleared ${fmtInt(r.removed)} records`,"ok"):toast(r.error||"Failed","err"); load(); };
   const clear=()=>{ setBrand(""); setStatus(""); };
 
@@ -685,6 +756,8 @@ function History({admin}) {
         <button className="btn btn-primary btn-sm" onClick={pushAll} disabled={!admin}><Icon n="share" s={12}/>Retry / Push all</button>
         <button className="btn btn-danger btn-sm" onClick={clearDb} disabled={!admin||!d.count}><Icon n="trash" s={12}/>Clear History</button>
       </>}/>
+
+    {pushJob&&<PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/>}
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
       <Stat k="Approved"      v={fmtInt(d.count)}/>
