@@ -194,39 +194,12 @@ function ChartBox({type,labels,datasets,options,h=200}) {
   return <div style={{height:h}}><canvas ref={ref}/></div>;
 }
 
-/* ─── Empty DB button (shared) ─────────────────────────────── */
-function EmptyDbBtn({admin}) {
-  const [busy,setBusy]=useState(false);
-  const go=async()=>{
-    if(!admin) return toast("Admin only","err");
-    if(!confirm("⚠️ EMPTY DATABASE\n\nThis will DELETE all products, price history, review history, and import catalog from Supabase.\n\nThis action cannot be undone. Continue?")) return;
-    setBusy(true);
-    const r=await aj("/api/db/empty",{});
-    setBusy(false);
-    r.ok ? toast(`Database emptied (${r.removed} rows removed)`,"ok") : toast(r.error||"Failed","err");
-  };
-  return <button className="btn btn-sm btn-empty" onClick={go} disabled={busy||!admin} title="Empty Supabase DB — deletes all data">
-    <Icon n="trash" s={12}/>{busy?"Clearing…":"Empty DB"}
-  </button>;
-}
-
-/* ─── Clear-scope button (page-scoped delete; replaces the old global
-       Empty DB button everywhere except the owner-only Settings console) ── */
-function ClearScopeBtn({admin, kind, brands, label, disabled, onDone}) {
-  const [busy,setBusy]=useState(false);
-  const scope = brands?.length ? (brands.length===1?brands[0]:`${brands.length} vendors`) : "ALL vendors";
-  const go=async()=>{
-    if(!admin) return toast("Admin only","err");
-    if(!confirm(`Delete every product row in this view${kind?` (${label||kind})`:""} for ${scope} from the database?\n\nThis removes the rows entirely, not just marks them reviewed. Cannot be undone.`)) return;
-    setBusy(true);
-    const r=await aj("/api/db/clear_scope",{kind, brands});
-    setBusy(false);
-    r.ok?toast(`Cleared ${fmtInt(r.removed)} row(s)`,"ok"):toast(r.error||"Failed","err");
-    onDone && onDone();
-  };
-  return <button className="btn btn-sm btn-empty" onClick={go} disabled={busy||!admin||disabled}
-    title={disabled?"Select a vendor first":"Delete rows matching this view from the database"}>
-    <Icon n="trash" s={12}/>{busy?"Clearing…":"Clear this view"}
+/* ─── Clear-view button (display-only — clears the rows currently
+       rendered in this table; never calls the API, never touches
+       the products table) ─────────────────────────────────────── */
+function ClearViewBtn({onClear}) {
+  return <button className="btn btn-ghost btn-sm" onClick={onClear} title="Clear the rows shown below — the database is not touched">
+    <Icon n="x" s={12}/>Clear view
   </button>;
 }
 
@@ -422,10 +395,10 @@ function Pipeline({admin}) {
   const commitSheet=async()=>{
     if(!admin) return toast("Admin only","err");
     if(!cat.imported) return toast("Upload a sheet first","err");
-    if(!confirm(`Sync database to the sheet?\n\nDB will become EXACTLY the ${fmtInt(cat.imported)} products in the sheet.`)) return;
+    if(!confirm(`Sync database to the sheet?\n\nThe ${fmtInt(cat.imported)} products in the sheet will be added/updated in the database. Nothing already in the database is ever removed by this.`)) return;
     toast("Syncing…");
     const r=await aj("/api/import/commit",{});
-    r.ok?toast(`Synced → ${fmtInt(r.total)} in DB (${fmtInt(r.added)} added, ${fmtInt(r.removed)} removed)`,"ok"):toast(r.error||"Failed","err");
+    r.ok?toast(`Synced → ${fmtInt(r.total)} in DB (${fmtInt(r.added)} added)`,"ok"):toast(r.error||"Failed","err");
     refreshMeta();
   };
 
@@ -554,7 +527,6 @@ function Pipeline({admin}) {
         <button className="btn btn-ghost btn-sm" onClick={setCurrency} disabled={!admin}><Icon n="check" s={12}/>Set currency</button>
         <div style={{marginLeft:"auto",display:"flex",gap:8}}>
           <button className="btn btn-ghost btn-sm" onClick={clearLog}><Icon n="x" s={12}/>Clear log</button>
-          <ClearScopeBtn admin={admin} brands={vsel} disabled={!vsel.length} onDone={refreshMeta}/>
         </div>
       </div>
 
@@ -680,7 +652,7 @@ function Review({admin}) {
         <Icon n="up" s={12}/>Update base = live (all)
       </button>
       <div className="toolbar-sep"/>
-      <ClearScopeBtn admin={admin} kind={tab} label={tabs.find(t=>t[0]===tab)?.[1]} brands={vendor?[vendor]:brands} onDone={load}/>
+      <ClearViewBtn onClear={()=>setItems([])}/>
     </div>
 
     {/* Shopify push progress (batches of 10) */}
@@ -739,7 +711,7 @@ function History({admin}) {
   useEffect(()=>{ load(); },[load]);
   const push=async(it)=>{ if(!admin) return toast("Admin only","err"); toast("Pushing…"); const r=await aj("/api/history/push",{row:it.id}); toast(r.status||"done",r.ok?"ok":"err"); load(); };
   const pushAll=async()=>{ if(!admin||!confirm("Re-push all prices not yet successfully pushed? Runs in batches of 10.")) return; const r=await aj("/api/history/push_all",{}); if(r.ok){ if(!r.queued) return toast("Nothing to push — everything is already up to date","ok"); toast(`Pushing ${fmtInt(r.queued)} in batches of 10`,"ok"); setPushJob(r.job); } else { toast(r.error||"Failed","err"); if(r.job) setPushJob(r.job); } };
-  const clearDb=async()=>{ if(!admin) return toast("Admin only","err"); if(!d.count) return toast("History already empty","ok"); if(!confirm(`Delete ALL ${fmtInt(d.count)} review history records?`)) return; const r=await aj("/api/history/clear",{}); r.ok?toast(`Cleared ${fmtInt(r.removed)} records`,"ok"):toast(r.error||"Failed","err"); load(); };
+  const clearView=()=>setD(x=>({...x,items:[]}));
   const clear=()=>{ setBrand(""); setStatus(""); };
 
   return <div style={{height:"100%",overflow:"auto"}}>
@@ -754,7 +726,7 @@ function History({admin}) {
         </select>
         <button className="btn btn-ghost btn-sm" onClick={()=>window.location="/api/history/export"}><Icon n="dl" s={12}/>Export</button>
         <button className="btn btn-primary btn-sm" onClick={pushAll} disabled={!admin}><Icon n="share" s={12}/>Retry / Push all</button>
-        <button className="btn btn-danger btn-sm" onClick={clearDb} disabled={!admin||!d.count}><Icon n="trash" s={12}/>Clear History</button>
+        <ClearViewBtn onClear={clearView}/>
       </>}/>
 
     {pushJob&&<PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/>}
@@ -924,9 +896,6 @@ function Settings({me, admin}) {
   return <div style={{height:"100%",overflow:"auto",display:"flex",flexDirection:"column",gap:16}}>
     <div style={{marginBottom:4}}>
       <h1 style={{fontSize:22,fontWeight:700}}>Owner Console</h1>
-      <div style={{display:"flex",gap:8,marginTop:10}}>
-        <EmptyDbBtn admin={admin}/>
-      </div>
     </div>
     <div>
       <div className="lbl" style={{marginBottom:8}}>Active Sessions ({sessions.filter(s=>s.active).length} live)</div>

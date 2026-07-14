@@ -417,10 +417,6 @@ app.post("/api/history/push_all", wrap(async (req, res) => {
 
 // ---------- push job progress ----------
 app.get("/api/push/job", wrap(async (req, res) => res.json({ ok: true, job: getPushJob(req.query.id) })));
-app.post("/api/history/clear", wrap(async (req, res) => {
-  const removed = await store.clearHistory();
-  res.json({ ok: true, removed });
-}));
 app.get("/api/history/export", wrap(async (req, res) => {
   const rows = await q(`SELECT brand,url,base_price,live_price,currency,markup_pct,final_price,
     approved_by,approved_at,shopify_status FROM review_history ORDER BY approved_at DESC`);
@@ -532,36 +528,6 @@ app.get("/api/export", wrap(async (req, res) => {
     decision,markup_pct,final_price FROM products WHERE ${where} ORDER BY brand, id`, params);
   const suffix = brands.length ? `_${brands.length}brands` : "";
   await sendXlsx(res, `mbo_${kind}${suffix}`, rows);
-}));
-
-app.post("/api/db/empty", sec.ownerOnly, wrap(async (req, res) => {
-  const tables = ["price_history", "review_history", "import_catalog", "products"];
-  let removed = 0;
-  for (const t of tables) {
-    const r = await q(`DELETE FROM ${t}`);
-    removed += (r.rowCount || 0);
-  }
-  await q("DELETE FROM meta WHERE k IN ('last_import','last_import_rows','last_import_contains','last_import_domains')");
-  res.json({ ok: true, removed, tables });
-}));
-
-// Scoped delete for a page's current view (tab/state + vendor filter) — the
-// non-nuclear alternative to /api/db/empty. Refuses an unscoped call so a
-// stray click can't wipe the whole products table from a data page; the
-// full wipe stays owner-only in the Settings console.
-app.post("/api/db/clear_scope", wrap(async (req, res) => {
-  const stateMap = { mismatch: "mismatch", error: "error", resolved: "matched" };
-  const state = stateMap[req.body.kind] || null;
-  const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
-  const cl = []; const p = [];
-  if (state) { cl.push(`state=$${p.length + 1}`); p.push(state); }
-  if (brands.length) { cl.push(`brand IN (${brands.map((_, i) => `$${p.length + i + 1}`).join(",")})`); p.push(...brands); }
-  if (!cl.length) return res.status(400).json({ ok: false, error: "select a vendor or tab to scope the clear" });
-  const where = "WHERE " + cl.join(" AND ");
-  const deleted = await q(`DELETE FROM products ${where} RETURNING key`, p);
-  const keys = deleted.map((r) => r.key);
-  if (keys.length) await q("DELETE FROM import_catalog WHERE key = ANY($1)", [keys]);
-  res.json({ ok: true, removed: keys.length });
 }));
 
 // ---------- owner console ----------

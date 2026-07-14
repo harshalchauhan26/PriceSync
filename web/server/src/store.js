@@ -457,12 +457,6 @@ export async function historyList(brand, status) {
     pushed: num(s.pushed), failed: num(s.failed), not_pushed: num(s.not_pushed) };
 }
 
-export async function clearHistory() {
-  const n = num((await one("SELECT COUNT(*) c FROM review_history")).c);
-  await q("DELETE FROM review_history");
-  return n;
-}
-
 // ---- integrations (single global store) ----
 export async function getStoreIntegration() {
   return one("SELECT * FROM integrations WHERE brand=$1", [STORE_KEY]);
@@ -561,9 +555,13 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
   return { rows: n, removed, at: now };
 }
 
+// Upsert-only: a sheet sync ADDS new products and UPDATES catalog fields
+// (mbo_url/platform/custom_regex/brand/base_price) on matching keys. It
+// never deletes — a sheet that's missing rows (a partial/test file, a
+// stale export) can no longer wipe out the rest of the products table.
 export async function commitImportToProducts() {
   const staged = num((await one("SELECT COUNT(*) c FROM import_catalog")).c);
-  if (!staged) return { added: 0, removed: 0, staged: 0, total: num((await one("SELECT COUNT(*) c FROM products")).c), skipped: true };
+  if (!staged) return { added: 0, staged: 0, total: num((await one("SELECT COUNT(*) c FROM products")).c), skipped: true };
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -573,10 +571,9 @@ export async function commitImportToProducts() {
       ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
         platform=excluded.platform,custom_regex=excluded.custom_regex,
         brand=excluded.brand,base_price=excluded.base_price`);
-    const removed = (await client.query(`DELETE FROM products WHERE key NOT IN (SELECT key FROM import_catalog)`)).rowCount;
     const after = num((await client.query("SELECT COUNT(*) c FROM products")).rows[0].c);
     await client.query("COMMIT");
-    return { added: after - (before - removed), removed, staged, total: after };
+    return { added: after - before, staged, total: after };
   } catch (e) { await client.query("ROLLBACK"); throw e; }
   finally { client.release(); }
 }
