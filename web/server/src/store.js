@@ -104,18 +104,20 @@ export async function getMeta(k, def = null) {
 }
 
 // ---- counts / insights ----
+// `total` is the real catalog size (dismissing a review row never shrinks
+// it) — only the state-bucket counts that back the Review tabs/badges
+// exclude dismissed rows, since dismissing is scoped to "stop showing me
+// this in Review", not "stop counting this product".
 export async function counts(brand) {
-  const clauses = ["review_dismissed_at IS NULL"];
-  const params = [];
-  if (brand) { clauses.push(`brand=$${params.length + 1}`); params.push(brand); }
-  const where = "WHERE " + clauses.join(" AND ");
+  const where = brand ? "WHERE brand=$1" : "";
+  const params = brand ? [brand] : [];
   const r = await one(`SELECT COUNT(*) total,
-    COUNT(*) FILTER (WHERE state='pending') pending,
-    COUNT(*) FILTER (WHERE state='matched') matched,
-    COUNT(*) FILTER (WHERE state='mismatch') mismatch,
-    COUNT(*) FILTER (WHERE state='error') error,
+    COUNT(*) FILTER (WHERE state='pending' AND review_dismissed_at IS NULL) pending,
+    COUNT(*) FILTER (WHERE state='matched' AND review_dismissed_at IS NULL) matched,
+    COUNT(*) FILTER (WHERE state='mismatch' AND review_dismissed_at IS NULL) mismatch,
+    COUNT(*) FILTER (WHERE state='error' AND review_dismissed_at IS NULL) error,
     COUNT(*) FILTER (WHERE decision='approved') approved,
-    COUNT(*) FILTER (WHERE state='mismatch' AND decision='pending') awaiting,
+    COUNT(*) FILTER (WHERE state='mismatch' AND decision='pending' AND review_dismissed_at IS NULL) awaiting,
     COUNT(*) FILTER (WHERE decision='rejected') rejected FROM products ${where}`, params);
   const o = {}; for (const k of Object.keys(r)) o[k] = num(r[k]); return o;
 }
