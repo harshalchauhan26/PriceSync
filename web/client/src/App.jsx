@@ -467,6 +467,11 @@ function Pipeline({admin}) {
         <div style={{fontSize:11,color:"var(--on3)",marginTop:8}}>
           Scope: <b style={{color:"var(--on)"}}>{fmtInt(vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):sourceTotal)}</b>
         </div>
+        <button className="btn btn-ghost btn-sm" style={{width:"100%",justifyContent:"center",marginTop:8}}
+          onClick={()=>{const bq=vsel.length?`&brands=${encodeURIComponent(vsel.join(","))}`:""; window.location=`/api/export?kind=all${bq}`;}}
+          title={vsel.length?`Export just the ${vsel.length} selected brand(s)`:"No brands selected — this exports everything"}>
+          <Icon n="dl" s={12}/>Export{vsel.length?` (${vsel.length} brand${vsel.length>1?"s":""})`:" (all brands)"}
+        </button>
       </div>
 
       {/* Engine Settings */}
