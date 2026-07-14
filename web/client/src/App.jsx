@@ -48,6 +48,7 @@ const PATHS = {
   warn:"M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z",
   filter:"M22 3H2l8 9.46V19l4 2v-8.54L22 3",
   mail:"M4 4h16v16H4zM4 6l8 6 8-6",
+  plus:"M12 5v14M5 12h14",
 };
 const Icon = ({n,s=15,c="currentColor"}) =>
   <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
@@ -583,6 +584,121 @@ function Pipeline({admin}) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   ADD PRODUCTS — purely additive: manual entry or a standalone sheet.
+   Never touches or removes an existing row (unlike Pipeline's sheet sync).
+═══════════════════════════════════════════════════════════════ */
+const ADD_COLS = ["Designer URL *","MBO URL","Platform","Custom Regex","Base Price *"];
+const blankAddRow = () => ({url:"",mbo_url:"",platform:"",custom_regex:"",base_price:""});
+
+function AddProducts({admin}) {
+  const [mode,setMode]=useState("manual");
+  const [rows,setRows]=useState([blankAddRow()]);
+  const [preview,setPreview]=useState(null);
+  const [busy,setBusy]=useState(false);
+
+  const setCell=(i,k,v)=>setRows(rs=>rs.map((r,idx)=>idx===i?{...r,[k]:v}:r));
+  const addRow=()=>setRows(rs=>[...rs,blankAddRow()]);
+  const removeRow=(i)=>setRows(rs=>rs.filter((_,idx)=>idx!==i));
+
+  const onFile=async(f)=>{
+    if(!f||!admin) return;
+    const fd=new FormData(); fd.append("file",f);
+    toast("Reading "+f.name+"…");
+    const r=await api("/api/products/add_preview",{method:"POST",body:fd});
+    r.ok?setPreview(r.rows):toast(r.error||"Could not read file","err");
+  };
+
+  const submit=async(payload,after)=>{
+    if(!admin) return toast("Admin only","err");
+    const valid=payload.filter(r=>r.url&&!r._error&&Number(r.base_price)>0);
+    if(!valid.length) return toast("Nothing valid to add — need a Designer URL and Base Price","err");
+    const skipped=payload.length-valid.length;
+    if(!confirm(`Add ${valid.length} new product(s) to the database?${skipped?` (${skipped} row(s) skipped — missing URL/price)`:""}\n\nThis only adds rows — nothing existing is changed or removed.`)) return;
+    setBusy(true);
+    const r=await aj("/api/products/add",{rows:valid});
+    setBusy(false);
+    r.ok?toast(`Added ${fmtInt(r.added)} product(s)${r.added<valid.length?` (${valid.length-r.added} already existed)`:""}`,"ok"):toast(r.error||"Failed","err");
+    if(r.ok) after();
+  };
+
+  return <div style={{height:"100%",overflow:"auto"}}>
+    <div style={{marginBottom:20}}>
+      <h1 style={{fontSize:22,fontWeight:700,letterSpacing:"-.01em"}}>Add Products</h1>
+      <div style={{fontSize:12,color:"var(--on2)",marginTop:3}}>Add brand-new products straight to the catalog — this never edits or removes anything already tracked.</div>
+    </div>
+
+    <div className="tab-bar" style={{marginBottom:14}}>
+      <button className={`tab${mode==="manual"?" active":""}`} onClick={()=>setMode("manual")}>Type it in</button>
+      <button className={`tab${mode==="upload"?" active":""}`} onClick={()=>setMode("upload")}>Upload a sheet</button>
+    </div>
+
+    {mode==="manual" && <div className="card" style={{padding:16}}>
+      <table className="tbl">
+        <thead><tr>{[...ADD_COLS,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <tbody>
+          {rows.map((r,i)=><tr key={i}>
+            <td><input className="inp mono" style={{width:"100%",minWidth:220}} placeholder="https://brand.com/products/..." value={r.url} onChange={e=>setCell(i,"url",e.target.value)}/></td>
+            <td><input className="inp mono" style={{width:"100%",minWidth:180}} placeholder="optional" value={r.mbo_url} onChange={e=>setCell(i,"mbo_url",e.target.value)}/></td>
+            <td>
+              <select className="inp mono" value={r.platform} onChange={e=>setCell(i,"platform",e.target.value)}>
+                <option value="">auto-detect</option>
+                <option value="shopify">shopify</option>
+                <option value="wordpress">wordpress</option>
+                <option value="Custom">custom</option>
+              </select>
+            </td>
+            <td><input className="inp mono" style={{width:"100%",minWidth:140}} placeholder="optional regex" value={r.custom_regex} onChange={e=>setCell(i,"custom_regex",e.target.value)}/></td>
+            <td><input type="number" className="inp mono" style={{width:120}} placeholder="e.g. 45000" value={r.base_price} onChange={e=>setCell(i,"base_price",e.target.value)}/></td>
+            <td>{rows.length>1&&<button onClick={()=>removeRow(i)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}}><Icon n="x" s={14}/></button>}</td>
+          </tr>)}
+        </tbody>
+      </table>
+      <div style={{display:"flex",gap:8,marginTop:12}}>
+        <button className="btn btn-ghost btn-sm" onClick={addRow}><Icon n="plus" s={12}/>Add row</button>
+        <button className="btn btn-primary btn-sm" style={{marginLeft:"auto"}} disabled={!admin||busy}
+          onClick={()=>submit(rows,()=>setRows([blankAddRow()]))}>
+          <Icon n="check" s={12}/>{busy?"Adding…":"Add to database"}
+        </button>
+      </div>
+    </div>}
+
+    {mode==="upload" && <div className="card" style={{padding:16}}>
+      {!preview ? <>
+        <div className="dropzone" onClick={()=>document.getElementById("add-fi").click()}>
+          <div className="dz-icon"><Icon n="upload" s={18} c="var(--on3)"/></div>
+          <div style={{fontSize:12,color:"var(--on2)",fontWeight:600}}>Drop .xlsx or .csv</div>
+          <div className="lbl" style={{marginTop:4}}>Columns: Designer Product URL *, MBO Product URL, Platform Type, Custom Regex, Studio East Price *</div>
+        </div>
+        <input id="add-fi" type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>onFile(e.target.files[0])}/>
+      </> : <>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div style={{fontSize:12,color:"var(--on3)"}}>{preview.length} row(s) parsed · {preview.filter(r=>r._error).length} invalid (will be skipped)</div>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setPreview(null)}><Icon n="x" s={12}/>Start over</button>
+        </div>
+        <div style={{maxHeight:420,overflow:"auto"}}>
+          <table className="tbl">
+            <thead><tr>{["Brand","Designer URL","Platform","Base Price",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+            <tbody>
+              {preview.map((r,i)=><tr key={i} style={r._error?{opacity:.5}:{}}>
+                <td style={{fontSize:11}}>{r.brand||"—"}</td>
+                <td style={{fontSize:11}}>{trunc(r.url,50)}</td>
+                <td style={{fontSize:11}}>{r.platform||"—"}</td>
+                <td className="mono">{fmt(r.base_price)}</td>
+                <td>{r._error?<span style={{color:"var(--red)",fontSize:11}}>{r._error}</span>:<span style={{color:"var(--green)"}}>✓</span>}</td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+        <button className="btn btn-primary btn-sm" style={{marginTop:12}} disabled={!admin||busy}
+          onClick={()=>submit(preview,()=>setPreview(null))}>
+          <Icon n="check" s={12}/>{busy?"Adding…":`Add ${preview.filter(r=>!r._error).length} to database`}
+        </button>
+      </>}
+    </div>}
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
    REVIEW
 ═══════════════════════════════════════════════════════════════ */
 function Review({admin}) {
@@ -965,6 +1081,7 @@ export default function App() {
   const admin=me.role==="admin"||me.role==="owner";
   const nav=[
     ["pipeline","Pipeline","pipeline"],
+    ["add","Add Products","plus"],
     ["review","Review","review"],
     ["alerts","Alerts","alerts"],
     ["history","History","clock"],
@@ -1029,6 +1146,7 @@ export default function App() {
       {/* Page content */}
       <div style={{flex:1,minHeight:0,padding:"20px 24px",overflow:"auto"}}>
         {view==="pipeline"    && <Pipeline    admin={admin}/>}
+        {view==="add"         && <AddProducts admin={admin}/>}
         {view==="review"      && <Review      admin={admin}/>}
         {view==="history"     && <History     admin={admin}/>}
         {view==="alerts"      && <Alerts      admin={admin}/>}

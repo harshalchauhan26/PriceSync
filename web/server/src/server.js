@@ -218,6 +218,21 @@ app.get("/api/pipe/status", (req, res) => {
     message: s.message, config: eng.config, cursor: total, entries, log_total: total });
 });
 
+// ---------- add products (manual entry / standalone sheet) ----------
+// Purely additive — see store.addProducts. Never touches or removes an
+// existing product, so it's safe to use without the sheet-sync hazards
+// import/commit has.
+app.post("/api/products/add_preview", upload.single("file"), wrap(async (req, res) => {
+  if (!req.file) return res.status(400).json({ ok: false, error: "no file" });
+  try { res.json({ ok: true, rows: store.parseAddSheet(req.file.buffer) }); }
+  catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+}));
+app.post("/api/products/add", wrap(async (req, res) => {
+  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const r = await store.addProducts(rows);
+  res.json({ ok: true, ...r, counts: await store.counts() });
+}));
+
 // ---------- import ----------
 app.post("/api/import/preview", upload.single("file"), wrap(async (req, res) => {
   if (!req.file) return res.status(400).json({ ok: false, error: "no file" });

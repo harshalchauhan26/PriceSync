@@ -508,6 +508,61 @@ function sanitizeNum(v) {
   const m = String(v).replace(/[^0-9.]/g, "").match(/\d+(?:\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
 }
+// ---- add products directly (manual entry or a standalone sheet) ----
+// Purely additive: always INSERTs new rows with a fresh key, never updates
+// or deletes an existing product. Distinct from importSheet/commitImportToProducts,
+// which sync the whole catalog to a staged sheet — this just appends.
+export function parseAddSheet(buf) {
+  const wb = XLSX.read(buf, { type: "buffer" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  return raw.map((r) => {
+    const url = String(r["Designer Product URL"] || "").trim();
+    const mbo_url = String(r["MBO Product URL"] || "").trim();
+    const platform = String(r["Platform Type"] || "").trim();
+    const custom_regex = String(r["Custom Regex"] || "").trim();
+    const base_price = sanitizeNum(r["Studio East Price"]);
+    let _error = null;
+    if (!url) _error = "missing Designer Product URL";
+    else if (base_price == null || base_price <= 0) _error = "missing/invalid Studio East Price";
+    return { url, mbo_url, platform, custom_regex, base_price, brand: brandOf(url), _error };
+  });
+}
+
+export async function addProducts(rows) {
+  const clean = (rows || [])
+    .map((r) => ({
+      url: String(r.url || "").trim(),
+      mbo_url: String(r.mbo_url || "").trim(),
+      platform: String(r.platform || "").trim(),
+      custom_regex: String(r.custom_regex || "").trim(),
+      base_price: r.base_price === "" || r.base_price == null ? null : Number(r.base_price),
+    }))
+    .filter((r) => r.url && Number.isFinite(r.base_price) && r.base_price > 0);
+  if (!clean.length) return { added: 0 };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    let idx = num((await client.query(
+      "SELECT COALESCE(MAX(split_part(key,'|',1)::int),0) m FROM products"
+    )).rows[0].m);
+    let added = 0;
+    for (const r of clean) {
+      idx += 1;
+      const key = `${String(idx).padStart(5, "0")}|${r.url.slice(0, 280)}`;
+      const result = await client.query(
+        `INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (key) DO NOTHING`,
+        [key, r.mbo_url, r.url, r.platform, r.custom_regex, brandOf(r.url), r.base_price]
+      );
+      added += result.rowCount;
+    }
+    await client.query("COMMIT");
+    return { added };
+  } catch (e) { await client.query("ROLLBACK"); throw e; }
+  finally { client.release(); }
+}
+
 export function previewSheet(buf) {
   const wb = XLSX.read(buf, { type: "buffer" });
   const ws = wb.Sheets[wb.SheetNames[0]];
