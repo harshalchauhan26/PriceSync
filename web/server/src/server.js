@@ -394,6 +394,14 @@ app.post("/api/review/reject_all", wrap(async (req, res) => {
   const r = await q(`UPDATE products SET decision='rejected', note=$2, decided_at=$3 WHERE ${where} RETURNING id`, p);
   res.json({ ok: true, rejected: r.length, counts: await store.counts() });
 }));
+// Hides the current tab+vendor scope from the review queue permanently —
+// an UPDATE flag (review_dismissed_at), never a delete. Product/price data
+// is untouched; approving/rejecting/pushing to Shopify still works exactly
+// as before for these rows, they just no longer show up here.
+app.post("/api/review/dismiss_view", wrap(async (req, res) => {
+  const removed = await store.dismissView(req.body.kind, (req.body.brands || []).filter(Boolean));
+  res.json({ ok: true, removed, counts: await store.counts() });
+}));
 
 // ---------- history ----------
 app.get("/api/history", wrap(async (req, res) => res.json(await store.historyList((req.query.brand || "").trim(), (req.query.status || "").trim()))));

@@ -323,7 +323,13 @@ export async function extractRow(fetcher, url, platform, customRegex, opts = {})
   if (p === "shopify") res = await extractShopify(fetcher, u, hi);
   else if (opts.wooApi) res = await extractWooApi(fetcher, u, hi); // relay path: JSON API instead of bot-blocked /product/ HTML
   else if (customRegex) res = await extractCustom(fetcher, u, customRegex, hi); // regex wins for wordpress/custom/unknown
-  else res = await extractWordpress(fetcher, u, hi);
+  // Unknown/blank platform (e.g. a row imported from an external sheet with
+  // no Platform Type column) — route through extractShopify anyway: it
+  // probes the .js JSON endpoint first (harmless 404 on non-Shopify hosts,
+  // caught internally) and its HTML fallback is cents-descaled, unlike
+  // extractWordpress. Without this, a mislabeled Shopify store reads its
+  // embedded cents price straight through and comes back exactly 100x high.
+  else res = await extractShopify(fetcher, u, hi);
   if (opts.fetchCurrency && res && res[1] == null) res = [res[0], opts.fetchCurrency];
   return res;
 }

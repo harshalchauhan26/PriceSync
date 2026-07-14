@@ -194,11 +194,11 @@ function ChartBox({type,labels,datasets,options,h=200}) {
   return <div style={{height:h}}><canvas ref={ref}/></div>;
 }
 
-/* ─── Clear-view button (display-only — clears the rows currently
-       rendered in this table; never calls the API, never touches
-       the products table) ─────────────────────────────────────── */
-function ClearViewBtn({onClear}) {
-  return <button className="btn btn-ghost btn-sm" onClick={onClear} title="Clear the rows shown below — the database is not touched">
+/* ─── Clear-view button — never deletes rows or price data. On History
+       it just resets what's rendered locally; on Review it persists a
+       "don't show me this again" flag via onClear (see dismissView). ── */
+function ClearViewBtn({onClear, title}) {
+  return <button className="btn btn-ghost btn-sm" onClick={onClear} title={title||"Clear the rows shown below"}>
     <Icon n="x" s={12}/>Clear view
   </button>;
 }
@@ -614,6 +614,15 @@ function Review({admin}) {
   const updateBaseAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!items.length) return toast("Nothing to update","err"); if(!confirm(`Set base price = live price (currency-converted, no markup) for ALL ${items.length} ${tab} rows, then clear live?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/update_base_all",{kind:tab,brands:bList}); r.ok?toast(`Base updated on ${r.updated} row(s)`,"ok"):toast(r.error||"Failed","err"); load(); };
   const emailReport=async()=>{ const bList=vendor?[vendor]:brands; const scope=bList.length?`${bList.length} brand(s)`:"all brands"; if(!confirm(`Email a per-brand mismatch sheet for ${scope}?`)) return; toast("Sending…","ok"); const r=await aj("/api/alerts/email_mismatch",{brands:bList}); r.ok?toast(`Emailed ${r.count} mismatch(es) to ${r.to}`,"ok"):toast(r.error||"Email failed","err"); };
   const clear=()=>{ setBrands([]); setVendor(""); setTab("mismatch"); setSel(new Set()); };
+  const dismissView=async()=>{
+    const bList=vendor?[vendor]:brands;
+    const scope=bList.length?(bList.length===1?bList[0]:`${bList.length} vendors`):"ALL vendors";
+    if(!confirm(`Hide these ${fmtInt(items.length)} ${tab} row(s) (${scope}) from the review queue for good?\n\nThe products and their prices stay exactly as they are in the database — this only stops them showing up here.`)) return;
+    setItems([]);
+    const r=await aj("/api/review/dismiss_view",{kind:tab,brands:bList});
+    r.ok?toast(`Hid ${fmtInt(r.removed)} row(s) from this view`,"ok"):toast(r.error||"Failed","err");
+    load();
+  };
   const tog=(id)=>{ const n=new Set(sel); n.has(id)?n.delete(id):n.add(id); setSel(n); };
   const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error,"var(--red)"],["resolved","Resolved",counts.matched,"var(--green)"]];
 
@@ -652,7 +661,7 @@ function Review({admin}) {
         <Icon n="up" s={12}/>Update base = live (all)
       </button>
       <div className="toolbar-sep"/>
-      <ClearViewBtn onClear={()=>setItems([])}/>
+      <ClearViewBtn onClear={dismissView} title="Hide this view's rows from the review queue for good — prices/decisions are untouched"/>
     </div>
 
     {/* Shopify push progress (batches of 10) */}

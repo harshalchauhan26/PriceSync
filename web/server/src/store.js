@@ -31,6 +31,9 @@ const SCHEMA = [
   'CREATE INDEX IF NOT EXISTS ix_products_state ON products(state)',
   'CREATE INDEX IF NOT EXISTS ix_products_brand ON products(brand)',
   'ALTER TABLE products ADD COLUMN IF NOT EXISTS base_usd DOUBLE PRECISION',
+  // "Clear view" in Review: hides a row from the review queue permanently
+  // without touching its price data — an UPDATE, never a DELETE.
+  'ALTER TABLE products ADD COLUMN IF NOT EXISTS review_dismissed_at TIMESTAMPTZ',
   'CREATE TABLE IF NOT EXISTS import_catalog (' +
     'key TEXT PRIMARY KEY, mbo_url TEXT, url TEXT, platform TEXT,' +
     'custom_regex TEXT, brand TEXT, base_price DOUBLE PRECISION, imported_at TEXT)',
@@ -102,8 +105,10 @@ export async function getMeta(k, def = null) {
 
 // ---- counts / insights ----
 export async function counts(brand) {
-  const where = brand ? "WHERE brand=$1" : "";
-  const params = brand ? [brand] : [];
+  const clauses = ["review_dismissed_at IS NULL"];
+  const params = [];
+  if (brand) { clauses.push(`brand=$${params.length + 1}`); params.push(brand); }
+  const where = "WHERE " + clauses.join(" AND ");
   const r = await one(`SELECT COUNT(*) total,
     COUNT(*) FILTER (WHERE state='pending') pending,
     COUNT(*) FILTER (WHERE state='matched') matched,
@@ -226,13 +231,25 @@ export async function saveResult(prod, status, live, cur, state, runId, extra = 
 // ---- review ----
 export async function reviewItems(kind, brands) {
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
-  let where = "state=$1 AND decision='pending'"; const p = [state];
+  let where = "state=$1 AND decision='pending' AND review_dismissed_at IS NULL"; const p = [state];
   if (brands && brands.length) {
     where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands);
   }
   const items = await q(`SELECT * FROM products WHERE ${where}
     ORDER BY (decision='pending') DESC, ABS(COALESCE(delta,0)) DESC LIMIT 1000`, p);
   return { items, counts: await counts() };
+}
+
+// Persistently hides rows from the review queue (nav badge + tabs) WITHOUT
+// touching price/decision data — an UPDATE flag, never a DELETE. This is
+// what the Review page's "Clear view" button calls.
+export async function dismissView(kind, brands) {
+  const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || null;
+  const cl = ["review_dismissed_at IS NULL"]; const p = [];
+  if (state) { cl.push(`state=$${p.length + 1}`); p.push(state); }
+  if (brands && brands.length) { cl.push(`brand IN (${brands.map((_, i) => `$${p.length + i + 1}`).join(",")})`); p.push(...brands); }
+  const r = await q(`UPDATE products SET review_dismissed_at=now() WHERE ${cl.join(" AND ")} RETURNING key`, p);
+  return r.length;
 }
 
 export function computeFinal(baseInr, liveInr, ref, markup, custom, convert, rate) {
@@ -566,10 +583,16 @@ export async function commitImportToProducts() {
   try {
     await client.query("BEGIN");
     const before = num((await client.query("SELECT COUNT(*) c FROM products")).rows[0].c);
+    // COALESCE/NULLIF on platform+custom_regex: a sheet missing those
+    // columns (e.g. a quick external test file) must not blank out a
+    // scrape-critical field the product already had on file — that's
+    // exactly what mislabeled a batch of Shopify products as generic
+    // and made them scrape at 100x (cents, undescaled) on 2026-07-14.
     await client.query(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price)
       SELECT key,mbo_url,url,platform,custom_regex,brand,base_price FROM import_catalog
       ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
-        platform=excluded.platform,custom_regex=excluded.custom_regex,
+        platform=COALESCE(NULLIF(excluded.platform,''), products.platform),
+        custom_regex=COALESCE(NULLIF(excluded.custom_regex,''), products.custom_regex),
         brand=excluded.brand,base_price=excluded.base_price`);
     const after = num((await client.query("SELECT COUNT(*) c FROM products")).rows[0].c);
     await client.query("COMMIT");
