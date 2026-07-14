@@ -528,13 +528,26 @@ async function sendXlsx(res, name, rows) {
 }
 app.get("/api/export", wrap(async (req, res) => {
   const kind = req.query.kind || "all";
-  let where = { all: "1=1", mismatch: "state='mismatch'", error: "state='error'", approved: "decision='approved'" }[kind] || "1=1";
+  const stateWhere = { all: "1=1", mismatch: "state='mismatch'", error: "state='error'", approved: "decision='approved'" }[kind] || "1=1";
   const brands = (req.query.brands || "").split(",").map((b) => b.trim()).filter(Boolean);
   const params = [];
-  if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 1}`).join(",")})`; params.push(...brands); }
-  const rows = await q(`SELECT id,brand,platform,url,base_price,live_price,currency,status,state,delta,
-    decision,markup_pct,final_price FROM products WHERE ${where} ORDER BY brand, id`, params);
-  const suffix = brands.length ? `_${brands.length}brands` : "";
+  const cols = "id,brand,platform,url,base_price,live_price,currency,status,state,delta,decision,markup_pct,final_price";
+  let rows, suffix;
+  if (req.query.source === "imported") {
+    // "Sheet products" runs are scoped to whatever's staged in
+    // import_catalog, not a brand filter — join to it so the export is
+    // exactly the rows that ran, regardless of how many brands they span.
+    let where = stateWhere.replace(/^(state|decision)/, "p.$1");
+    if (brands.length) { where += ` AND p.brand IN (${brands.map((_, i) => `$${i + 1}`).join(",")})`; params.push(...brands); }
+    rows = await q(`SELECT ${cols.split(",").map((c) => "p." + c).join(",")}
+      FROM products p JOIN import_catalog c ON c.key = p.key WHERE ${where} ORDER BY p.brand, p.id`, params);
+    suffix = "_sheet";
+  } else {
+    let where = stateWhere;
+    if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 1}`).join(",")})`; params.push(...brands); }
+    rows = await q(`SELECT ${cols} FROM products WHERE ${where} ORDER BY brand, id`, params);
+    suffix = brands.length ? `_${brands.length}brands` : "";
+  }
   await sendXlsx(res, `mbo_${kind}${suffix}`, rows);
 }));
 
