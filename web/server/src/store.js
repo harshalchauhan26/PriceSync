@@ -59,18 +59,32 @@ const SCHEMA = [
 ];
 
 export async function initStore() {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  // pg_try_advisory_lock (non-blocking) instead of the blocking
+  // pg_advisory_lock: a blocking wait can sit until Postgres's own
+  // statement/idle timeout cancels it out from under us (a cryptic
+  // ProcessInterrupts error, not our retry-on-40P01 deadlock case below),
+  // which crashed boot when a prior deploy's connection was still holding
+  // the lock. Polling ourselves means we control the wait and always fail
+  // with a clear message instead of a raw Postgres internal error.
+  const MAX_ATTEMPTS = 10;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const client = await pool.connect();
     try {
-      await client.query(`SELECT pg_advisory_lock(hashtext('mbo_tracker_schema_v1'))`);
-      for (const sql of SCHEMA) await client.query(sql);
-      return;
-    } catch (error) {
-      if (error.code !== '40P01' || attempt === 3) throw error;
-      await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+      const { rows } = await client.query(`SELECT pg_try_advisory_lock(hashtext('mbo_tracker_schema_v1')) AS got`);
+      if (!rows[0].got) {
+        if (attempt === MAX_ATTEMPTS) {
+          throw new Error(`initStore: could not acquire the schema migration lock after ${MAX_ATTEMPTS} attempts — another process is holding it`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * attempt, 5000)));
+        continue;
+      }
+      try {
+        for (const sql of SCHEMA) await client.query(sql);
+        return;
+      } finally {
+        await client.query(`SELECT pg_advisory_unlock(hashtext('mbo_tracker_schema_v1'))`).catch(() => {});
+      }
     } finally {
-      await client.query(`SELECT pg_advisory_unlock(hashtext('mbo_tracker_schema_v1'))`)
-        .catch(() => {});
       client.release();
     }
   }
