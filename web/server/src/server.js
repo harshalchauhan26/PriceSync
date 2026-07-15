@@ -300,15 +300,6 @@ async function approveOne(client, prow, body) {
   }
   return { final, archived, pushCur: targetCur };
 }
-async function pushApprovedToStore(archived) {
-  const result = await pushRowPrice(archived, archived.final_price);
-  const at = new Date().toISOString();
-  await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
-    [result.status, at, archived.id]);
-  await q("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE key=$3",
-    [result.status, at, archived.key]);
-  return result;
-}
 app.post("/api/review/decide", wrap(async (req, res) => {
   const it = await one("SELECT * FROM products WHERE id=$1", [req.body.row]);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
@@ -322,8 +313,9 @@ app.post("/api/review/decide", wrap(async (req, res) => {
       await client.query("COMMIT");
     } catch (e) { await client.query("ROLLBACK"); throw e; }
     finally { client.release(); }
-    const shopify = await pushApprovedToStore(approved.archived);
-    res.json({ ok: true, final_price: approved.final, push_currency: approved.pushCur, archived: true, shopify });
+    // Approve only archives to History now — the Shopify push is a separate,
+    // deliberate step from the History tab (push/push_all), not automatic.
+    res.json({ ok: true, final_price: approved.final, push_currency: approved.pushCur, archived: true });
   } else {
     await q("UPDATE products SET decision=$1,note=$2,decided_at=$3 WHERE id=$4",
       [req.body.decision, req.body.note || "", new Date().toISOString(), req.body.row]);
@@ -387,13 +379,10 @@ app.post("/api/review/rerun", wrap(async (req, res) => {
   const fresh = await pipe.rerunOne(it);
   res.json({ ok: true, item: fresh, state: fresh?.state, counts: await store.counts() });
 }));
-// "Approve Selected" (the checkbox multi-select), given its own batch-job
-// path so it gets the same live batch-progress panel as "Approve all" —
-// it previously looped /api/review/decide client-side with an immediate
-// synchronous push per row and no visible progress at all.
+// "Approve Selected" (the checkbox multi-select) — batches the chosen rows
+// through approveOne. Archives to History only; no Shopify push happens
+// here (that's now a separate, deliberate step from the History tab).
 app.post("/api/review/approve_selected", wrap(async (req, res) => {
-  const busy = runningPushJob();
-  if (busy) return res.status(409).json({ ok: false, error: "a Shopify push is already running — wait for it to finish", job: busy });
   const specs = Array.isArray(req.body.rows) ? req.body.rows : [];
   if (!specs.length) return res.status(400).json({ ok: false, error: "no rows selected" });
   const ids = specs.map((s) => s.id).filter((id) => id != null);
@@ -401,23 +390,22 @@ app.post("/api/review/approve_selected", wrap(async (req, res) => {
   const byId = new Map(prows.map((r) => [String(r.id), r]));
   const by = sec.currentUser(req)?.email;
   const client = await pool.connect();
-  let n = 0; const archived = [];
+  let n = 0;
   try {
     await client.query("BEGIN");
     for (const spec of specs) {
       const prow = byId.get(String(spec.id));
       if (!prow) continue;
-      const approved = await approveOne(client, prow, { ...spec, _by: by });
-      archived.push(approved.archived); n++;
+      await approveOne(client, prow, { ...spec, _by: by });
+      n++;
     }
     await client.query("COMMIT");
   } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
-  const push = archived.length ? startPushJob(archived, "Approve selected") : null;
-  res.json({ ok: true, approved: n, queued: archived.length, job: push?.job || null });
+  res.json({ ok: true, approved: n });
 }));
 app.post("/api/review/approve_all", wrap(async (req, res) => {
-  const busy = runningPushJob();
-  if (busy) return res.status(409).json({ ok: false, error: "a Shopify push is already running — wait for it to finish", job: busy });
+  // Archives every matching row to History; no Shopify push happens here —
+  // that's a separate, deliberate step from the History tab.
   const kind = req.body.kind || "mismatch";
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
   const brands = (req.body.brands || []).filter(Boolean);
@@ -426,16 +414,15 @@ app.post("/api/review/approve_all", wrap(async (req, res) => {
   const rows = await q(`SELECT * FROM products WHERE ${where}`, p);
   const by = sec.currentUser(req)?.email;
   const client = await pool.connect();
-  let n = 0; const archived = [];
+  let n = 0;
   try { await client.query("BEGIN");
     for (const r of rows) {
-      const approved = await approveOne(client, r, { ...req.body, custom_price: null, _by: by });
-      archived.push(approved.archived); n++;
+      await approveOne(client, r, { ...req.body, custom_price: null, _by: by });
+      n++;
     }
     await client.query("COMMIT");
   } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
-  const push = archived.length ? startPushJob(archived, `Approve all · ${kind}`) : null;
-  res.json({ ok: true, approved: n, queued: archived.length, job: push?.job || null });
+  res.json({ ok: true, approved: n });
 }));
 app.post("/api/review/reject_all", wrap(async (req, res) => {
   const kind = req.body.kind || "mismatch";

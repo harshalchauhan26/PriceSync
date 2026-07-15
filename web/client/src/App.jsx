@@ -708,7 +708,6 @@ function Review({admin}) {
   const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
   const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
   const [vendor,setVendor]=useState("");
-  const [pushJob,setPushJob]=useState(null);
   const [rerunning,setRerunning]=useState(()=>new Set());
   const [rerunAllBusy,setRerunAllBusy]=useState(false);
   const [rerunProgress,setRerunProgress]=useState(null);
@@ -729,7 +728,7 @@ function Review({admin}) {
   const amtInr=(amount,currency)=>{ const n=Number(amount); if(!Number.isFinite(n)||n<=0) return null; const c=(currency||"INR").toUpperCase(); const r=(c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1); return Math.round(n*r*100)/100; };
   const previewFinal=(it)=>{ const manual=amtInr(it._amt,it._cur); if(manual!=null) return roundFinal(manual/targetRate); const refInr=liveInr(it)??it.base_price; if(refInr==null) return null; return roundFinal(refInr/targetRate+Number(gm||0)); };
   const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,cad,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");setCad(r.overrides.CAD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
-  const decide=async(it,decision)=>{ setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision,markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.ok?toast(decision==="approved"?`Approved ${fmt(r.final_price)} ${r.push_currency||""}`:".Rejected",r.shopify&&!r.shopify.ok?"err":"ok"):toast(r.error,"err"); load(); };
+  const decide=async(it,decision)=>{ setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision,markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.ok?toast(decision==="approved"?`Approved ${fmt(r.final_price)} ${r.push_currency||""} — push it live from History`:"Rejected","ok"):toast(r.error,"err"); load(); };
   const del=async(it)=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Remove ${trunc(it.url,56)}?`)) return; setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/delete",{row:it.id}); r.ok?toast("Removed","ok"):toast(r.error||"Failed","err"); load(); };
   const setBase=async(it)=>{ if(!admin) return toast("Admin only","err"); if(it.live_price==null) return toast("No live price on this row","err");
     if(!confirm(`Set base price = ${fmt(it.live_price)} ${it._cur}${it._cur==="INR"?"":" (converted to ₹)"} and clear live price?`)) return;
@@ -742,11 +741,10 @@ function Review({admin}) {
       return {id, markup_pct:gm, price_amount:it._amt, price_currency:it._cur, convert:convOn, convert_currency:convOn?convCur:""}; });
     setItems(xs=>xs.filter(x=>!sel.has(x.id)));
     const r=await aj("/api/review/approve_selected",{rows});
-    if(r.ok){ toast(`Approved ${r.approved}${r.job?` — pushing ${r.queued} to Shopify`:""}`,"ok"); if(r.job) setPushJob(r.job); }
-    else { toast(r.error||"Failed","err"); if(r.job) setPushJob(r.job); }
+    r.ok?toast(`Approved ${r.approved} — push it live from History`,"ok"):toast(r.error||"Failed","err");
     setSel(new Set()); load();
   };
-  const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}? Prices are pushed to Shopify in batches of 10.`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); if(r.ok){ toast(`Approved ${r.approved}${r.job?` — pushing ${r.queued} to Shopify`:""}`,"ok"); if(r.job) setPushJob(r.job); } else { toast(r.error,"err"); if(r.job) setPushJob(r.job); } load(); };
+  const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}? This archives them to History — push to Shopify from there when you're ready.`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); r.ok?toast(`Approved ${r.approved} — push it live from History`,"ok"):toast(r.error,"err"); load(); };
   const rejectAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Reject ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/reject_all",{kind:tab,brands:bList}); r.ok?toast(`Rejected ${r.rejected}`,"ok"):toast(r.error||"Failed","err"); load(); };
   const updateBaseAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!items.length) return toast("Nothing to update","err"); if(!confirm(`Set base price = live price (currency-converted, no markup) for ALL ${items.length} ${tab} rows, then clear live?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/update_base_all",{kind:tab,brands:bList}); r.ok?toast(`Base updated on ${r.updated} row(s)`,"ok"):toast(r.error||"Failed","err"); load(); };
   const emailReport=async()=>{ const bList=vendor?[vendor]:brands; const scope=bList.length?`${bList.length} brand(s)`:"all brands"; if(!confirm(`Email a per-brand mismatch sheet for ${scope}?`)) return; toast("Sending…","ok"); const r=await aj("/api/alerts/email_mismatch",{brands:bList}); r.ok?toast(`Emailed ${r.count} mismatch(es) to ${r.to}`,"ok"):toast(r.error||"Email failed","err"); };
@@ -792,7 +790,7 @@ function Review({admin}) {
   const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error_awaiting,"var(--red)"],["resolved","Resolved",counts.resolved_awaiting,"var(--green)"]];
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
-    <PageBar title="Review & Approval Queue" subtitle="Approving archives the row and pushes the final price to Shopify."
+    <PageBar title="Review & Approval Queue" subtitle="Approving archives the row to History — push the final price to Shopify from there."
       admin={admin} vendor={vendor} onVendor={setVendor} onClear={clear} kind={tab}
       extraLeft={<>
         <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>
@@ -832,9 +830,6 @@ function Review({admin}) {
       <div className="toolbar-sep"/>
       <ClearViewBtn onClear={dismissView} title="Hide this view's rows from the review queue for good — prices/decisions are untouched"/>
     </div>
-
-    {/* Shopify push progress (batches of 10) */}
-    {pushJob&&<PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/>}
 
     {/* Tabs */}
     <div className="tab-bar" style={{marginBottom:10}}>
