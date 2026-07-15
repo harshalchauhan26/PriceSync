@@ -712,6 +712,7 @@ function Review({admin}) {
   const [rerunAllBusy,setRerunAllBusy]=useState(false);
   const [rerunProgress,setRerunProgress]=useState(null);
   const convOn=convCur!=="INR";
+  const hasScope=!!(vendor||brands.length);
 
   const load=useCallback(async()=>{
     const bList=vendor?[vendor]:brands;
@@ -817,10 +818,16 @@ function Review({admin}) {
       <div className="pill-group">
         {[["INR","INR"],["USD","USD→₹"],["CAD","CAD→₹"]].map(([k,l])=><button key={k} className={`pill${convCur===k?" active":""}`} onClick={()=>setConvCur(k)}>{l}</button>)}
       </div>
-      <button className="btn btn-success btn-sm" onClick={approveAll} disabled={!admin||!items.length}><Icon n="check" s={12}/>Approve all ({items.length})</button>
-      <button className="btn btn-danger btn-sm" onClick={rejectAll} disabled={!admin||!items.length}><Icon n="x" s={12}/>Reject all</button>
-      <button className="btn btn-ghost btn-sm" onClick={updateBaseAll} disabled={!admin||!items.length}
-        title="Set base price = current live price (currency-converted, no markup) for every row below, then clear live">
+      <button className="btn btn-success btn-sm" onClick={approveAll} disabled={!admin||!items.length||!hasScope}
+        title={hasScope?undefined:"Select at least one vendor first — this can't run across every brand at once"}>
+        <Icon n="check" s={12}/>Approve all ({items.length})
+      </button>
+      <button className="btn btn-danger btn-sm" onClick={rejectAll} disabled={!admin||!items.length||!hasScope}
+        title={hasScope?undefined:"Select at least one vendor first — this can't run across every brand at once"}>
+        <Icon n="x" s={12}/>Reject all
+      </button>
+      <button className="btn btn-ghost btn-sm" onClick={updateBaseAll} disabled={!admin||!items.length||!hasScope}
+        title={hasScope?"Set base price = current live price (currency-converted, no markup) for every row below, then clear live":"Select at least one vendor first — this can't run across every brand at once"}>
         <Icon n="up" s={12}/>Update base = live (all)
       </button>
       {tab==="error" && <button className="btn btn-ghost btn-sm" onClick={rerunAll} disabled={!admin||!items.length||rerunAllBusy}

@@ -345,8 +345,8 @@ app.post("/api/review/update_base_all", wrap(async (req, res) => {
   const stateMap = { mismatch: "mismatch", error: "error", resolved: "matched" };
   const state = stateMap[req.body.kind] || "mismatch";
   const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
-  const cl = ["state=$1", "live_price IS NOT NULL"]; const p = [state];
-  if (brands.length) { cl.push(`brand IN (${brands.map((_, i) => `$${p.length + i + 1}`).join(",")})`); p.push(...brands); }
+  if (!brands.length) return res.status(400).json({ ok: false, error: "select at least one vendor before updating base = live for all" });
+  const cl = ["state=$1", "live_price IS NOT NULL", `brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`]; const p = [state, ...brands];
   const rows = await q(`SELECT id,key,live_price,currency FROM products WHERE ${cl.join(" AND ")}`, p);
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   let updated = 0;
@@ -419,8 +419,12 @@ app.post("/api/review/approve_all", wrap(async (req, res) => {
   const kind = req.body.kind || "mismatch";
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
   const brands = (req.body.brands || []).filter(Boolean);
-  let where = "state=$1 AND decision='pending'"; const p = [state];
-  if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands); }
+  // Never allow this to run unscoped — a stray click with no vendor selected
+  // must not approve every brand at once (that's exactly what happened and
+  // pushed 600+ wrong prices live). Pick at least one vendor first.
+  if (!brands.length) return res.status(400).json({ ok: false, error: "select at least one vendor before approving all" });
+  const where = `state=$1 AND decision='pending' AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`;
+  const p = [state, ...brands];
   const rows = await q(`SELECT * FROM products WHERE ${where}`, p);
   const by = sec.currentUser(req)?.email;
   const spec = { ...req.body, custom_price: null, _by: by };
@@ -431,8 +435,9 @@ app.post("/api/review/reject_all", wrap(async (req, res) => {
   const kind = req.body.kind || "mismatch";
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
   const brands = (req.body.brands || []).filter(Boolean);
-  let where = "state=$1 AND decision='pending'"; const p = [state, req.body.note || "", new Date().toISOString()];
-  if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 4}`).join(",")})`; p.push(...brands); }
+  if (!brands.length) return res.status(400).json({ ok: false, error: "select at least one vendor before rejecting all" });
+  const where = `state=$1 AND decision='pending' AND brand IN (${brands.map((_, i) => `$${i + 4}`).join(",")})`;
+  const p = [state, req.body.note || "", new Date().toISOString(), ...brands];
   const r = await q(`UPDATE products SET decision='rejected', note=$2, decided_at=$3 WHERE ${where} RETURNING id`, p);
   res.json({ ok: true, rejected: r.length, counts: await store.counts() });
 }));
