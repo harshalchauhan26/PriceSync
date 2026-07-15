@@ -378,6 +378,15 @@ app.post("/api/review/delete", wrap(async (req, res) => {
   await q("DELETE FROM import_catalog WHERE key=$1", [it.key]);
   res.json({ ok: true, counts: await store.counts() });
 }));
+// Re-fetches a single product's live price right now, using the exact same
+// per-brand extraction rules as a real pipeline run (see pipe.rerunOne) —
+// used by the Review page's per-row/bulk "Rerun" on the Errors tab.
+app.post("/api/review/rerun", wrap(async (req, res) => {
+  const it = await one("SELECT * FROM products WHERE id=$1", [req.body.row]);
+  if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
+  const fresh = await pipe.rerunOne(it);
+  res.json({ ok: true, item: fresh, state: fresh?.state, counts: await store.counts() });
+}));
 app.post("/api/review/approve_all", wrap(async (req, res) => {
   const busy = runningPushJob();
   if (busy) return res.status(409).json({ ok: false, error: "a Shopify push is already running — wait for it to finish", job: busy });

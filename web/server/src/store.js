@@ -230,6 +230,8 @@ export async function saveResult(prod, status, live, cur, state, runId, extra = 
   return delta;
 }
 
+export const productByKey = (key) => one("SELECT * FROM products WHERE key=$1", [key]);
+
 // ---- review ----
 export async function reviewItems(kind, brands) {
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";

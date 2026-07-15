@@ -709,6 +709,9 @@ function Review({admin}) {
   const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
   const [vendor,setVendor]=useState("");
   const [pushJob,setPushJob]=useState(null);
+  const [rerunning,setRerunning]=useState(()=>new Set());
+  const [rerunAllBusy,setRerunAllBusy]=useState(false);
+  const [rerunProgress,setRerunProgress]=useState(null);
   const convOn=convCur!=="INR";
 
   const load=useCallback(async()=>{
@@ -739,6 +742,34 @@ function Review({admin}) {
   const updateBaseAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!items.length) return toast("Nothing to update","err"); if(!confirm(`Set base price = live price (currency-converted, no markup) for ALL ${items.length} ${tab} rows, then clear live?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/update_base_all",{kind:tab,brands:bList}); r.ok?toast(`Base updated on ${r.updated} row(s)`,"ok"):toast(r.error||"Failed","err"); load(); };
   const emailReport=async()=>{ const bList=vendor?[vendor]:brands; const scope=bList.length?`${bList.length} brand(s)`:"all brands"; if(!confirm(`Email a per-brand mismatch sheet for ${scope}?`)) return; toast("Sending…","ok"); const r=await aj("/api/alerts/email_mismatch",{brands:bList}); r.ok?toast(`Emailed ${r.count} mismatch(es) to ${r.to}`,"ok"):toast(r.error||"Email failed","err"); };
   const clear=()=>{ setBrands([]); setVendor(""); setTab("mismatch"); setSel(new Set()); };
+  const rerunOne=async(it)=>{
+    if(!admin) return toast("Admin only","err");
+    setRerunning(s=>new Set(s).add(it.id));
+    const r=await aj("/api/review/rerun",{row:it.id});
+    setRerunning(s=>{ const n=new Set(s); n.delete(it.id); return n; });
+    if(!r.ok) return toast(r.error||"Failed","err");
+    const st=r.item?.state;
+    if(st&&st!=="error"){ toast(`Recovered — ${fmt(r.item.live_price)} ${r.item.currency||""} (${st})`,"ok"); setItems(xs=>xs.filter(x=>x.id!==it.id)); }
+    else { toast(`Still failing — ${r.item?.status||"error"}`,"err"); setItems(xs=>xs.map(x=>x.id===it.id?{...x,...r.item,_amt:x._amt,_cur:x._cur}:x)); }
+  };
+  const rerunAll=async()=>{
+    if(!admin) return toast("Admin only","err");
+    if(!items.length) return toast("Nothing to rerun","err");
+    if(!confirm(`Re-fetch live prices for all ${items.length} error row(s)?\n\nThis runs one at a time (with a short gap between each) so no single site gets hammered with requests — it may take a while for a large batch.`)) return;
+    setRerunAllBusy(true);
+    const targets=[...items]; let done=0, recovered=0;
+    setRerunProgress({done:0,total:targets.length});
+    for(const it of targets){
+      const r=await aj("/api/review/rerun",{row:it.id});
+      done++;
+      if(r.ok && r.item?.state && r.item.state!=="error"){ recovered++; setItems(xs=>xs.filter(x=>x.id!==it.id)); }
+      setRerunProgress({done,total:targets.length});
+      await new Promise(res=>setTimeout(res,1200));
+    }
+    setRerunAllBusy(false); setRerunProgress(null);
+    toast(`Rerun complete — ${recovered}/${targets.length} recovered`,"ok");
+    load();
+  };
   const dismissView=async()=>{
     const bList=vendor?[vendor]:brands;
     const scope=bList.length?(bList.length===1?bList[0]:`${bList.length} vendors`):"ALL vendors";
@@ -785,6 +816,10 @@ function Review({admin}) {
         title="Set base price = current live price (currency-converted, no markup) for every row below, then clear live">
         <Icon n="up" s={12}/>Update base = live (all)
       </button>
+      {tab==="error" && <button className="btn btn-ghost btn-sm" onClick={rerunAll} disabled={!admin||!items.length||rerunAllBusy}
+        title="Re-fetch a fresh live price for every failed row below">
+        <Icon n="refresh" s={12}/>{rerunAllBusy?`Rerunning ${rerunProgress?.done??0}/${rerunProgress?.total??0}…`:"Rerun all errors"}
+      </button>}
       <div className="toolbar-sep"/>
       <ClearViewBtn onClear={dismissView} title="Hide this view's rows from the review queue for good — prices/decisions are untouched"/>
     </div>
@@ -823,6 +858,9 @@ function Review({admin}) {
             <td><select className="inp mono" style={{width:70}} value={it._cur} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_cur:e.target.value}:x))}><option>INR</option><option>USD</option><option>CAD</option><option>EUR</option><option>GBP</option></select></td>
             <td className="mono" style={{textAlign:"right",color:"var(--green)"}}>{fmt(previewFinal(it))}</td>
             <td><div style={{display:"flex",gap:6}}>{it.decision==="approved"?<span style={{color:"var(--green)"}}>✓</span>:<>
+              {tab==="error" && <button title="Re-fetch live price now" onClick={()=>rerunOne(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:rerunning.has(it.id)?"wait":"pointer"}} disabled={!admin||rerunning.has(it.id)}>
+                <Icon n="refresh" s={15}/>
+              </button>}
               <button title="Approve" onClick={()=>decide(it,"approved")} style={{color:"var(--green)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="check" s={15}/></button>
               <button title={`Update base price: live ${fmt(it.live_price)} ${it._cur} becomes the new base (uses the Cur column), live is cleared`} onClick={()=>setBase(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="up" s={15}/></button>
               <button title="Delete" onClick={()=>del(it)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="x" s={15}/></button>

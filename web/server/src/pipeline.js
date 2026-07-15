@@ -303,6 +303,27 @@ async function runPass(eng, rows, workers, fetcher, runId, onDone) {
   }
 }
 
+// Ad-hoc single-row rerun for the Review page's "Rerun" button — reuses
+// processOne/finalizeOne so a manual rerun applies the exact same per-brand
+// rules (native currency, USD-fetch pin, relay/proxy, woo API) as a real
+// pipeline run, just for one product outside of a full run.
+export async function rerunOne(prod) {
+  const eng = { config: { simulation: false }, state: {}, log: [], logmeta: { offset: 0 } };
+  eng.usdFetchBrands = await store.usdFetchBrandSet();
+  eng.rangeHighBrands = await store.rangeHighBrandSet();
+  eng.proxyBrands = await store.proxyBrandSet();
+  eng.localOnlyBrands = await store.localOnlyBrandSet();
+  eng.relay = (config.isCloud && config.fetchRelayUrl)
+    ? { url: config.fetchRelayUrl, secret: config.fetchRelaySecret } : null;
+  eng.wooApiBrands = await store.wooApiBrandSet();
+  eng.relayParams = await store.relayAppendParams();
+  eng.nativeCurrency = await store.nativeCurrencyBrands();
+  const fetcher = new Fetcher({ cooldown: [600, 1500] });
+  const runId = "rerun-" + Date.now().toString(36);
+  await processOne(eng, fetcher, prod, runId);
+  return store.productByKey(prod.key);
+}
+
 export async function startPipeline(eng, runId) {
   const cfg = eng.config, st = eng.state;
   const mode = cfg.fresh_start ? "fresh" : "update";
