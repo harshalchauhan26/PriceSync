@@ -223,7 +223,7 @@ export async function saveResult(prod, status, live, cur, state, runId, extra = 
     ON CONFLICT(key) DO UPDATE SET url=excluded.url,live_price=excluded.live_price,currency=excluded.currency,
       status=excluded.status,state=excluded.state,delta=excluded.delta,
       decision='pending',decided_at=NULL,updated_at=excluded.updated_at,
-      base_usd=COALESCE(products.base_usd,excluded.base_usd)`,
+      base_usd=COALESCE(products.base_usd,excluded.base_usd),review_dismissed_at=NULL`,
     [prod.key, prod.mbo_url || "", cleanUrl, prod.platform, prod.custom_regex, prod.brand,
       base, live, cur, status, state, delta, now, baseUsdVal]);
   await q(`INSERT INTO price_history(key,url,brand,base_price,live_price,delta,state,status,run_id)
