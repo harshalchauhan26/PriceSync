@@ -780,7 +780,7 @@ function Review({admin}) {
     load();
   };
   const tog=(id)=>{ const n=new Set(sel); n.has(id)?n.delete(id):n.add(id); setSel(n); };
-  const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error,"var(--red)"],["resolved","Resolved",counts.matched,"var(--green)"]];
+  const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error_awaiting,"var(--red)"],["resolved","Resolved",counts.resolved_awaiting,"var(--green)"]];
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
     <PageBar title="Review & Approval Queue" subtitle="Approving archives the row and pushes the final price to Shopify."

@@ -118,6 +118,8 @@ export async function counts(brand) {
     COUNT(*) FILTER (WHERE state='error' AND review_dismissed_at IS NULL) error,
     COUNT(*) FILTER (WHERE decision='approved') approved,
     COUNT(*) FILTER (WHERE state='mismatch' AND decision='pending' AND review_dismissed_at IS NULL) awaiting,
+    COUNT(*) FILTER (WHERE state='error' AND decision='pending' AND review_dismissed_at IS NULL) error_awaiting,
+    COUNT(*) FILTER (WHERE state='matched' AND decision='pending' AND review_dismissed_at IS NULL) resolved_awaiting,
     COUNT(*) FILTER (WHERE decision='rejected') rejected FROM products ${where}`, params);
   const o = {}; for (const k of Object.keys(r)) o[k] = num(r[k]); return o;
 }
