@@ -387,6 +387,34 @@ app.post("/api/review/rerun", wrap(async (req, res) => {
   const fresh = await pipe.rerunOne(it);
   res.json({ ok: true, item: fresh, state: fresh?.state, counts: await store.counts() });
 }));
+// "Approve Selected" (the checkbox multi-select), given its own batch-job
+// path so it gets the same live batch-progress panel as "Approve all" —
+// it previously looped /api/review/decide client-side with an immediate
+// synchronous push per row and no visible progress at all.
+app.post("/api/review/approve_selected", wrap(async (req, res) => {
+  const busy = runningPushJob();
+  if (busy) return res.status(409).json({ ok: false, error: "a Shopify push is already running — wait for it to finish", job: busy });
+  const specs = Array.isArray(req.body.rows) ? req.body.rows : [];
+  if (!specs.length) return res.status(400).json({ ok: false, error: "no rows selected" });
+  const ids = specs.map((s) => s.id).filter((id) => id != null);
+  const prows = await q(`SELECT * FROM products WHERE id = ANY($1)`, [ids]);
+  const byId = new Map(prows.map((r) => [String(r.id), r]));
+  const by = sec.currentUser(req)?.email;
+  const client = await pool.connect();
+  let n = 0; const archived = [];
+  try {
+    await client.query("BEGIN");
+    for (const spec of specs) {
+      const prow = byId.get(String(spec.id));
+      if (!prow) continue;
+      const approved = await approveOne(client, prow, { ...spec, _by: by });
+      archived.push(approved.archived); n++;
+    }
+    await client.query("COMMIT");
+  } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
+  const push = archived.length ? startPushJob(archived, "Approve selected") : null;
+  res.json({ ok: true, approved: n, queued: archived.length, job: push?.job || null });
+}));
 app.post("/api/review/approve_all", wrap(async (req, res) => {
   const busy = runningPushJob();
   if (busy) return res.status(409).json({ ok: false, error: "a Shopify push is already running — wait for it to finish", job: busy });

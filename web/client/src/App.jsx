@@ -736,7 +736,16 @@ function Review({admin}) {
     setItems(xs=>xs.filter(x=>x.id!==it.id));
     const r=await aj("/api/review/update_base",{row:it.id,currency:it._cur});
     r.ok?toast(`Base updated to ₹${fmt(r.base_price)} — live cleared`,"ok"):toast(r.error||"Failed","err"); load(); };
-  const approveSel=async()=>{ if(!sel.size) return toast("Select rows first","err"); let pushed=0,failed=0; for(const id of sel){ const it=items.find(x=>x.id===id); const r=await aj("/api/review/decide",{row:id,decision:"approved",markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.shopify?.ok?pushed++:failed++; } toast(`Approved ${sel.size} · Shopify ${pushed} ok${failed?`, ${failed} failed`:""}`,failed?"err":"ok"); load(); };
+  const approveSel=async()=>{
+    if(!sel.size) return toast("Select rows first","err");
+    const rows=[...sel].map(id=>{ const it=items.find(x=>x.id===id);
+      return {id, markup_pct:gm, price_amount:it._amt, price_currency:it._cur, convert:convOn, convert_currency:convOn?convCur:""}; });
+    setItems(xs=>xs.filter(x=>!sel.has(x.id)));
+    const r=await aj("/api/review/approve_selected",{rows});
+    if(r.ok){ toast(`Approved ${r.approved}${r.job?` — pushing ${r.queued} to Shopify`:""}`,"ok"); if(r.job) setPushJob(r.job); }
+    else { toast(r.error||"Failed","err"); if(r.job) setPushJob(r.job); }
+    setSel(new Set()); load();
+  };
   const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}? Prices are pushed to Shopify in batches of 10.`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); if(r.ok){ toast(`Approved ${r.approved}${r.job?` — pushing ${r.queued} to Shopify`:""}`,"ok"); if(r.job) setPushJob(r.job); } else { toast(r.error,"err"); if(r.job) setPushJob(r.job); } load(); };
   const rejectAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Reject ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/reject_all",{kind:tab,brands:bList}); r.ok?toast(`Rejected ${r.rejected}`,"ok"):toast(r.error||"Failed","err"); load(); };
   const updateBaseAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!items.length) return toast("Nothing to update","err"); if(!confirm(`Set base price = live price (currency-converted, no markup) for ALL ${items.length} ${tab} rows, then clear live?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/update_base_all",{kind:tab,brands:bList}); r.ok?toast(`Base updated on ${r.updated} row(s)`,"ok"):toast(r.error||"Failed","err"); load(); };
