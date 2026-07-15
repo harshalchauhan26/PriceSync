@@ -379,9 +379,27 @@ app.post("/api/review/rerun", wrap(async (req, res) => {
   const fresh = await pipe.rerunOne(it);
   res.json({ ok: true, item: fresh, state: fresh?.state, counts: await store.counts() });
 }));
-// "Approve Selected" (the checkbox multi-select) — batches the chosen rows
-// through approveOne. Archives to History only; no Shopify push happens
-// here (that's now a separate, deliberate step from the History tab).
+// Archives rows to History in the background, one row/transaction at a
+// time, so each finished row shows up in History immediately instead of
+// the whole batch appearing only once every row is done. Fire-and-forget —
+// the route responds before this runs.
+async function approveRowsInBackground(entries) {
+  for (const { prow, spec } of entries) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await approveOne(client, prow, spec);
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      console.error("[MBO] approve failed for", prow.key, ":", e.message);
+    } finally { client.release(); }
+  }
+}
+// "Approve Selected" (the checkbox multi-select) — archives to History
+// only; no Shopify push happens here (that's a separate, deliberate step
+// from the History tab). Responds immediately; archiving runs in the
+// background so rows land in History as each completes, not all at once.
 app.post("/api/review/approve_selected", wrap(async (req, res) => {
   const specs = Array.isArray(req.body.rows) ? req.body.rows : [];
   if (!specs.length) return res.status(400).json({ ok: false, error: "no rows selected" });
@@ -389,23 +407,15 @@ app.post("/api/review/approve_selected", wrap(async (req, res) => {
   const prows = await q(`SELECT * FROM products WHERE id = ANY($1)`, [ids]);
   const byId = new Map(prows.map((r) => [String(r.id), r]));
   const by = sec.currentUser(req)?.email;
-  const client = await pool.connect();
-  let n = 0;
-  try {
-    await client.query("BEGIN");
-    for (const spec of specs) {
-      const prow = byId.get(String(spec.id));
-      if (!prow) continue;
-      await approveOne(client, prow, { ...spec, _by: by });
-      n++;
-    }
-    await client.query("COMMIT");
-  } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
-  res.json({ ok: true, approved: n });
+  const entries = specs.map((spec) => ({ prow: byId.get(String(spec.id)), spec: { ...spec, _by: by } }))
+    .filter((e) => e.prow);
+  res.json({ ok: true, queued: entries.length });
+  approveRowsInBackground(entries).catch((e) => console.error("[MBO] approve_selected background loop crashed:", e.message));
 }));
 app.post("/api/review/approve_all", wrap(async (req, res) => {
   // Archives every matching row to History; no Shopify push happens here —
-  // that's a separate, deliberate step from the History tab.
+  // that's a separate, deliberate step from the History tab. Responds
+  // immediately; see approveRowsInBackground.
   const kind = req.body.kind || "mismatch";
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
   const brands = (req.body.brands || []).filter(Boolean);
@@ -413,16 +423,9 @@ app.post("/api/review/approve_all", wrap(async (req, res) => {
   if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands); }
   const rows = await q(`SELECT * FROM products WHERE ${where}`, p);
   const by = sec.currentUser(req)?.email;
-  const client = await pool.connect();
-  let n = 0;
-  try { await client.query("BEGIN");
-    for (const r of rows) {
-      await approveOne(client, r, { ...req.body, custom_price: null, _by: by });
-      n++;
-    }
-    await client.query("COMMIT");
-  } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
-  res.json({ ok: true, approved: n });
+  const spec = { ...req.body, custom_price: null, _by: by };
+  res.json({ ok: true, queued: rows.length });
+  approveRowsInBackground(rows.map((prow) => ({ prow, spec }))).catch((e) => console.error("[MBO] approve_all background loop crashed:", e.message));
 }));
 app.post("/api/review/reject_all", wrap(async (req, res) => {
   const kind = req.body.kind || "mismatch";
