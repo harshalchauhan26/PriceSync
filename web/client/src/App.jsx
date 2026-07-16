@@ -64,9 +64,12 @@ function Toggle({on, onChange}) {
 }
 
 /* ─── Global brand filter (multi-select) — lives in the Topbar, shared by every page ── */
-function GlobalBrandFilter({value, onChange, source}) {
+function GlobalBrandFilter({value, onChange, source, scope}) {
   const [vs,setVs]=useState([]); const [open,setOpen]=useState(false); const [q,setQ]=useState(""); const ref=useRef(null);
-  useEffect(()=>{ api("/api/vendors"+(source?"?source="+source:"")).then(d=>setVs(d.vendors||[])); },[source]);
+  useEffect(()=>{
+    const qs = scope?"?scope="+scope:source?"?source="+source:"";
+    api("/api/vendors"+qs).then(d=>setVs(d.vendors||[]));
+  },[source,scope]);
   useEffect(()=>{ const h=(e)=>{ if(ref.current&&!ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown",h); return()=>document.removeEventListener("mousedown",h); },[]);
   const sel=new Set(value);
   const toggle=(v)=>{ const n=new Set(sel); n.has(v)?n.delete(v):n.add(v); onChange([...n]); };
@@ -195,14 +198,14 @@ function ClearViewBtn({onClear, title}) {
 }
 
 /* ─── Page toolbar (title + page-specific extras; brand filter is global — see Topbar) ── */
-function PageBar({title, subtitle, brands, setBrands, onClear, extraLeft, extraRight}) {
+function PageBar({title, subtitle, brands, setBrands, brandScope, onClear, extraLeft, extraRight}) {
   return <div style={{marginBottom:20}}>
     <div style={{marginBottom:12}}>
       <h1 style={{fontSize:22,fontWeight:700,letterSpacing:"-.01em"}}>{title}</h1>
       {subtitle&&<div style={{fontSize:12,color:"var(--on2)",marginTop:3}}>{subtitle}</div>}
     </div>
     <div className="toolbar">
-      {setBrands&&<><GlobalBrandFilter value={brands} onChange={setBrands}/><div className="toolbar-sep"/></>}
+      {setBrands&&<><GlobalBrandFilter value={brands} onChange={setBrands} scope={brandScope}/><div className="toolbar-sep"/></>}
       {extraLeft}
       {onClear&&<><div className="toolbar-sep"/><button className="btn btn-sm btn-ghost" onClick={onClear} title="Clear filters & screen">
         <Icon n="x" s={12}/>Clear
@@ -751,7 +754,7 @@ function Review({admin, brands, setBrands}) {
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
     <PageBar title="Review & Approval Queue" subtitle="Pick brand(s) up top — mismatches show first, then errors, then already-matched. Pushing archives to History and updates Shopify in one step."
-      brands={brands} setBrands={setBrands}
+      brands={brands} setBrands={setBrands} brandScope="review"
       extraLeft={<button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
 
     {/* Global pricing strip */}
@@ -841,7 +844,7 @@ function History({admin, brands, setBrands}) {
 
   return <div style={{height:"100%",overflow:"auto"}}>
     <PageBar title="Approval History" subtitle="Approved prices archived from review."
-      brands={brands} setBrands={setBrands}
+      brands={brands} setBrands={setBrands} brandScope="history"
       extraLeft={<>
         <select className="inp mono" style={{width:160}} value={status} onChange={e=>setStatus(e.target.value)}>
           <option value="">All push status</option>

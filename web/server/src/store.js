@@ -196,6 +196,25 @@ export async function vendors(kind, source = 'database') {
   return rows.map((r) => ({ vendor: r.brand, count: num(r.c) }));
 }
 
+// Brand list scoped to exactly what the Review table shows (same WHERE as
+// reviewItemsByBrands) -- counts reflect pending mismatch/error/matched
+// rows per brand, not that brand's whole catalog.
+export async function reviewVendors() {
+  const rows = await q(`SELECT brand, COUNT(*) c FROM products
+    WHERE brand<>'' AND decision='pending' AND review_dismissed_at IS NULL
+      AND state IN ('mismatch','error','matched')
+    GROUP BY brand ORDER BY brand`);
+  return rows.map((r) => ({ vendor: r.brand, count: num(r.c) }));
+}
+
+// Brand list scoped to review_history (what the History page shows) --
+// counts are approvals archived per brand, not products.brand totals.
+export async function historyVendors() {
+  const rows = await q(`SELECT brand, COUNT(*) c FROM review_history
+    WHERE brand<>'' GROUP BY brand ORDER BY brand`);
+  return rows.map((r) => ({ vendor: r.brand, count: num(r.c) }));
+}
+
 // ---- products work list (DB source) ----
 export async function dbProducts(mode = "fresh", vendorList = null) {
   const cl = []; const p = [];

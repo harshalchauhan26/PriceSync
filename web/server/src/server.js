@@ -116,9 +116,12 @@ app.post("/api/fx/override", wrap(async (req, res) => {
   setOverrides({ USD: await store.getMeta("fx_override_usd"), CAD: await store.getMeta("fx_override_cad") });
   res.json({ ok: true, ...(await fxState()) });
 }));
-app.get("/api/vendors", wrap(async (req, res) => res.json({
-  vendors: await store.vendors(req.query.kind, req.query.source),
-})));
+app.get("/api/vendors", wrap(async (req, res) => {
+  const { kind, source, scope } = req.query;
+  if (scope === "review") return res.json({ vendors: await store.reviewVendors() });
+  if (scope === "history") return res.json({ vendors: await store.historyVendors() });
+  res.json({ vendors: await store.vendors(kind, source) });
+}));
 
 app.get("/api/insights", wrap(async (req, res) => {
   const brand = (req.query.brand || "").trim();
