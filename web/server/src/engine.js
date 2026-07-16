@@ -194,8 +194,16 @@ export function extractPriceFromHtml(html, customRegex = null, preferHigh = fals
   }
   let m = html.match(/property=["']product:price:amount["'][^>]*content=["']([^"']+)["']|content=["']([^"']+)["'][^>]*property=["']product:price:amount["']/);
   if (m) return sanitizePrice(m[1] || m[2]);
-  m = html.match(/itemprop=["']price["'][^>]*content=["']([^"']+)["']|content=["']([^"']+)["'][^>]*itemprop=["']price["']/);
-  if (m) return sanitizePrice(m[1] || m[2]);
+  // A page showing both a sale price and a struck-through original/MRP price
+  // (e.g. anitadongre.com) often tags BOTH with itemprop="price" -- plain
+  // .match() only ever returns the first (usually the sale price, since it's
+  // rendered first). Take the highest value across every itemprop="price"
+  // occurrence instead, same "prefer the pre-sale price" rule already used
+  // for Shopify's compare_at_price.
+  const itempropPrices = [...html.matchAll(/itemprop=["']price["'][^>]*content=["']([^"']+)["']|content=["']([^"']+)["'][^>]*itemprop=["']price["']/g)]
+    .map((mm) => sanitizePrice(mm[1] || mm[2]))
+    .filter((v) => v != null);
+  if (itempropPrices.length) return Math.max(...itempropPrices);
   m = html.match(/itemprop=["']price["'][^>]*>([^<]+)</);
   if (m) return sanitizePrice(m[1]);
   m = html.match(/"(?:price|lowPrice)"\s*:\s*"?([0-9][0-9,.]*)"?/);
