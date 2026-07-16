@@ -177,10 +177,11 @@ async function processOne(eng, fetcher, prod, runId) {
       prod.custom_regex || null, {
         fetchCurrency: fetchCur || undefined,
         preferHighPrice: preferHigh || undefined,
-        ...(viaRelay ? {
-          wooApi: (eng.wooApiBrands && eng.wooApiBrands.has(nb)) || undefined,
-          appendParams: (eng.relayParams && eng.relayParams[nb]) || undefined,
-        } : {}),
+        // appendParams (e.g. anitadongre's switch=true geo-redirect suppressor)
+        // applies on every fetch path, not just via the relay -- a direct/local
+        // fetch can hit the same geo-redirect a foreign relay IP does.
+        appendParams: (eng.relayParams && eng.relayParams[nb]) || undefined,
+        ...(viaRelay ? { wooApi: (eng.wooApiBrands && eng.wooApiBrands.has(nb)) || undefined } : {}),
       });
   } catch (e) { errMsg = e.message; }
   return finalizeOne(eng, prod, live, currency, errMsg, runId);

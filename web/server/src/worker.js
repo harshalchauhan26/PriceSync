@@ -43,10 +43,11 @@ await Promise.all(rows.map((prod) => limit(async () => {
       prod.custom_regex || null, {
         fetchCurrency: fetchCur || undefined,
         preferHighPrice: preferHigh || undefined,
-        ...(viaRelay ? {
-          wooApi: wooApiSet.has(brand) || undefined,
-          appendParams: (relayParams && relayParams[brand]) || undefined,
-        } : {}),
+        // appendParams (e.g. anitadongre's switch=true geo-redirect suppressor)
+        // applies on every fetch path, not just via the relay -- a direct/local
+        // fetch can hit the same geo-redirect a foreign relay IP does.
+        appendParams: (relayParams && relayParams[brand]) || undefined,
+        ...(viaRelay ? { wooApi: wooApiSet.has(brand) || undefined } : {}),
       }
     );
     parentPort.postMessage({ type: "result", prod, live, currency });
