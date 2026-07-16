@@ -275,11 +275,19 @@ app.get("/api/review/items_by_brand", wrap(async (req, res) => {
   const brands = (req.query.brands || "").split(",").map((s) => s.trim()).filter(Boolean);
   res.json(await store.reviewItemsByBrands(brands));
 }));
-// "Master Clean" — permanently deletes every row the Review table is
-// currently showing (same scope as items_by_brand, empty brands = all).
-app.post("/api/review/delete_all", wrap(async (req, res) => {
+// Review table's per-row "Clear" — hides just that row (UPDATE flag, never
+// a delete); the product and its price data are untouched in the database.
+app.post("/api/review/hide", wrap(async (req, res) => {
+  const it = await store.dismissRow(req.body.row);
+  if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
+  res.json({ ok: true });
+}));
+// "Master Clean" — hides every row the Review table is currently showing
+// (same scope as items_by_brand, empty brands = all). UPDATE flag only,
+// never a delete — nothing is removed from the database.
+app.post("/api/review/hide_all", wrap(async (req, res) => {
   const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
-  const removed = await store.deleteReviewByBrands(brands);
+  const removed = await store.dismissReviewByBrands(brands);
   res.json({ ok: true, removed, counts: await store.counts() });
 }));
 app.get("/api/review/brands", wrap(async (req, res) => res.json({ brands: (await store.vendors(req.query.kind)).map((v) => ({ brand: v.vendor, count: v.count })) })));

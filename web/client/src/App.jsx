@@ -705,7 +705,7 @@ function Review({admin, brands, setBrands}) {
   const previewFinal=(it)=>{ const manual=amtInr(it._amt,it._cur); if(manual!=null) return roundFinal(manual/targetRate); const refInr=liveInr(it)??it.base_price; if(refInr==null) return null; return roundFinal(refInr/targetRate+Number(gm||0)); };
   const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,cad,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");setCad(r.overrides.CAD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
   const reject=async(it)=>{ if(!admin) return toast("Admin only","err"); setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision:"rejected"}); r.ok?toast("Rejected","ok"):toast(r.error||"Failed","err"); load(); };
-  const del=async(it)=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Clear ${trunc(it.url,56)} — delete it from the catalog entirely?`)) return; setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/delete",{row:it.id}); r.ok?toast("Cleared","ok"):toast(r.error||"Failed","err"); load(); };
+  const del=async(it)=>{ if(!admin) return toast("Admin only","err"); setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/hide",{row:it.id}); r.ok?toast("Cleared from Review — product & price data untouched","ok"):toast(r.error||"Failed","err"); load(); };
   const setBase=async(it)=>{ if(!admin) return toast("Admin only","err"); if(it.live_price==null) return toast("No live price on this row","err");
     if(!confirm(`Set base price = ${fmt(it.live_price)} ${it._cur}${it._cur==="INR"?"":" (converted to ₹)"} and clear live price?`)) return;
     setItems(xs=>xs.filter(x=>x.id!==it.id));
@@ -739,12 +739,12 @@ function Review({admin, brands, setBrands}) {
     if(!admin) return toast("Admin only","err");
     if(!items.length) return toast("Nothing to clean","err");
     const scope=brands.length?(brands.length===1?brands[0]:`${brands.length} selected brands`):"ALL brands";
-    if(!confirm(`Permanently delete all ${items.length} product(s) shown below (${scope})?\n\nThis removes them from the catalog entirely — there is no undo.`)) return;
+    if(!confirm(`Clear all ${items.length} product(s) shown below (${scope}) from the Review queue?\n\nThey stay in the database with their prices untouched — this only hides them from Review.`)) return;
     setCleanBusy(true);
     setItems([]);
-    const r=await aj("/api/review/delete_all",{brands});
+    const r=await aj("/api/review/hide_all",{brands});
     setCleanBusy(false);
-    r.ok?toast(`Deleted ${fmtInt(r.removed)} product(s)`,"ok"):toast(r.error||"Failed","err");
+    r.ok?toast(`Cleared ${fmtInt(r.removed)} product(s) from Review`,"ok"):toast(r.error||"Failed","err");
     load();
   };
 
@@ -795,7 +795,7 @@ function Review({admin, brands, setBrands}) {
               {it.state==="error" && <button title="Re-fetch live price now" onClick={()=>rerunOne(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:rerunning.has(it.id)?"wait":"pointer"}} disabled={!admin||rerunning.has(it.id)}><Icon n="refresh" s={15}/></button>}
               <button title="Set base price = live price and clear live" onClick={()=>setBase(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="up" s={15}/></button>
               <button className="btn btn-ghost btn-sm" title="Reject this row — excluded from the push" onClick={()=>reject(it)} disabled={!admin}><Icon n="x" s={12}/>Reject</button>
-              <button className="btn btn-danger btn-sm" title="Delete this product entirely from the catalog" onClick={()=>del(it)} disabled={!admin}><Icon n="trash" s={12}/>Clear</button>
+              <button className="btn btn-danger btn-sm" title="Hide this product from Review — product & price data stay in the database" onClick={()=>del(it)} disabled={!admin}><Icon n="trash" s={12}/>Clear</button>
             </div></td>
           </tr>;})}
           {!items.length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>Nothing here.</td></tr>}
@@ -803,14 +803,14 @@ function Review({admin, brands, setBrands}) {
       </table>
     </div>
 
-    {/* Footer: combined archive + push (scoped to brand(s) up top), and a master delete-all for the current view */}
+    {/* Footer: combined archive + push (scoped to brand(s) up top), and a master "hide from Review" for the current view */}
     <div style={{marginTop:12,flexShrink:0,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
       <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!items.length||!brands.length}
         title={brands.length?undefined:"Select at least one brand up top before pushing — never runs across every brand at once"}>
         <Icon n="share" s={14}/>{pushBusy?"Starting…":`Push and update price (${items.length})`}
       </button>
       <button className="btn btn-danger" onClick={cleanAll} disabled={!admin||cleanBusy||!items.length}
-        title="Permanently delete every product currently shown below">
+        title="Hide every product currently shown below from Review — nothing is deleted from the database">
         <Icon n="trash" s={14}/>{cleanBusy?"Cleaning…":`Master Clean (${items.length})`}
       </button>
       {!brands.length&&<div style={{fontSize:11,color:"var(--on3)"}}>Showing all brands — select one or more up top to push.</div>}
