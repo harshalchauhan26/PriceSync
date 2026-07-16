@@ -330,7 +330,7 @@ function Home({go, admin, brands}) {
 /* ═══════════════════════════════════════════════════════════════
    PIPELINE
 ═══════════════════════════════════════════════════════════════ */
-function Pipeline({admin, brands}) {
+function Pipeline({admin, brands, setBrands}) {
   const [st,setSt]=useState({entries:[],matched:0,mismatch:0,errors:0,total_rows:0,current_row:0,elapsed:0,message:"Idle.",running:false,phase:"idle",log_total:0});
   const [cfg,setCfg]=useState({concurrency:16,timeout_ms:12000,batch_size:250,rest_between:2,threads:4,safe_retry:true,simulation:false,data_source:"database"});
   const [vendors,setVendors]=useState([]); const [cat,setCat]=useState({total:0}); const [curSel,setCurSel]=useState("INR");
@@ -439,12 +439,10 @@ function Pipeline({admin, brands}) {
         </div>
       </div>
 
-      {/* Scope (driven by the Brand filter at the top of the app) */}
+      {/* Scope — same Brand filter as the Topbar, usable right here too */}
       <div className="card" style={{padding:14}}>
         <div className="lbl" style={{marginBottom:10}}>Scope</div>
-        <div style={{fontSize:12,color:"var(--on2)"}}>
-          {vsel.length?<>{vsel.length} brand{vsel.length>1?"s":""} selected up top</>:"All brands (no filter selected up top)"}
-        </div>
+        <GlobalBrandFilter value={brands} onChange={setBrands}/>
         <div style={{fontSize:11,color:"var(--on3)",marginTop:8}}>
           Products in scope: <b style={{color:"var(--on)"}}>{fmtInt(vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):sourceTotal)}</b>
         </div>
@@ -692,7 +690,6 @@ function Review({admin, brands}) {
   const convOn=convCur!=="INR";
 
   const load=useCallback(async()=>{
-    if(!brands.length){ setItems([]); return; }
     const d=await api(`/api/review/items_by_brand?brands=${encodeURIComponent(brands.join(","))}`);
     setItems((d.items||[]).map(it=>({...it,_amt:"",_cur:(it.currency||"INR").toUpperCase()})));
   },[brands]);
@@ -706,7 +703,7 @@ function Review({admin, brands}) {
   const previewFinal=(it)=>{ const manual=amtInr(it._amt,it._cur); if(manual!=null) return roundFinal(manual/targetRate); const refInr=liveInr(it)??it.base_price; if(refInr==null) return null; return roundFinal(refInr/targetRate+Number(gm||0)); };
   const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,cad,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");setCad(r.overrides.CAD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
   const reject=async(it)=>{ if(!admin) return toast("Admin only","err"); setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision:"rejected"}); r.ok?toast("Rejected","ok"):toast(r.error||"Failed","err"); load(); };
-  const del=async(it)=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Remove ${trunc(it.url,56)}?`)) return; setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/delete",{row:it.id}); r.ok?toast("Removed","ok"):toast(r.error||"Failed","err"); load(); };
+  const del=async(it)=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Clear ${trunc(it.url,56)} — delete it from the catalog entirely?`)) return; setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/delete",{row:it.id}); r.ok?toast("Cleared","ok"):toast(r.error||"Failed","err"); load(); };
   const setBase=async(it)=>{ if(!admin) return toast("Admin only","err"); if(it.live_price==null) return toast("No live price on this row","err");
     if(!confirm(`Set base price = ${fmt(it.live_price)} ${it._cur}${it._cur==="INR"?"":" (converted to ₹)"} and clear live price?`)) return;
     setItems(xs=>xs.filter(x=>x.id!==it.id));
@@ -759,46 +756,47 @@ function Review({admin, brands}) {
       </div>
     </div>
 
-    {!brands.length ? <div style={{textAlign:"center",padding:"80px 0",color:"var(--on3)"}}>Select a brand up top to review.</div> : <>
     {/* Table */}
     <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
       <table className="tbl">
-        <thead><tr>{["Product","State","Base ₹","Live","≈₹","Δ₹",`Markup ${convCur}`,"Amount","Cur",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <thead><tr>{["Product","State","Base ₹","Live","Δ₹","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
-          {items.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; return <tr key={it.id}>
+          {items.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; return <tr key={it.id}>
             <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,32)}</a>
               <div className="mono" style={{fontSize:10,color:"var(--on3)"}}>{(it.brand||"").replace(/^www\./,"")}</div></td>
             <td><span className="mono" style={{fontSize:11,fontWeight:700,color:pc}}>{pl}</span></td>
             <td className="mono" style={{textAlign:"right"}}>{fmt(it.base_price)}</td>
-            <td className="mono" style={{textAlign:"right"}}>{fmt(it.live_price)} <span style={{color:"var(--on3)",fontSize:10}}>{it.currency}</span></td>
-            <td className="mono" style={{textAlign:"right"}}>{fmt(li)}</td>
+            <td className="mono" style={{textAlign:"right"}}>
+              {fmt(it.live_price)} <span style={{color:"var(--on3)",fontSize:10}}>{it.currency}</span>
+              {showConv&&<div style={{fontSize:10,color:"var(--on3)"}}>≈ ₹{fmt(li)}</div>}
+            </td>
             <td className="mono" style={{textAlign:"right",color:up?"var(--red)":"var(--green)"}}>{dl!=null?(up?"+":"")+fmt(dl):"—"}</td>
-            <td><input type="number" className="inp mono" style={{width:60,opacity:.6,textAlign:"right"}} value={gm} readOnly/></td>
-            <td><input type="number" className="inp mono" style={{width:76,textAlign:"right"}} placeholder="amount" value={it._amt} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_amt:e.target.value}:x))}/></td>
-            <td><select className="inp mono" style={{width:70}} value={it._cur} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_cur:e.target.value}:x))}><option>INR</option><option>USD</option><option>CAD</option><option>EUR</option><option>GBP</option></select></td>
+            <td><div style={{display:"flex",gap:4}}>
+              <input type="number" className="inp mono" style={{width:72,textAlign:"right"}} placeholder="amount" value={it._amt} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_amt:e.target.value}:x))}/>
+              <select className="inp mono" style={{width:64}} value={it._cur} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_cur:e.target.value}:x))}><option>INR</option><option>USD</option><option>CAD</option><option>EUR</option><option>GBP</option></select>
+            </div></td>
             <td className="mono" style={{textAlign:"right",color:"var(--green)"}}>{fmt(previewFinal(it))}</td>
-            <td><div style={{display:"flex",gap:6}}>
-              {it.state==="error" && <button title="Re-fetch live price now" onClick={()=>rerunOne(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:rerunning.has(it.id)?"wait":"pointer"}} disabled={!admin||rerunning.has(it.id)}>
-                <Icon n="refresh" s={15}/>
-              </button>}
-              <button title="Reject" onClick={()=>reject(it)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="x" s={15}/></button>
-              <button title={`Update base price: live ${fmt(it.live_price)} ${it._cur} becomes the new base (uses the Cur column), live is cleared`} onClick={()=>setBase(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="up" s={15}/></button>
-              <button title="Delete" onClick={()=>del(it)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="trash" s={15}/></button>
+            <td><div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
+              {it.state==="error" && <button title="Re-fetch live price now" onClick={()=>rerunOne(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:rerunning.has(it.id)?"wait":"pointer"}} disabled={!admin||rerunning.has(it.id)}><Icon n="refresh" s={15}/></button>}
+              <button title="Set base price = live price and clear live" onClick={()=>setBase(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="up" s={15}/></button>
+              <button className="btn btn-ghost btn-sm" title="Reject this row — excluded from the push" onClick={()=>reject(it)} disabled={!admin}><Icon n="x" s={12}/>Reject</button>
+              <button className="btn btn-danger btn-sm" title="Delete this product entirely from the catalog" onClick={()=>del(it)} disabled={!admin}><Icon n="trash" s={12}/>Clear</button>
             </div></td>
           </tr>;})}
-          {!items.length&&<tr><td colSpan={11} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>Nothing here.</td></tr>}
+          {!items.length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>Nothing here.</td></tr>}
         </tbody>
       </table>
     </div>
 
     {/* Footer: combined archive + push, scoped to the brand(s) selected up top */}
     <div style={{marginTop:12,flexShrink:0}}>
-      <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!items.length}>
+      <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!items.length||!brands.length}
+        title={brands.length?undefined:"Select at least one brand up top before pushing — never runs across every brand at once"}>
         <Icon n="share" s={14}/>{pushBusy?"Starting…":`Push and update price (${items.length})`}
       </button>
+      {!brands.length&&<div style={{fontSize:11,color:"var(--on3)",marginTop:6}}>Showing all brands — select one or more up top to push.</div>}
       {pushJob&&<div style={{marginTop:12}}><PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/></div>}
     </div>
-    </>}
   </div>;
 }
 
@@ -1099,11 +1097,11 @@ export default function App() {
     {/* ── Main area ── */}
     <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
       {/* Topbar */}
-      <div style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"10px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
+      <div style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"10px 20px",display:"flex",alignItems:"center",justifyContent:"flex-end",position:"relative",flexShrink:0}}>
+        {view!=="pipeline"&&<div style={{position:"absolute",left:"50%",top:"50%",transform:"translate(-50%,-50%)",display:"flex",alignItems:"center",gap:8}}>
           <span className="lbl">Brand</span>
           <GlobalBrandFilter value={brands} onChange={setBrands}/>
-        </div>
+        </div>}
         <div style={{display:"flex",alignItems:"center",gap:12}}>
           <div style={{textAlign:"right"}}>
             <div style={{fontSize:12,fontWeight:600}}>{me.email}</div>
@@ -1117,7 +1115,7 @@ export default function App() {
 
       {/* Page content */}
       <div style={{flex:1,minHeight:0,padding:"20px 24px",overflow:"auto"}}>
-        {view==="pipeline"    && <Pipeline    admin={admin} brands={brands}/>}
+        {view==="pipeline"    && <Pipeline    admin={admin} brands={brands} setBrands={setBrands}/>}
         {view==="add"         && <AddProducts admin={admin}/>}
         {view==="review"      && <Review      admin={admin} brands={brands}/>}
         {view==="history"     && <History     admin={admin} brands={brands}/>}

@@ -317,10 +317,12 @@ export const productByKey = (key) => one("SELECT * FROM products WHERE key=$1", 
 // ---- review (one or more brands, priority-ordered: mismatch, then error, then matched) ----
 export const STATE_PRIORITY_SQL = "CASE state WHEN 'mismatch' THEN 0 WHEN 'error' THEN 1 ELSE 2 END";
 export async function reviewItemsByBrands(brands) {
+  const scoped = brands && brands.length;
+  const where = scoped ? "WHERE brand = ANY($1::text[]) AND" : "WHERE";
   const items = await q(`SELECT * FROM products
-    WHERE brand = ANY($1::text[]) AND decision='pending' AND review_dismissed_at IS NULL
+    ${where} decision='pending' AND review_dismissed_at IS NULL
       AND state IN ('mismatch','error','matched')
-    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC`, [brands]);
+    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC LIMIT 2000`, scoped ? [brands] : []);
   return { items, counts: await counts() };
 }
 

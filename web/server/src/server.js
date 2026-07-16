@@ -269,11 +269,10 @@ app.get("/api/review/items", wrap(async (req, res) => {
   const brands = (req.query.brands || "").split(",").filter(Boolean);
   res.json(await store.reviewItems(req.query.kind || "mismatch", brands));
 }));
-// Priority-ordered (mismatch, then error, then matched) list across the
-// brand(s) selected in the top filter — backs the simplified Review page.
+// Priority-ordered (mismatch, then error, then matched) list — scoped to
+// the brand(s) selected in the top filter, or every brand when none is set.
 app.get("/api/review/items_by_brand", wrap(async (req, res) => {
   const brands = (req.query.brands || "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (!brands.length) return res.json({ items: [], counts: await store.counts() });
   res.json(await store.reviewItemsByBrands(brands));
 }));
 app.get("/api/review/brands", wrap(async (req, res) => res.json({ brands: (await store.vendors(req.query.kind)).map((v) => ({ brand: v.vendor, count: v.count })) })));
