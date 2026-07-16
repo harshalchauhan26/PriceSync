@@ -63,28 +63,18 @@ function Toggle({on, onChange}) {
   </button>;
 }
 
-/* ─── Vendor select (single) ───────────────────────────────── */
-function VendorSelect({value, onChange, kind, source}) {
-  const [vs, setVs] = useState([]);
-  useEffect(()=>{ let u="/api/vendors"+(kind?"?kind="+kind:""); if(source) u+=(kind?"&":"?")+"source="+source; api(u).then(d=>setVs(d.vendors||[])); },[kind,source]);
-  return <select className="inp mono" style={{minWidth:180}} value={value} onChange={e=>onChange(e.target.value)}>
-    <option value="">All vendors ({vs.length})</option>
-    {vs.map(v=><option key={v.vendor} value={v.vendor}>{v.vendor.replace(/^www\./,"")} · {v.count}</option>)}
-  </select>;
-}
-
-/* ─── Brand multi-select ───────────────────────────────────── */
-function BrandMultiSelect({value, onChange, kind}) {
+/* ─── Global brand filter (multi-select) — lives in the Topbar, shared by every page ── */
+function GlobalBrandFilter({value, onChange}) {
   const [vs,setVs]=useState([]); const [open,setOpen]=useState(false); const [q,setQ]=useState(""); const ref=useRef(null);
-  useEffect(()=>{ api("/api/vendors"+(kind?"?kind="+kind:"")).then(d=>setVs(d.vendors||[])); },[kind]);
+  useEffect(()=>{ api("/api/vendors").then(d=>setVs(d.vendors||[])); },[]);
   useEffect(()=>{ const h=(e)=>{ if(ref.current&&!ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown",h); return()=>document.removeEventListener("mousedown",h); },[]);
   const sel=new Set(value);
   const toggle=(v)=>{ const n=new Set(sel); n.has(v)?n.delete(v):n.add(v); onChange([...n]); };
   const shown=vs.filter(v=>!q||v.vendor.toLowerCase().includes(q.toLowerCase()));
-  const label=value.length===0?`All brands (${vs.length})`:`${value.length} brand${value.length>1?"s":""} selected`;
-  return <div className="relative" ref={ref} style={{position:"relative"}}>
-    <button onClick={()=>setOpen(o=>!o)} className="inp" style={{minWidth:200,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,cursor:"pointer"}}>
-      <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>{label}</span>
+  const label=value.length===0?`All brands (${vs.length})`:value.length===1?value[0].replace(/^www\./,""):`${value.length} brands selected`;
+  return <div ref={ref} style={{position:"relative"}}>
+    <button onClick={()=>setOpen(o=>!o)} className="inp" style={{minWidth:220,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,cursor:"pointer"}}>
+      <span style={{display:"flex",alignItems:"center",gap:6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}><Icon n="filter" s={12} c="var(--on3)"/>{label}</span>
       <Icon n="search" s={12} c="var(--on3)" />
     </button>
     {open&&<div className="card2" style={{position:"absolute",zIndex:50,top:"calc(100% + 4px)",left:0,width:260,padding:10,boxShadow:"0 16px 48px rgba(0,0,0,.7)"}}>
@@ -93,7 +83,7 @@ function BrandMultiSelect({value, onChange, kind}) {
         <span style={{color:"var(--blue)",cursor:"pointer"}} onClick={()=>onChange([...new Set([...value,...shown.map(v=>v.vendor)])])}>Select all</span>
         <span style={{color:"var(--on3)",cursor:"pointer"}} onClick={()=>onChange([])}>Clear</span>
       </div>
-      <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+      <div style={{maxHeight:260,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
         {shown.map(v=><label key={v.vendor} className="vendor-row">
           <input type="checkbox" checked={sel.has(v.vendor)} onChange={()=>toggle(v.vendor)} />
           <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.vendor.replace(/^www\./,"")}</span>
@@ -204,8 +194,8 @@ function ClearViewBtn({onClear, title}) {
   </button>;
 }
 
-/* ─── Page toolbar (vendor filter + clear) ─────────────────── */
-function PageBar({title, subtitle, admin, vendor, onVendor, onClear, extraLeft, extraRight, kind, source}) {
+/* ─── Page toolbar (title + page-specific extras; brand filter is global — see Topbar) ── */
+function PageBar({title, subtitle, onClear, extraLeft, extraRight}) {
   return <div style={{marginBottom:20}}>
     <div style={{marginBottom:12}}>
       <h1 style={{fontSize:22,fontWeight:700,letterSpacing:"-.01em"}}>{title}</h1>
@@ -213,12 +203,9 @@ function PageBar({title, subtitle, admin, vendor, onVendor, onClear, extraLeft, 
     </div>
     <div className="toolbar">
       {extraLeft}
-      <div className="toolbar-sep"/>
-      <Icon n="filter" s={13} c="var(--on3)"/>
-      <VendorSelect value={vendor} onChange={onVendor} kind={kind} source={source}/>
-      <button className="btn btn-sm btn-ghost" onClick={onClear} title="Clear filters & screen">
+      {onClear&&<><div className="toolbar-sep"/><button className="btn btn-sm btn-ghost" onClick={onClear} title="Clear filters & screen">
         <Icon n="x" s={12}/>Clear
-      </button>
+      </button></>}
       {extraRight}
     </div>
   </div>;
@@ -283,22 +270,21 @@ function Auth({onIn}) {
 /* ═══════════════════════════════════════════════════════════════
    HOME / INSIGHTS
 ═══════════════════════════════════════════════════════════════ */
-function Home({go, admin}) {
-  const [d,setD]=useState(null); const [brand,setBrand]=useState("");
-  const load=useCallback(()=>{ setD(null); api("/api/insights?brand="+encodeURIComponent(brand)).then(setD); },[brand]);
+function Home({go, admin, brands}) {
+  const [d,setD]=useState(null);
+  const load=useCallback(()=>{ setD(null); api("/api/insights?brand="+encodeURIComponent(brands[0]||"")).then(setD); },[brands]);
   useEffect(()=>{ load(); },[load]);
-  const clear=()=>{ setBrand(""); };
   const Row=({l,v,c})=><div style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:"1px solid var(--border)"}}>
     <span style={{fontSize:12,color:"var(--on2)"}}>{l}</span>
     <b className="mono" style={{color:c||"var(--on)"}}>{v}</b>
   </div>;
   if(!d) return <div style={{height:"100%",overflow:"auto"}}>
-    <PageBar title="Insights" admin={admin} vendor={brand} onVendor={setBrand} onClear={clear} extraRight={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
+    <PageBar title="Insights" extraRight={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
     <div style={{textAlign:"center",padding:"80px 0",color:"var(--on3)"}}>Loading insights…</div>
   </div>;
   const c=d.counts||{}, ex=d.exposure||{}, fxr=d.fx||{};
   return <div style={{height:"100%",overflow:"auto"}}>
-    <PageBar title="Insights" admin={admin} vendor={brand} onVendor={setBrand} onClear={clear}
+    <PageBar title="Insights"
       extraRight={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
       {[["Total Products",fmtInt(c.total),"var(--on)"],["Matched",fmtInt(c.matched),"var(--green)"],["Mismatches",fmtInt(c.mismatch),"var(--amber)"],["Errors",fmtInt(c.error),"var(--red)"],["Vendors",fmtInt(d.vendors),"var(--blue)"],["Awaiting",fmtInt(c.awaiting),"var(--amber)"],["Approved",fmtInt(d.approved_count),"var(--green)"],["Overpriced",inr(Math.round(ex.over||0)),"var(--red)"]].map(([a,b,c2])=><Stat key={a} k={a} v={b} c={c2}/>)}
@@ -344,11 +330,12 @@ function Home({go, admin}) {
 /* ═══════════════════════════════════════════════════════════════
    PIPELINE
 ═══════════════════════════════════════════════════════════════ */
-function Pipeline({admin}) {
+function Pipeline({admin, brands}) {
   const [st,setSt]=useState({entries:[],matched:0,mismatch:0,errors:0,total_rows:0,current_row:0,elapsed:0,message:"Idle.",running:false,phase:"idle",log_total:0});
   const [cfg,setCfg]=useState({concurrency:16,timeout_ms:12000,batch_size:250,rest_between:2,threads:4,safe_retry:true,simulation:false,data_source:"database"});
-  const [vendors,setVendors]=useState([]); const [vsel,setVsel]=useState([]); const [cat,setCat]=useState({total:0}); const [curSel,setCurSel]=useState("INR");
+  const [vendors,setVendors]=useState([]); const [cat,setCat]=useState({total:0}); const [curSel,setCurSel]=useState("INR");
   const cursor=useRef(0), logRef=useRef(null);
+  const vsel=brands;
 
   useEffect(()=>{ api("/api/pipe/status?cursor=0").then(d=>d.config&&setCfg(c=>({...c,...d.config}))); },[]);
   const refreshMeta=useCallback(()=>{
@@ -440,8 +427,8 @@ function Pipeline({admin}) {
           </div>
           <Toggle on={cfg.data_source==="imported"} onChange={on=>{
             const data_source=on?"imported":"database";
-            const next={...cfg,data_source,vendors:[]};
-            setCfg(next); setVsel([]); aj("/api/pipe/config",next);
+            const next={...cfg,data_source,vendors:vsel};
+            setCfg(next); aj("/api/pipe/config",next);
           }}/>
         </div>
         <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid var(--border)"}}>
@@ -452,21 +439,14 @@ function Pipeline({admin}) {
         </div>
       </div>
 
-      {/* Designer Domain */}
+      {/* Scope (driven by the Brand filter at the top of the app) */}
       <div className="card" style={{padding:14}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <div className="lbl">Designer Domain</div>
-          <span style={{fontSize:11,color:"var(--blue)",cursor:"pointer"}} onClick={()=>setVsel([])}>clear</span>
-        </div>
-        <div style={{maxHeight:160,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-          {vendors.map(v=><label key={v.vendor} className="vendor-row">
-            <input type="checkbox" checked={vsel.includes(v.vendor)} onChange={()=>{ const n=new Set(vsel); n.has(v.vendor)?n.delete(v.vendor):n.add(v.vendor); setVsel([...n]); }}/>
-            <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.vendor.replace(/^www\./,"")}</span>
-            <span style={{color:"var(--on3)",fontSize:11}}>{v.count}</span>
-          </label>)}
+        <div className="lbl" style={{marginBottom:10}}>Scope</div>
+        <div style={{fontSize:12,color:"var(--on2)"}}>
+          {vsel.length?<>{vsel.length} brand{vsel.length>1?"s":""} selected up top</>:"All brands (no filter selected up top)"}
         </div>
         <div style={{fontSize:11,color:"var(--on3)",marginTop:8}}>
-          Scope: <b style={{color:"var(--on)"}}>{fmtInt(vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):sourceTotal)}</b>
+          Products in scope: <b style={{color:"var(--on)"}}>{fmtInt(vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):sourceTotal)}</b>
         </div>
         <button className="btn btn-ghost btn-sm" style={{width:"100%",justifyContent:"center",marginTop:8}}
           onClick={()=>{
@@ -701,25 +681,21 @@ function AddProducts({admin}) {
 /* ═══════════════════════════════════════════════════════════════
    REVIEW
 ═══════════════════════════════════════════════════════════════ */
-function Review({admin}) {
-  const [tab,setTab]=useState("mismatch");
-  const [items,setItems]=useState([]); const [counts,setCounts]=useState({});
-  const [brands,setBrands]=useState([]); const [sel,setSel]=useState(()=>new Set());
+const STATE_PILL={mismatch:["WARN","var(--amber)"],error:["FAIL","var(--red)"],matched:["DONE","var(--green)"]};
+
+function Review({admin, brands}) {
+  const [items,setItems]=useState([]);
   const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
   const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
-  const [vendor,setVendor]=useState("");
   const [rerunning,setRerunning]=useState(()=>new Set());
-  const [rerunAllBusy,setRerunAllBusy]=useState(false);
-  const [rerunProgress,setRerunProgress]=useState(null);
+  const [pushBusy,setPushBusy]=useState(false); const [pushJob,setPushJob]=useState(null);
   const convOn=convCur!=="INR";
-  const hasScope=!!(vendor||brands.length);
 
   const load=useCallback(async()=>{
-    const bList=vendor?[vendor]:brands;
-    const d=await api(`/api/review/items?kind=${tab}&brands=${encodeURIComponent(bList.join(","))}`);
-    setItems((d.items||[]).map(it=>({...it,_m:it.markup_pct||gm,_amt:"",_cur:(it.currency||"INR").toUpperCase()})));
-    setCounts(d.counts||{}); setSel(new Set());
-  },[tab,brands,vendor]);
+    if(!brands.length){ setItems([]); return; }
+    const d=await api(`/api/review/items_by_brand?brands=${encodeURIComponent(brands.join(","))}`);
+    setItems((d.items||[]).map(it=>({...it,_amt:"",_cur:(it.currency||"INR").toUpperCase()})));
+  },[brands]);
   useEffect(()=>{ load(); },[load]);
   useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); setCad(d.overrides?.CAD??""); }); },[]);
 
@@ -729,27 +705,13 @@ function Review({admin}) {
   const amtInr=(amount,currency)=>{ const n=Number(amount); if(!Number.isFinite(n)||n<=0) return null; const c=(currency||"INR").toUpperCase(); const r=(c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1); return Math.round(n*r*100)/100; };
   const previewFinal=(it)=>{ const manual=amtInr(it._amt,it._cur); if(manual!=null) return roundFinal(manual/targetRate); const refInr=liveInr(it)??it.base_price; if(refInr==null) return null; return roundFinal(refInr/targetRate+Number(gm||0)); };
   const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,cad,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");setCad(r.overrides.CAD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
-  const decide=async(it,decision)=>{ setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision,markup_pct:gm,price_amount:it._amt,price_currency:it._cur,convert:convOn,convert_currency:convOn?convCur:""}); r.ok?toast(decision==="approved"?`Approved ${fmt(r.final_price)} ${r.push_currency||""} — push it live from History`:"Rejected","ok"):toast(r.error,"err"); load(); };
+  const reject=async(it)=>{ if(!admin) return toast("Admin only","err"); setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision:"rejected"}); r.ok?toast("Rejected","ok"):toast(r.error||"Failed","err"); load(); };
   const del=async(it)=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Remove ${trunc(it.url,56)}?`)) return; setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/delete",{row:it.id}); r.ok?toast("Removed","ok"):toast(r.error||"Failed","err"); load(); };
   const setBase=async(it)=>{ if(!admin) return toast("Admin only","err"); if(it.live_price==null) return toast("No live price on this row","err");
     if(!confirm(`Set base price = ${fmt(it.live_price)} ${it._cur}${it._cur==="INR"?"":" (converted to ₹)"} and clear live price?`)) return;
     setItems(xs=>xs.filter(x=>x.id!==it.id));
     const r=await aj("/api/review/update_base",{row:it.id,currency:it._cur});
     r.ok?toast(`Base updated to ₹${fmt(r.base_price)} — live cleared`,"ok"):toast(r.error||"Failed","err"); load(); };
-  const approveSel=async()=>{
-    if(!sel.size) return toast("Select rows first","err");
-    const rows=[...sel].map(id=>{ const it=items.find(x=>x.id===id);
-      return {id, markup_pct:gm, price_amount:it._amt, price_currency:it._cur, convert:convOn, convert_currency:convOn?convCur:""}; });
-    setItems(xs=>xs.filter(x=>!sel.has(x.id)));
-    const r=await aj("/api/review/approve_selected",{rows});
-    r.ok?toast(`Approving ${r.queued} — landing in History now, push from there when ready`,"ok"):toast(r.error||"Failed","err");
-    setSel(new Set()); load();
-  };
-  const approveAll=async()=>{ if(!confirm(`Approve ALL ${items.length} ${tab}? They archive to History right away — push to Shopify from there when you're ready.`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/approve_all",{markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",kind:tab,brands:bList}); r.ok?toast(`Approving ${r.queued} — landing in History now, push from there when ready`,"ok"):toast(r.error,"err"); load(); };
-  const rejectAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!confirm(`Reject ALL ${items.length} ${tab}?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/reject_all",{kind:tab,brands:bList}); r.ok?toast(`Rejected ${r.rejected}`,"ok"):toast(r.error||"Failed","err"); load(); };
-  const updateBaseAll=async()=>{ if(!admin) return toast("Admin only","err"); if(!items.length) return toast("Nothing to update","err"); if(!confirm(`Set base price = live price (currency-converted, no markup) for ALL ${items.length} ${tab} rows, then clear live?`)) return; setItems([]); const bList=vendor?[vendor]:brands; const r=await aj("/api/review/update_base_all",{kind:tab,brands:bList}); r.ok?toast(`Base updated on ${r.updated} row(s)`,"ok"):toast(r.error||"Failed","err"); load(); };
-  const emailReport=async()=>{ const bList=vendor?[vendor]:brands; const scope=bList.length?`${bList.length} brand(s)`:"all brands"; if(!confirm(`Email a per-brand mismatch sheet for ${scope}?`)) return; toast("Sending…","ok"); const r=await aj("/api/alerts/email_mismatch",{brands:bList}); r.ok?toast(`Emailed ${r.count} mismatch(es) to ${r.to}`,"ok"):toast(r.error||"Email failed","err"); };
-  const clear=()=>{ setBrands([]); setVendor(""); setTab("mismatch"); setSel(new Set()); };
   const rerunOne=async(it)=>{
     if(!admin) return toast("Admin only","err");
     setRerunning(s=>new Set(s).add(it.id));
@@ -760,47 +722,24 @@ function Review({admin}) {
     if(st&&st!=="error"){ toast(`Recovered — ${fmt(r.item.live_price)} ${r.item.currency||""} (${st})`,"ok"); setItems(xs=>xs.filter(x=>x.id!==it.id)); }
     else { toast(`Still failing — ${r.item?.status||"error"}`,"err"); setItems(xs=>xs.map(x=>x.id===it.id?{...x,...r.item,_amt:x._amt,_cur:x._cur}:x)); }
   };
-  const rerunAll=async()=>{
+  const pushBrand=async()=>{
     if(!admin) return toast("Admin only","err");
-    if(!items.length) return toast("Nothing to rerun","err");
-    if(!confirm(`Re-fetch live prices for all ${items.length} error row(s)?\n\nThis runs one at a time (with a short gap between each) so no single site gets hammered with requests — it may take a while for a large batch.`)) return;
-    setRerunAllBusy(true);
-    const targets=[...items]; let done=0, recovered=0;
-    setRerunProgress({done:0,total:targets.length});
-    for(const it of targets){
-      const r=await aj("/api/review/rerun",{row:it.id});
-      done++;
-      if(r.ok && r.item?.state && r.item.state!=="error"){ recovered++; setItems(xs=>xs.filter(x=>x.id!==it.id)); }
-      setRerunProgress({done,total:targets.length});
-      await new Promise(res=>setTimeout(res,1200));
-    }
-    setRerunAllBusy(false); setRerunProgress(null);
-    toast(`Rerun complete — ${recovered}/${targets.length} recovered`,"ok");
-    load();
+    if(!brands.length) return toast("Select at least one brand up top first","err");
+    if(!items.length) return toast("Nothing to push","err");
+    if(!confirm(`Archive ${items.length} row(s) to History and push the price to Shopify now, for ${brands.length===1?brands[0]:brands.length+" selected brands"}?`)) return;
+    setPushBusy(true);
+    const overrides=items.filter(it=>it._amt).map(it=>({id:it.id,price_amount:it._amt,price_currency:it._cur}));
+    const r=await aj("/api/review/push_brand",{brands,markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",overrides});
+    setPushBusy(false);
+    if(!r.ok) return toast(r.error||"Failed","err");
+    if(!r.queued) return toast("Nothing to push","ok");
+    toast(`Pushing ${r.queued} in batches of 10`,"ok");
+    setPushJob(r.job);
   };
-  const dismissView=async()=>{
-    const bList=vendor?[vendor]:brands;
-    const scope=bList.length?(bList.length===1?bList[0]:`${bList.length} vendors`):"ALL vendors";
-    if(!confirm(`Hide these ${fmtInt(items.length)} ${tab} row(s) (${scope}) from the review queue for good?\n\nThe products and their prices stay exactly as they are in the database — this only stops them showing up here.`)) return;
-    setItems([]);
-    const r=await aj("/api/review/dismiss_view",{kind:tab,brands:bList});
-    r.ok?toast(`Hid ${fmtInt(r.removed)} row(s) from this view`,"ok"):toast(r.error||"Failed","err");
-    load();
-  };
-  const tog=(id)=>{ const n=new Set(sel); n.has(id)?n.delete(id):n.add(id); setSel(n); };
-  const tabs=[["mismatch","Mismatches",counts.awaiting,"var(--amber)"],["error","Errors",counts.error_awaiting,"var(--red)"],["resolved","Resolved",counts.resolved_awaiting,"var(--green)"]];
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
-    <PageBar title="Review & Approval Queue" subtitle="Approving archives the row to History — push the final price to Shopify from there."
-      admin={admin} vendor={vendor} onVendor={setVendor} onClear={clear} kind={tab}
-      extraLeft={<>
-        <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>
-        <button className="btn btn-ghost btn-sm" onClick={()=>{const bList=vendor?[vendor]:brands; const bq=bList.length?`&brands=${encodeURIComponent(bList.join(","))}`:""; window.location=`/api/export?kind=${tab==="resolved"?"all":tab}${bq}`;}} title={(vendor?[vendor]:brands).length?`Export selected ${(vendor?[vendor]:brands).length} brand(s)`:"Export all brands"}><Icon n="dl" s={12}/>Export{(vendor?[vendor]:brands).length?` (${(vendor?[vendor]:brands).length})`:""}</button>
-        {tab==="mismatch"&&<button className="btn btn-ghost btn-sm" onClick={emailReport} title="Email a per-brand mismatch workbook"><Icon n="mail" s={12}/>Email</button>}
-      </>}
-      extraRight={<>
-        <button className="btn btn-primary btn-sm" onClick={approveSel} disabled={!admin}><Icon n="check" s={12}/>Approve Selected</button>
-      </>}/>
+    <PageBar title="Review & Approval Queue" subtitle="Pick brand(s) up top — mismatches show first, then errors, then already-matched. Pushing archives to History and updates Shopify in one step."
+      extraLeft={<button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
 
     {/* Global pricing strip */}
     <div className="card" style={{padding:"12px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
@@ -818,48 +757,18 @@ function Review({admin}) {
       <div className="pill-group">
         {[["INR","INR"],["USD","USD→₹"],["CAD","CAD→₹"]].map(([k,l])=><button key={k} className={`pill${convCur===k?" active":""}`} onClick={()=>setConvCur(k)}>{l}</button>)}
       </div>
-      <button className="btn btn-success btn-sm" onClick={approveAll} disabled={!admin||!items.length||!hasScope}
-        title={hasScope?undefined:"Select at least one vendor first — this can't run across every brand at once"}>
-        <Icon n="check" s={12}/>Approve all ({items.length})
-      </button>
-      <button className="btn btn-danger btn-sm" onClick={rejectAll} disabled={!admin||!items.length||!hasScope}
-        title={hasScope?undefined:"Select at least one vendor first — this can't run across every brand at once"}>
-        <Icon n="x" s={12}/>Reject all
-      </button>
-      <button className="btn btn-ghost btn-sm" onClick={updateBaseAll} disabled={!admin||!items.length||!hasScope}
-        title={hasScope?"Set base price = current live price (currency-converted, no markup) for every row below, then clear live":"Select at least one vendor first — this can't run across every brand at once"}>
-        <Icon n="up" s={12}/>Update base = live (all)
-      </button>
-      {tab==="error" && <button className="btn btn-ghost btn-sm" onClick={rerunAll} disabled={!admin||!items.length||rerunAllBusy}
-        title="Re-fetch a fresh live price for every failed row below">
-        <Icon n="refresh" s={12}/>{rerunAllBusy?`Rerunning ${rerunProgress?.done??0}/${rerunProgress?.total??0}…`:"Rerun all errors"}
-      </button>}
-      <div className="toolbar-sep"/>
-      <ClearViewBtn onClear={dismissView} title="Hide this view's rows from the review queue for good — prices/decisions are untouched"/>
     </div>
 
-    {/* Tabs */}
-    <div className="tab-bar" style={{marginBottom:10}}>
-      {tabs.map(([k,l,n,c])=><button key={k} onClick={()=>{setTab(k);setBrands([]);}} className={`tab${tab===k?" active":""}`}>
-        {l} <span className="mono" style={{color:c,marginLeft:4}}>{fmtInt(n)}</span>
-      </button>)}
-    </div>
-
-    {/* Multi-brand filter */}
-    <div style={{marginBottom:10,display:"flex",alignItems:"center",gap:8}}>
-      <Icon n="filter" s={13} c="var(--on3)"/>
-      <BrandMultiSelect value={brands} onChange={setBrands} kind={tab}/>
-    </div>
-
+    {!brands.length ? <div style={{textAlign:"center",padding:"80px 0",color:"var(--on3)"}}>Select a brand up top to review.</div> : <>
     {/* Table */}
     <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
       <table className="tbl">
-        <thead><tr>{["","Brand","Product","Base ₹","Live","≈₹","Δ₹",`Markup ${convCur}`,"Amount","Cur",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <thead><tr>{["Product","State","Base ₹","Live","≈₹","Δ₹",`Markup ${convCur}`,"Amount","Cur",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
-          {items.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; return <tr key={it.id}>
-            <td><input type="checkbox" checked={sel.has(it.id)} onChange={()=>tog(it.id)}/></td>
-            <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(it.brand||"").replace(/^www\./,"")}</td>
-            <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,28)}</a></td>
+          {items.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; return <tr key={it.id}>
+            <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,32)}</a>
+              <div className="mono" style={{fontSize:10,color:"var(--on3)"}}>{(it.brand||"").replace(/^www\./,"")}</div></td>
+            <td><span className="mono" style={{fontSize:11,fontWeight:700,color:pc}}>{pl}</span></td>
             <td className="mono" style={{textAlign:"right"}}>{fmt(it.base_price)}</td>
             <td className="mono" style={{textAlign:"right"}}>{fmt(it.live_price)} <span style={{color:"var(--on3)",fontSize:10}}>{it.currency}</span></td>
             <td className="mono" style={{textAlign:"right"}}>{fmt(li)}</td>
@@ -868,38 +777,52 @@ function Review({admin}) {
             <td><input type="number" className="inp mono" style={{width:76,textAlign:"right"}} placeholder="amount" value={it._amt} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_amt:e.target.value}:x))}/></td>
             <td><select className="inp mono" style={{width:70}} value={it._cur} onChange={e=>setItems(xs=>xs.map(x=>x.id===it.id?{...x,_cur:e.target.value}:x))}><option>INR</option><option>USD</option><option>CAD</option><option>EUR</option><option>GBP</option></select></td>
             <td className="mono" style={{textAlign:"right",color:"var(--green)"}}>{fmt(previewFinal(it))}</td>
-            <td><div style={{display:"flex",gap:6}}>{it.decision==="approved"?<span style={{color:"var(--green)"}}>✓</span>:<>
-              {tab==="error" && <button title="Re-fetch live price now" onClick={()=>rerunOne(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:rerunning.has(it.id)?"wait":"pointer"}} disabled={!admin||rerunning.has(it.id)}>
+            <td><div style={{display:"flex",gap:6}}>
+              {it.state==="error" && <button title="Re-fetch live price now" onClick={()=>rerunOne(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:rerunning.has(it.id)?"wait":"pointer"}} disabled={!admin||rerunning.has(it.id)}>
                 <Icon n="refresh" s={15}/>
               </button>}
-              <button title="Approve" onClick={()=>decide(it,"approved")} style={{color:"var(--green)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="check" s={15}/></button>
+              <button title="Reject" onClick={()=>reject(it)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="x" s={15}/></button>
               <button title={`Update base price: live ${fmt(it.live_price)} ${it._cur} becomes the new base (uses the Cur column), live is cleared`} onClick={()=>setBase(it)} style={{color:"var(--blue)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="up" s={15}/></button>
-              <button title="Delete" onClick={()=>del(it)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="x" s={15}/></button>
-            </>}</div></td>
+              <button title="Delete" onClick={()=>del(it)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}} disabled={!admin}><Icon n="trash" s={15}/></button>
+            </div></td>
           </tr>;})}
-          {!items.length&&<tr><td colSpan={12} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>Nothing here.</td></tr>}
+          {!items.length&&<tr><td colSpan={11} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>Nothing here.</td></tr>}
         </tbody>
       </table>
     </div>
+
+    {/* Footer: combined archive + push, scoped to the brand(s) selected up top */}
+    <div style={{marginTop:12,flexShrink:0}}>
+      <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!items.length}>
+        <Icon n="share" s={14}/>{pushBusy?"Starting…":`Push and update price (${items.length})`}
+      </button>
+      {pushJob&&<div style={{marginTop:12}}><PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/></div>}
+    </div>
+    </>}
   </div>;
 }
 
 /* ═══════════════════════════════════════════════════════════════
    HISTORY
 ═══════════════════════════════════════════════════════════════ */
-function History({admin}) {
-  const [d,setD]=useState({items:[],count:0,value:0,pushed:0,failed:0}); const [brand,setBrand]=useState(""); const [status,setStatus]=useState("");
+function History({admin, brands}) {
+  const [d,setD]=useState({items:[],count:0,value:0,pushed:0,failed:0}); const [status,setStatus]=useState("");
   const [pushJob,setPushJob]=useState(null);
-  const load=useCallback(()=>api(`/api/history?brand=${encodeURIComponent(brand)}&status=${status}`).then(setD),[brand,status]);
+  const load=useCallback(()=>api(`/api/history?brands=${encodeURIComponent(brands.join(","))}&status=${status}`).then(setD),[brands,status]);
   useEffect(()=>{ load(); },[load]);
   const push=async(it)=>{ if(!admin) return toast("Admin only","err"); toast("Pushing…"); const r=await aj("/api/history/push",{row:it.id}); toast(r.status||"done",r.ok?"ok":"err"); load(); };
-  const pushAll=async()=>{ if(!admin||!confirm("Re-push all prices not yet successfully pushed? Runs in batches of 10.")) return; const r=await aj("/api/history/push_all",{}); if(r.ok){ if(!r.queued) return toast("Nothing to push — everything is already up to date","ok"); toast(`Pushing ${fmtInt(r.queued)} in batches of 10`,"ok"); setPushJob(r.job); } else { toast(r.error||"Failed","err"); if(r.job) setPushJob(r.job); } };
+  const pushAll=async()=>{
+    if(!admin) return toast("Admin only","err");
+    if(!brands.length) return toast("Select at least one brand up top before retrying pushes","err");
+    if(!confirm(`Re-push all prices not yet successfully pushed for ${brands.length===1?brands[0]:brands.length+" selected brands"}? Runs in batches of 10.`)) return;
+    const r=await aj("/api/history/push_all",{brands});
+    if(r.ok){ if(!r.queued) return toast("Nothing to push — everything is already up to date","ok"); toast(`Pushing ${fmtInt(r.queued)} in batches of 10`,"ok"); setPushJob(r.job); }
+    else { toast(r.error||"Failed","err"); if(r.job) setPushJob(r.job); }
+  };
   const clearView=()=>setD(x=>({...x,items:[]}));
-  const clear=()=>{ setBrand(""); setStatus(""); };
 
   return <div style={{height:"100%",overflow:"auto"}}>
     <PageBar title="Approval History" subtitle="Approved prices archived from review."
-      admin={admin} vendor={brand} onVendor={setBrand} onClear={clear}
       extraLeft={<>
         <select className="inp mono" style={{width:160}} value={status} onChange={e=>setStatus(e.target.value)}>
           <option value="">All push status</option>
@@ -908,7 +831,7 @@ function History({admin}) {
           <option value="pushed">Pushed ✓</option>
         </select>
         <button className="btn btn-ghost btn-sm" onClick={()=>window.location="/api/history/export"}><Icon n="dl" s={12}/>Export</button>
-        <button className="btn btn-primary btn-sm" onClick={pushAll} disabled={!admin}><Icon n="share" s={12}/>Retry / Push all</button>
+        <button className="btn btn-primary btn-sm" onClick={pushAll} disabled={!admin||!brands.length} title={brands.length?undefined:"Select a brand up top first"}><Icon n="share" s={12}/>Retry / Push all</button>
         <ClearViewBtn onClear={clearView}/>
       </>}/>
 
@@ -946,15 +869,15 @@ function History({admin}) {
 /* ═══════════════════════════════════════════════════════════════
    ALERTS
 ═══════════════════════════════════════════════════════════════ */
-function Alerts({admin}) {
-  const [thr,setThr]=useState(15); const [dir,setDir]=useState("all"); const [brand,setBrand]=useState(""); const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
-  const load=useCallback(()=>api(`/api/alerts?threshold=${thr}&direction=${dir}&brand=${encodeURIComponent(brand)}`).then(setD),[thr,dir,brand]);
+function Alerts({admin, brands}) {
+  const [thr,setThr]=useState(15); const [dir,setDir]=useState("all"); const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
+  const load=useCallback(()=>api(`/api/alerts?threshold=${thr}&direction=${dir}&brands=${encodeURIComponent(brands.join(","))}`).then(setD),[thr,dir,brands]);
   useEffect(()=>{ load(); },[load]);
-  const clear=()=>{ setBrand(""); setDir("all"); setThr(15); };
+  const clear=()=>{ setDir("all"); setThr(15); };
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
     <PageBar title="Price Movement Alerts" subtitle="Volatility monitoring across designer brands."
-      admin={admin} vendor={brand} onVendor={setBrand} onClear={clear}
+      onClear={clear}
       extraLeft={<>
         <div style={{display:"flex",flexDirection:"column",gap:4}}>
           <div className="lbl">Threshold %</div>
@@ -997,18 +920,16 @@ function Alerts({admin}) {
 /* ═══════════════════════════════════════════════════════════════
    INTEGRATIONS
 ═══════════════════════════════════════════════════════════════ */
-function Integrations({admin}) {
+function Integrations({admin, brands}) {
   const [cfg,setCfg]=useState({shop_domain:"",api_version:"2024-10",dry_run:true,has_token:false,price_url_source:"mbo"});
-  const [token,setToken]=useState(""); const [brands,setBrands]=useState([]); const [fb,setFb]=useState(""); const [v,setV]=useState("");
-  const load=()=>{ api("/api/integration").then(d=>setCfg(c=>({...c,...d}))); api("/api/integrations").then(d=>setBrands(d.brands||[])); };
-  useEffect(()=>{ load(); const t=setInterval(()=>api("/api/integrations").then(d=>setBrands(d.brands||[])),8000); return()=>clearInterval(t); },[]);
+  const [token,setToken]=useState(""); const [brandRows,setBrandRows]=useState([]); const [v,setV]=useState("");
+  const load=()=>{ api("/api/integration").then(d=>setCfg(c=>({...c,...d}))); api("/api/integrations").then(d=>setBrandRows(d.brands||[])); };
+  useEffect(()=>{ load(); const t=setInterval(()=>api("/api/integrations").then(d=>setBrandRows(d.brands||[])),8000); return()=>clearInterval(t); },[]);
   const save=async()=>{ const r=await aj("/api/integration/save",{...cfg,access_token:token}); r.ok?toast("Saved","ok"):toast("Failed","err"); setToken(""); load(); };
   const verify=async()=>{ setV("…"); const r=await aj("/api/integration/verify",{}); setV(r.status); toast(r.status,r.ok?"ok":"err"); };
-  const clear=()=>{ setFb(""); };
 
   return <div style={{height:"100%",overflow:"auto"}}>
-    <PageBar title="Integrations" subtitle="Configure store connection and sync parameters for live inventory tracking."
-      admin={admin} vendor={fb} onVendor={setFb} onClear={clear}/>
+    <PageBar title="Integrations" subtitle="Configure store connection and sync parameters for live inventory tracking."/>
 
     {/* Config card */}
     <div className="card" style={{padding:20,maxWidth:520,marginBottom:16}}>
@@ -1047,12 +968,12 @@ function Integrations({admin}) {
       <table className="tbl">
         <thead><tr>{["Brand","Products","Mismatches"].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
-          {brands.filter(b=>!fb||b.brand===fb).map(b=><tr key={b.brand}>
+          {brandRows.filter(b=>!brands.length||brands.includes(b.brand)).map(b=><tr key={b.brand}>
             <td className="mono">{b.brand}</td>
             <td className="mono">{fmtInt(b.products)}</td>
             <td className="mono" style={{color:"var(--amber)"}}>{fmtInt(b.mismatches)}</td>
           </tr>)}
-          {!brands.filter(b=>!fb||b.brand===fb).length&&<tr><td colSpan={3} style={{textAlign:"center",padding:"40px 0",color:"var(--on3)"}}>No brands.</td></tr>}
+          {!brandRows.filter(b=>!brands.length||brands.includes(b.brand)).length&&<tr><td colSpan={3} style={{textAlign:"center",padding:"40px 0",color:"var(--on3)"}}>No brands.</td></tr>}
         </tbody>
       </table>
     </div>
@@ -1118,6 +1039,7 @@ function Settings({me, admin}) {
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
   const [me,setMe]=useState(undefined); const [view,setView]=useState("pipeline"); const [meta,setMeta]=useState({counts:{},alerts:0});
+  const [brands,setBrands]=useState([]);
   useEffect(()=>{ api("/api/me").then(d=>setMe(d&&d.email?d:null)); },[]);
   useEffect(()=>{ if(!me) return; const f=()=>{
     api("/api/meta").then(d=>d.counts&&setMeta(m=>JSON.stringify(m)===JSON.stringify(d)?m:d));
@@ -1179,7 +1101,8 @@ export default function App() {
       {/* Topbar */}
       <div style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"10px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:11,color:"var(--on3)",fontFamily:"JetBrains Mono,monospace"}}>Search parameters…</span>
+          <span className="lbl">Brand</span>
+          <GlobalBrandFilter value={brands} onChange={setBrands}/>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
           <div style={{textAlign:"right"}}>
@@ -1194,13 +1117,13 @@ export default function App() {
 
       {/* Page content */}
       <div style={{flex:1,minHeight:0,padding:"20px 24px",overflow:"auto"}}>
-        {view==="pipeline"    && <Pipeline    admin={admin}/>}
+        {view==="pipeline"    && <Pipeline    admin={admin} brands={brands}/>}
         {view==="add"         && <AddProducts admin={admin}/>}
-        {view==="review"      && <Review      admin={admin}/>}
-        {view==="history"     && <History     admin={admin}/>}
-        {view==="alerts"      && <Alerts      admin={admin}/>}
-        {view==="integrations"&& <Integrations admin={admin}/>}
-        {view==="home"        && <Home        go={setView} admin={admin}/>}
+        {view==="review"      && <Review      admin={admin} brands={brands}/>}
+        {view==="history"     && <History     admin={admin} brands={brands}/>}
+        {view==="alerts"      && <Alerts      admin={admin} brands={brands}/>}
+        {view==="integrations"&& <Integrations admin={admin} brands={brands}/>}
+        {view==="home"        && <Home        go={setView} admin={admin} brands={brands}/>}
         {view==="settings"    && <Settings    me={me} admin={admin}/>}
       </div>
     </div>

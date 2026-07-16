@@ -19,7 +19,7 @@ import * as pipe from "./pipeline.js";
 import { sendMismatchReport } from "./mailer.js";
 import { pushPrice, verifyStore, invalidateShopifyCfg } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
-import { startPushJob, getPushJob, runningPushJob } from './push-job.js';
+import { startPushJob, getPushJob, runningPushJob, startReviewPushJob } from './push-job.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.resolve(__dirname, "../../client/dist");
@@ -269,6 +269,13 @@ app.get("/api/review/items", wrap(async (req, res) => {
   const brands = (req.query.brands || "").split(",").filter(Boolean);
   res.json(await store.reviewItems(req.query.kind || "mismatch", brands));
 }));
+// Priority-ordered (mismatch, then error, then matched) list across the
+// brand(s) selected in the top filter — backs the simplified Review page.
+app.get("/api/review/items_by_brand", wrap(async (req, res) => {
+  const brands = (req.query.brands || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (!brands.length) return res.json({ items: [], counts: await store.counts() });
+  res.json(await store.reviewItemsByBrands(brands));
+}));
 app.get("/api/review/brands", wrap(async (req, res) => res.json({ brands: (await store.vendors(req.query.kind)).map((v) => ({ brand: v.vendor, count: v.count })) })));
 
 async function approveOne(client, prow, body) {
@@ -297,9 +304,50 @@ async function approveOne(client, prow, body) {
     await client.query(`UPDATE products SET base_price=$1, base_usd=$2, state='matched',
       status='Price Matched (INR)', delta=0 WHERE id=$3`, [liveInr, baseUsd, prow.id]);
     await client.query("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [liveInr, prow.key]);
+    await store.syncBucket(client.query.bind(client),
+      { key: prow.key, mbo_url: prow.mbo_url, url: prow.url, platform: prow.platform,
+        brand: prow.brand, base_price: liveInr, live_price: prow.live_price,
+        currency: prow.currency, delta: 0, status: 'Price Matched (INR)' },
+      'matched');
   }
   return { final, archived, pushCur: targetCur };
 }
+// approveOne wrapped in its own short transaction — used by the combined
+// "Push and update price" job below, one row at a time.
+async function archiveForPush(prow, spec) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const approved = await approveOne(client, prow, spec);
+    await client.query("COMMIT");
+    return approved;
+  } catch (e) { await client.query("ROLLBACK"); throw e; }
+  finally { client.release(); }
+}
+// Review page's single combined action for the brand selected at top:
+// archives every pending mismatch/error/matched row for that brand to
+// History, then pushes it to Shopify — same batch-progress job shape as
+// /api/history push_all/push_job, scoped strictly to one brand (never all).
+app.post("/api/review/push_brand", wrap(async (req, res) => {
+  const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
+  if (!brands.length) return res.status(400).json({ ok: false, error: "select at least one brand before pushing" });
+  const rows = await q(`SELECT * FROM products WHERE brand = ANY($1::text[]) AND decision='pending'
+    AND state IN ('mismatch','error','matched') AND review_dismissed_at IS NULL
+    ORDER BY ${store.STATE_PRIORITY_SQL}`, [brands]);
+  if (!rows.length) return res.json({ ok: true, queued: 0 });
+  const by = sec.currentUser(req)?.email;
+  const overrideMap = new Map((req.body.overrides || []).map((o) => [String(o.id), o]));
+  const { markup_pct, convert, convert_currency } = req.body;
+  const label = `Push & update — ${brands.length===1?brands[0]:brands.length+" brands"}`;
+  const push = startReviewPushJob(rows, (prow) => {
+    const ov = overrideMap.get(String(prow.id)) || {};
+    return archiveForPush(prow, {
+      markup_pct, convert, convert_currency,
+      price_amount: ov.price_amount, price_currency: ov.price_currency, _by: by,
+    });
+  }, label);
+  res.json({ ok: push.ok, queued: push.ok ? rows.length : 0, job: push.job, error: push.error });
+}));
 app.post("/api/review/decide", wrap(async (req, res) => {
   const it = await one("SELECT * FROM products WHERE id=$1", [req.body.row]);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
@@ -339,6 +387,7 @@ app.post("/api/review/update_base", wrap(async (req, res) => {
       delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$3
     WHERE id=$4`, [baseInr, baseUsd, now, it.id]);
   await q("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [baseInr, it.key]);
+  await store.clearBuckets(q, it.key);
   res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, currency: cur, counts: await store.counts() });
 }));
 app.post("/api/review/update_base_all", wrap(async (req, res) => {
@@ -359,6 +408,7 @@ app.post("/api/review/update_base_all", wrap(async (req, res) => {
         delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$3
       WHERE id=$4`, [baseInr, baseUsd, now, r.id]);
     await q("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [baseInr, r.key]);
+    await store.clearBuckets(q, r.key);
     updated++;
   }
   res.json({ ok: true, updated, counts: await store.counts() });
@@ -368,6 +418,7 @@ app.post("/api/review/delete", wrap(async (req, res) => {
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
   await q("DELETE FROM products WHERE id=$1", [req.body.row]);
   await q("DELETE FROM import_catalog WHERE key=$1", [it.key]);
+  await store.clearBuckets(q, it.key);
   res.json({ ok: true, counts: await store.counts() });
 }));
 // Re-fetches a single product's live price right now, using the exact same
@@ -451,22 +502,29 @@ app.post("/api/review/dismiss_view", wrap(async (req, res) => {
 }));
 
 // ---------- history ----------
-app.get("/api/history", wrap(async (req, res) => res.json(await store.historyList((req.query.brand || "").trim(), (req.query.status || "").trim()))));
+app.get("/api/history", wrap(async (req, res) => {
+  const brands = (req.query.brands || "").split(",").map((s) => s.trim()).filter(Boolean);
+  res.json(await store.historyList(brands, (req.query.status || "").trim()));
+}));
 app.post("/api/history/push", wrap(async (req, res) => {
   const it = await one("SELECT * FROM review_history WHERE id=$1", [req.body.row]);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
   const r = await pushRowPrice(it, it.final_price);
   await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
     [r.status, new Date().toISOString(), it.id]);
+  if (r.ok && it.key) await store.clearBuckets(q, it.key);
   res.json({ ok: r.ok, status: r.status });
 }));
 app.post("/api/history/push_all", wrap(async (req, res) => {
+  const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
+  if (!brands.length) return res.status(400).json({ ok: false, error: "select at least one brand before retrying pushes" });
   const busy = runningPushJob();
   if (busy) return res.status(409).json({ ok: false, error: "a Shopify push is already running — wait for it to finish", job: busy });
   const rows = await q(`SELECT * FROM review_history
-    WHERE shopify_status IS NULL OR NOT (shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')
-    ORDER BY approved_at LIMIT 1000`);
-  const push = rows.length ? startPushJob(rows, "Retry / Push all") : null;
+    WHERE brand = ANY($1::text[]) AND (shopify_status IS NULL OR NOT (shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%'))
+    ORDER BY approved_at LIMIT 1000`, [brands]);
+  const label = `Retry / Push all — ${brands.length===1?brands[0]:brands.length+" brands"}`;
+  const push = rows.length ? startPushJob(rows, label) : null;
   res.json({ ok: true, queued: rows.length, job: push?.job || null });
 }));
 
@@ -481,9 +539,10 @@ app.get("/api/history/export", wrap(async (req, res) => {
 // ---------- alerts ----------
 app.get("/api/alerts", wrap(async (req, res) => {
   const thr = Math.abs(parseFloat(req.query.threshold || "5")) || 5;
-  const dir = req.query.direction || "all"; const brand = (req.query.brand || "").trim();
+  const dir = req.query.direction || "all";
+  const brands = (req.query.brands || "").split(",").map((s) => s.trim()).filter(Boolean);
   const p = []; let bc = "";
-  if (brand) { bc = "AND brand=$1"; p.push(brand); }
+  if (brands.length) { p.push(brands); bc = `AND brand = ANY($${p.length}::text[])`; }
   p.push(thr);
   const rows = await q(`SELECT key,url,brand,live_price,prev,created_at,status,
       (live_price-prev) AS abs_change, ROUND(((live_price-prev)/prev*100)::numeric,2) AS pct

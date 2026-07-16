@@ -56,6 +56,31 @@ const SCHEMA = [
     'brand TEXT PRIMARY KEY, shop_domain TEXT, access_token TEXT,' +
     'api_version TEXT DEFAULT \'2024-10\', dry_run INTEGER DEFAULT 0, updated_at TEXT)',
   'CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)',
+  // State-bucket tables: physical copies of a products row, one per
+  // flagged state (WARN/ERROR/DONE). syncBucket() keeps at most one open
+  // copy per key across all three; clearBuckets() removes it once the row
+  // is approved+pushed and lives permanently in review_history instead.
+  'CREATE TABLE IF NOT EXISTS mismatch (' +
+    'id BIGSERIAL PRIMARY KEY, key TEXT UNIQUE, mbo_url TEXT, url TEXT,' +
+    'platform TEXT, brand TEXT, base_price DOUBLE PRECISION,' +
+    'live_price DOUBLE PRECISION, currency TEXT, delta DOUBLE PRECISION,' +
+    'status TEXT, run_id TEXT, flagged_at TIMESTAMPTZ DEFAULT now(),' +
+    'updated_at TIMESTAMPTZ DEFAULT now())',
+  'CREATE INDEX IF NOT EXISTS ix_mismatch_brand ON mismatch(brand)',
+  'CREATE TABLE IF NOT EXISTS error (' +
+    'id BIGSERIAL PRIMARY KEY, key TEXT UNIQUE, mbo_url TEXT, url TEXT,' +
+    'platform TEXT, brand TEXT, base_price DOUBLE PRECISION,' +
+    'live_price DOUBLE PRECISION, currency TEXT, delta DOUBLE PRECISION,' +
+    'status TEXT, run_id TEXT, flagged_at TIMESTAMPTZ DEFAULT now(),' +
+    'updated_at TIMESTAMPTZ DEFAULT now())',
+  'CREATE INDEX IF NOT EXISTS ix_error_brand ON error(brand)',
+  'CREATE TABLE IF NOT EXISTS resolved (' +
+    'id BIGSERIAL PRIMARY KEY, key TEXT UNIQUE, mbo_url TEXT, url TEXT,' +
+    'platform TEXT, brand TEXT, base_price DOUBLE PRECISION,' +
+    'live_price DOUBLE PRECISION, currency TEXT, delta DOUBLE PRECISION,' +
+    'status TEXT, run_id TEXT, flagged_at TIMESTAMPTZ DEFAULT now(),' +
+    'updated_at TIMESTAMPTZ DEFAULT now())',
+  'CREATE INDEX IF NOT EXISTS ix_resolved_brand ON resolved(brand)',
 ];
 
 export async function initStore() {
@@ -220,6 +245,37 @@ export async function workRows(mode = "fresh", vendorList = null, source = 'data
     : dbProducts(mode, vendorList);
 }
 
+// ---- state buckets (mismatch/error/resolved) ----
+// Physical copy tables mirroring products.state: whenever a product's
+// state changes, its copy moves to the matching bucket table and is
+// removed from the other two — never both/neither. The products row
+// itself is only ever updated here, never touched by this (copy, not move).
+const BUCKET_TABLE = { mismatch: "mismatch", error: "error", matched: "resolved" };
+const BUCKET_COLS = "key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,status,run_id,updated_at";
+export async function syncBucket(run, prow, state, runId = null) {
+  const target = BUCKET_TABLE[state];
+  for (const t of Object.values(BUCKET_TABLE)) {
+    if (t !== target) await run(`DELETE FROM ${t} WHERE key=$1`, [prow.key]);
+  }
+  if (!target) return;
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  await run(`INSERT INTO ${target} (${BUCKET_COLS})
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,platform=excluded.platform,
+      brand=excluded.brand,base_price=excluded.base_price,live_price=excluded.live_price,
+      currency=excluded.currency,delta=excluded.delta,status=excluded.status,
+      run_id=excluded.run_id,updated_at=excluded.updated_at`,
+    [prow.key, prow.mbo_url || "", prow.url, prow.platform, prow.brand,
+      prow.base_price, prow.live_price, prow.currency, prow.delta, prow.status, runId, now]);
+}
+// Removes a product's copy from all three bucket tables — called once a
+// row is approved and successfully pushed to Shopify (it now lives
+// permanently in review_history instead), or when the product is deleted
+// or reset back to 'pending'.
+export async function clearBuckets(run, key) {
+  for (const t of Object.values(BUCKET_TABLE)) await run(`DELETE FROM ${t} WHERE key=$1`, [key]);
+}
+
 // ---- pipeline result write (+ history snapshot) ----
 export async function saveResult(prod, status, live, cur, state, runId, extra = {}) {
   const base = prod.base_price;
@@ -231,22 +287,42 @@ export async function saveResult(prod, status, live, cur, state, runId, extra = 
   const baseUsdVal = usdBaseline ? live : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const cleanUrl = canonicalUrl(prod.url);
-  await q(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,
-      live_price,currency,status,state,delta,decision,decided_at,updated_at,base_usd)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',NULL,$13,$14)
-    ON CONFLICT(key) DO UPDATE SET url=excluded.url,live_price=excluded.live_price,currency=excluded.currency,
-      status=excluded.status,state=excluded.state,delta=excluded.delta,
-      decision='pending',decided_at=NULL,updated_at=excluded.updated_at,
-      base_usd=COALESCE(products.base_usd,excluded.base_usd),review_dismissed_at=NULL`,
-    [prod.key, prod.mbo_url || "", cleanUrl, prod.platform, prod.custom_regex, prod.brand,
-      base, live, cur, status, state, delta, now, baseUsdVal]);
-  await q(`INSERT INTO price_history(key,url,brand,base_price,live_price,delta,state,status,run_id)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [prod.key, cleanUrl, prod.brand, base, live, delta, state, status, runId]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,
+        live_price,currency,status,state,delta,decision,decided_at,updated_at,base_usd)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',NULL,$13,$14)
+      ON CONFLICT(key) DO UPDATE SET url=excluded.url,live_price=excluded.live_price,currency=excluded.currency,
+        status=excluded.status,state=excluded.state,delta=excluded.delta,
+        decision='pending',decided_at=NULL,updated_at=excluded.updated_at,
+        base_usd=COALESCE(products.base_usd,excluded.base_usd),review_dismissed_at=NULL`,
+      [prod.key, prod.mbo_url || "", cleanUrl, prod.platform, prod.custom_regex, prod.brand,
+        base, live, cur, status, state, delta, now, baseUsdVal]);
+    await client.query(`INSERT INTO price_history(key,url,brand,base_price,live_price,delta,state,status,run_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [prod.key, cleanUrl, prod.brand, base, live, delta, state, status, runId]);
+    await syncBucket(client.query.bind(client),
+      { key: prod.key, mbo_url: prod.mbo_url || "", url: cleanUrl, platform: prod.platform,
+        brand: prod.brand, base_price: base, live_price: live, currency: cur, delta, status },
+      state, runId);
+    await client.query("COMMIT");
+  } catch (e) { await client.query("ROLLBACK"); throw e; }
+  finally { client.release(); }
   return delta;
 }
 
 export const productByKey = (key) => one("SELECT * FROM products WHERE key=$1", [key]);
+
+// ---- review (one or more brands, priority-ordered: mismatch, then error, then matched) ----
+export const STATE_PRIORITY_SQL = "CASE state WHEN 'mismatch' THEN 0 WHEN 'error' THEN 1 ELSE 2 END";
+export async function reviewItemsByBrands(brands) {
+  const items = await q(`SELECT * FROM products
+    WHERE brand = ANY($1::text[]) AND decision='pending' AND review_dismissed_at IS NULL
+      AND state IN ('mismatch','error','matched')
+    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC`, [brands]);
+  return { items, counts: await counts() };
+}
 
 // ---- review ----
 export async function reviewItems(kind, brands) {
@@ -478,9 +554,9 @@ export async function archiveApproved(client, prow, final, markup, ref, note, by
 
 // ---- history ----
 const PUSH_SUCCESS = "(shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')";
-export async function historyList(brand, status) {
+export async function historyList(brands, status) {
   const cl = []; const p = [];
-  if (brand) { p.push(brand); cl.push(`brand=$${p.length}`); }
+  if (brands && brands.length) { p.push(brands); cl.push(`brand = ANY($${p.length}::text[])`); }
   if (status === "pushed") cl.push(PUSH_SUCCESS);
   else if (status === "failed") cl.push(`shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}`);
   else if (status === "not_pushed") cl.push("shopify_status IS NULL");
