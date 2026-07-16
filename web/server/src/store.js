@@ -326,6 +326,36 @@ export async function reviewItemsByBrands(brands) {
   return { items, counts: await counts() };
 }
 
+// Deletes every row matching the same scope as reviewItemsByBrands (i.e.
+// everything the Review table currently shows) -- products, its
+// import_catalog counterpart, and any state-bucket copy, all in one
+// transaction. No brand filter required: an empty/omitted brands list
+// deletes across every brand, matching "clear what's on screen right now".
+export async function deleteReviewByBrands(brands) {
+  const scoped = brands && brands.length;
+  const where = scoped ? "WHERE brand = ANY($1::text[]) AND" : "WHERE";
+  const params = scoped ? [brands] : [];
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const keys = (await client.query(`SELECT key FROM products
+      ${where} decision='pending' AND review_dismissed_at IS NULL
+        AND state IN ('mismatch','error','matched')`, params)).rows.map((r) => r.key);
+    if (keys.length) {
+      await client.query(`DELETE FROM products
+        ${where} decision='pending' AND review_dismissed_at IS NULL
+          AND state IN ('mismatch','error','matched')`, params);
+      await client.query(`DELETE FROM import_catalog WHERE key = ANY($1::text[])`, [keys]);
+      for (const t of Object.values(BUCKET_TABLE)) {
+        await client.query(`DELETE FROM ${t} WHERE key = ANY($1::text[])`, [keys]);
+      }
+    }
+    await client.query("COMMIT");
+    return keys.length;
+  } catch (e) { await client.query("ROLLBACK"); throw e; }
+  finally { client.release(); }
+}
+
 // ---- review ----
 export async function reviewItems(kind, brands) {
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";

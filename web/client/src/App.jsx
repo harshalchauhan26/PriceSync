@@ -195,13 +195,14 @@ function ClearViewBtn({onClear, title}) {
 }
 
 /* ─── Page toolbar (title + page-specific extras; brand filter is global — see Topbar) ── */
-function PageBar({title, subtitle, onClear, extraLeft, extraRight}) {
+function PageBar({title, subtitle, brands, setBrands, onClear, extraLeft, extraRight}) {
   return <div style={{marginBottom:20}}>
     <div style={{marginBottom:12}}>
       <h1 style={{fontSize:22,fontWeight:700,letterSpacing:"-.01em"}}>{title}</h1>
       {subtitle&&<div style={{fontSize:12,color:"var(--on2)",marginTop:3}}>{subtitle}</div>}
     </div>
     <div className="toolbar">
+      {setBrands&&<><GlobalBrandFilter value={brands} onChange={setBrands}/><div className="toolbar-sep"/></>}
       {extraLeft}
       {onClear&&<><div className="toolbar-sep"/><button className="btn btn-sm btn-ghost" onClick={onClear} title="Clear filters & screen">
         <Icon n="x" s={12}/>Clear
@@ -270,7 +271,7 @@ function Auth({onIn}) {
 /* ═══════════════════════════════════════════════════════════════
    HOME / INSIGHTS
 ═══════════════════════════════════════════════════════════════ */
-function Home({go, admin, brands}) {
+function Home({go, admin, brands, setBrands}) {
   const [d,setD]=useState(null);
   const load=useCallback(()=>{ setD(null); api("/api/insights?brand="+encodeURIComponent(brands[0]||"")).then(setD); },[brands]);
   useEffect(()=>{ load(); },[load]);
@@ -279,13 +280,13 @@ function Home({go, admin, brands}) {
     <b className="mono" style={{color:c||"var(--on)"}}>{v}</b>
   </div>;
   if(!d) return <div style={{height:"100%",overflow:"auto"}}>
-    <PageBar title="Insights" extraRight={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
+    <PageBar title="Insights" brands={brands} setBrands={setBrands} extraLeft={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
     <div style={{textAlign:"center",padding:"80px 0",color:"var(--on3)"}}>Loading insights…</div>
   </div>;
   const c=d.counts||{}, ex=d.exposure||{}, fxr=d.fx||{};
   return <div style={{height:"100%",overflow:"auto"}}>
-    <PageBar title="Insights"
-      extraRight={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
+    <PageBar title="Insights" brands={brands} setBrands={setBrands}
+      extraLeft={<button className="btn btn-sm btn-ghost" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
       {[["Total Products",fmtInt(c.total),"var(--on)"],["Matched",fmtInt(c.matched),"var(--green)"],["Mismatches",fmtInt(c.mismatch),"var(--amber)"],["Errors",fmtInt(c.error),"var(--red)"],["Vendors",fmtInt(d.vendors),"var(--blue)"],["Awaiting",fmtInt(c.awaiting),"var(--amber)"],["Approved",fmtInt(d.approved_count),"var(--green)"],["Overpriced",inr(Math.round(ex.over||0)),"var(--red)"]].map(([a,b,c2])=><Stat key={a} k={a} v={b} c={c2}/>)}
     </div>
@@ -681,12 +682,13 @@ function AddProducts({admin}) {
 ═══════════════════════════════════════════════════════════════ */
 const STATE_PILL={mismatch:["WARN","var(--amber)"],error:["FAIL","var(--red)"],matched:["DONE","var(--green)"]};
 
-function Review({admin, brands}) {
+function Review({admin, brands, setBrands}) {
   const [items,setItems]=useState([]);
   const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
   const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
   const [rerunning,setRerunning]=useState(()=>new Set());
   const [pushBusy,setPushBusy]=useState(false); const [pushJob,setPushJob]=useState(null);
+  const [cleanBusy,setCleanBusy]=useState(false);
   const convOn=convCur!=="INR";
 
   const load=useCallback(async()=>{
@@ -733,9 +735,22 @@ function Review({admin, brands}) {
     toast(`Pushing ${r.queued} in batches of 10`,"ok");
     setPushJob(r.job);
   };
+  const cleanAll=async()=>{
+    if(!admin) return toast("Admin only","err");
+    if(!items.length) return toast("Nothing to clean","err");
+    const scope=brands.length?(brands.length===1?brands[0]:`${brands.length} selected brands`):"ALL brands";
+    if(!confirm(`Permanently delete all ${items.length} product(s) shown below (${scope})?\n\nThis removes them from the catalog entirely — there is no undo.`)) return;
+    setCleanBusy(true);
+    setItems([]);
+    const r=await aj("/api/review/delete_all",{brands});
+    setCleanBusy(false);
+    r.ok?toast(`Deleted ${fmtInt(r.removed)} product(s)`,"ok"):toast(r.error||"Failed","err");
+    load();
+  };
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
     <PageBar title="Review & Approval Queue" subtitle="Pick brand(s) up top — mismatches show first, then errors, then already-matched. Pushing archives to History and updates Shopify in one step."
+      brands={brands} setBrands={setBrands}
       extraLeft={<button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
 
     {/* Global pricing strip */}
@@ -788,22 +803,26 @@ function Review({admin, brands}) {
       </table>
     </div>
 
-    {/* Footer: combined archive + push, scoped to the brand(s) selected up top */}
-    <div style={{marginTop:12,flexShrink:0}}>
+    {/* Footer: combined archive + push (scoped to brand(s) up top), and a master delete-all for the current view */}
+    <div style={{marginTop:12,flexShrink:0,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
       <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!items.length||!brands.length}
         title={brands.length?undefined:"Select at least one brand up top before pushing — never runs across every brand at once"}>
         <Icon n="share" s={14}/>{pushBusy?"Starting…":`Push and update price (${items.length})`}
       </button>
-      {!brands.length&&<div style={{fontSize:11,color:"var(--on3)",marginTop:6}}>Showing all brands — select one or more up top to push.</div>}
-      {pushJob&&<div style={{marginTop:12}}><PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/></div>}
+      <button className="btn btn-danger" onClick={cleanAll} disabled={!admin||cleanBusy||!items.length}
+        title="Permanently delete every product currently shown below">
+        <Icon n="trash" s={14}/>{cleanBusy?"Cleaning…":`Master Clean (${items.length})`}
+      </button>
+      {!brands.length&&<div style={{fontSize:11,color:"var(--on3)"}}>Showing all brands — select one or more up top to push.</div>}
     </div>
+    {pushJob&&<div style={{marginTop:12}}><PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/></div>}
   </div>;
 }
 
 /* ═══════════════════════════════════════════════════════════════
    HISTORY
 ═══════════════════════════════════════════════════════════════ */
-function History({admin, brands}) {
+function History({admin, brands, setBrands}) {
   const [d,setD]=useState({items:[],count:0,value:0,pushed:0,failed:0}); const [status,setStatus]=useState("");
   const [pushJob,setPushJob]=useState(null);
   const load=useCallback(()=>api(`/api/history?brands=${encodeURIComponent(brands.join(","))}&status=${status}`).then(setD),[brands,status]);
@@ -821,6 +840,7 @@ function History({admin, brands}) {
 
   return <div style={{height:"100%",overflow:"auto"}}>
     <PageBar title="Approval History" subtitle="Approved prices archived from review."
+      brands={brands} setBrands={setBrands}
       extraLeft={<>
         <select className="inp mono" style={{width:160}} value={status} onChange={e=>setStatus(e.target.value)}>
           <option value="">All push status</option>
@@ -867,7 +887,7 @@ function History({admin, brands}) {
 /* ═══════════════════════════════════════════════════════════════
    ALERTS
 ═══════════════════════════════════════════════════════════════ */
-function Alerts({admin, brands}) {
+function Alerts({admin, brands, setBrands}) {
   const [thr,setThr]=useState(15); const [dir,setDir]=useState("all"); const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
   const load=useCallback(()=>api(`/api/alerts?threshold=${thr}&direction=${dir}&brands=${encodeURIComponent(brands.join(","))}`).then(setD),[thr,dir,brands]);
   useEffect(()=>{ load(); },[load]);
@@ -875,7 +895,7 @@ function Alerts({admin, brands}) {
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
     <PageBar title="Price Movement Alerts" subtitle="Volatility monitoring across designer brands."
-      onClear={clear}
+      brands={brands} setBrands={setBrands} onClear={clear}
       extraLeft={<>
         <div style={{display:"flex",flexDirection:"column",gap:4}}>
           <div className="lbl">Threshold %</div>
@@ -918,7 +938,7 @@ function Alerts({admin, brands}) {
 /* ═══════════════════════════════════════════════════════════════
    INTEGRATIONS
 ═══════════════════════════════════════════════════════════════ */
-function Integrations({admin, brands}) {
+function Integrations({admin, brands, setBrands}) {
   const [cfg,setCfg]=useState({shop_domain:"",api_version:"2024-10",dry_run:true,has_token:false,price_url_source:"mbo"});
   const [token,setToken]=useState(""); const [brandRows,setBrandRows]=useState([]); const [v,setV]=useState("");
   const load=()=>{ api("/api/integration").then(d=>setCfg(c=>({...c,...d}))); api("/api/integrations").then(d=>setBrandRows(d.brands||[])); };
@@ -927,7 +947,7 @@ function Integrations({admin, brands}) {
   const verify=async()=>{ setV("…"); const r=await aj("/api/integration/verify",{}); setV(r.status); toast(r.status,r.ok?"ok":"err"); };
 
   return <div style={{height:"100%",overflow:"auto"}}>
-    <PageBar title="Integrations" subtitle="Configure store connection and sync parameters for live inventory tracking."/>
+    <PageBar title="Integrations" subtitle="Configure store connection and sync parameters for live inventory tracking." brands={brands} setBrands={setBrands}/>
 
     {/* Config card */}
     <div className="card" style={{padding:20,maxWidth:520,marginBottom:16}}>
@@ -1096,12 +1116,8 @@ export default function App() {
 
     {/* ── Main area ── */}
     <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
-      {/* Topbar */}
-      <div style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"10px 20px",display:"flex",alignItems:"center",justifyContent:"flex-end",position:"relative",flexShrink:0}}>
-        {view!=="pipeline"&&<div style={{position:"absolute",left:"50%",top:"50%",transform:"translate(-50%,-50%)",display:"flex",alignItems:"center",gap:8}}>
-          <span className="lbl">Brand</span>
-          <GlobalBrandFilter value={brands} onChange={setBrands}/>
-        </div>}
+      {/* Topbar — the Brand filter now lives in each page's own toolbar, next to Refresh */}
+      <div style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"10px 20px",display:"flex",alignItems:"center",justifyContent:"flex-end",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
           <div style={{textAlign:"right"}}>
             <div style={{fontSize:12,fontWeight:600}}>{me.email}</div>
@@ -1117,11 +1133,11 @@ export default function App() {
       <div style={{flex:1,minHeight:0,padding:"20px 24px",overflow:"auto"}}>
         {view==="pipeline"    && <Pipeline    admin={admin} brands={brands} setBrands={setBrands}/>}
         {view==="add"         && <AddProducts admin={admin}/>}
-        {view==="review"      && <Review      admin={admin} brands={brands}/>}
-        {view==="history"     && <History     admin={admin} brands={brands}/>}
-        {view==="alerts"      && <Alerts      admin={admin} brands={brands}/>}
-        {view==="integrations"&& <Integrations admin={admin} brands={brands}/>}
-        {view==="home"        && <Home        go={setView} admin={admin} brands={brands}/>}
+        {view==="review"      && <Review      admin={admin} brands={brands} setBrands={setBrands}/>}
+        {view==="history"     && <History     admin={admin} brands={brands} setBrands={setBrands}/>}
+        {view==="alerts"      && <Alerts      admin={admin} brands={brands} setBrands={setBrands}/>}
+        {view==="integrations"&& <Integrations admin={admin} brands={brands} setBrands={setBrands}/>}
+        {view==="home"        && <Home        go={setView} admin={admin} brands={brands} setBrands={setBrands}/>}
         {view==="settings"    && <Settings    me={me} admin={admin}/>}
       </div>
     </div>

@@ -275,6 +275,13 @@ app.get("/api/review/items_by_brand", wrap(async (req, res) => {
   const brands = (req.query.brands || "").split(",").map((s) => s.trim()).filter(Boolean);
   res.json(await store.reviewItemsByBrands(brands));
 }));
+// "Master Clean" — permanently deletes every row the Review table is
+// currently showing (same scope as items_by_brand, empty brands = all).
+app.post("/api/review/delete_all", wrap(async (req, res) => {
+  const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
+  const removed = await store.deleteReviewByBrands(brands);
+  res.json({ ok: true, removed, counts: await store.counts() });
+}));
 app.get("/api/review/brands", wrap(async (req, res) => res.json({ brands: (await store.vendors(req.query.kind)).map((v) => ({ brand: v.vendor, count: v.count })) })));
 
 async function approveOne(client, prow, body) {
