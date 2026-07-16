@@ -274,7 +274,8 @@ function Auth({onIn}) {
 /* ═══════════════════════════════════════════════════════════════
    HOME / INSIGHTS
 ═══════════════════════════════════════════════════════════════ */
-function Home({go, admin, brands, setBrands}) {
+function Home({go, admin}) {
+  const [brands,setBrands]=useState([]);
   const [d,setD]=useState(null);
   const load=useCallback(()=>{ setD(null); api("/api/insights?brand="+encodeURIComponent(brands[0]||"")).then(setD); },[brands]);
   useEffect(()=>{ load(); },[load]);
@@ -334,7 +335,8 @@ function Home({go, admin, brands, setBrands}) {
 /* ═══════════════════════════════════════════════════════════════
    PIPELINE
 ═══════════════════════════════════════════════════════════════ */
-function Pipeline({admin, brands, setBrands}) {
+function Pipeline({admin}) {
+  const [brands,setBrands]=useState([]);
   const [st,setSt]=useState({entries:[],matched:0,mismatch:0,errors:0,total_rows:0,current_row:0,elapsed:0,message:"Idle.",running:false,phase:"idle",log_total:0});
   const [cfg,setCfg]=useState({concurrency:16,timeout_ms:12000,batch_size:250,rest_between:2,threads:4,safe_retry:true,simulation:false,data_source:"database"});
   const [vendors,setVendors]=useState([]); const [cat,setCat]=useState({total:0}); const [curSel,setCurSel]=useState("INR");
@@ -686,13 +688,15 @@ function AddProducts({admin}) {
 ═══════════════════════════════════════════════════════════════ */
 const STATE_PILL={mismatch:["WARN","var(--amber)"],error:["FAIL","var(--red)"],matched:["DONE","var(--green)"]};
 
-function Review({admin, brands, setBrands}) {
+function Review({admin}) {
+  const [brands,setBrands]=useState([]);
   const [items,setItems]=useState([]);
   const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
   const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
   const [rerunning,setRerunning]=useState(()=>new Set());
   const [pushBusy,setPushBusy]=useState(false); const [pushJob,setPushJob]=useState(null);
   const [cleanBusy,setCleanBusy]=useState(false);
+  const [retryBusy,setRetryBusy]=useState(false); const [retryProgress,setRetryProgress]=useState(null);
   const convOn=convCur!=="INR";
 
   const load=useCallback(async()=>{
@@ -724,6 +728,18 @@ function Review({admin, brands, setBrands}) {
     const st=r.item?.state;
     if(st&&st!=="error"){ toast(`Recovered — ${fmt(r.item.live_price)} ${r.item.currency||""} (${st})`,"ok"); setItems(xs=>xs.filter(x=>x.id!==it.id)); }
     else { toast(`Still failing — ${r.item?.status||"error"}`,"err"); setItems(xs=>xs.map(x=>x.id===it.id?{...x,...r.item,_amt:x._amt,_cur:x._cur}:x)); }
+  };
+  const retryErrors=async()=>{
+    if(!admin) return toast("Admin only","err");
+    const errRows=items.filter(it=>it.state==="error");
+    if(!errRows.length) return toast("No errors to retry","err");
+    setRetryBusy(true);
+    for(let i=0;i<errRows.length;i++){
+      setRetryProgress({done:i,total:errRows.length});
+      await rerunOne(errRows[i]);
+    }
+    setRetryProgress(null); setRetryBusy(false);
+    toast(`Retried ${errRows.length} error row(s)`,"ok");
   };
   const pushBrand=async()=>{
     if(!admin) return toast("Admin only","err");
@@ -817,6 +833,10 @@ function Review({admin, brands, setBrands}) {
         title="Hide every product currently shown below from Review — nothing is deleted from the database">
         <Icon n="trash" s={14}/>{cleanBusy?"Cleaning…":`Master Clean (${items.length})`}
       </button>
+      <button className="btn btn-ghost" onClick={retryErrors} disabled={!admin||retryBusy||!items.some(it=>it.state==="error")}
+        title="Re-fetch a fresh live price for every FAIL row currently shown below">
+        <Icon n="refresh" s={14}/>{retryBusy?`Retrying ${retryProgress?.done??0}/${retryProgress?.total??0}…`:`Retry errors (${items.filter(it=>it.state==="error").length})`}
+      </button>
       {!brands.length&&<div style={{fontSize:11,color:"var(--on3)"}}>Showing all brands — select one or more up top to push.</div>}
     </div>
     {pushJob&&<div style={{marginTop:12}}><PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/></div>}
@@ -826,7 +846,8 @@ function Review({admin, brands, setBrands}) {
 /* ═══════════════════════════════════════════════════════════════
    HISTORY
 ═══════════════════════════════════════════════════════════════ */
-function History({admin, brands, setBrands}) {
+function History({admin}) {
+  const [brands,setBrands]=useState([]);
   const [d,setD]=useState({items:[],count:0,value:0,pushed:0,failed:0}); const [status,setStatus]=useState("");
   const [pushJob,setPushJob]=useState(null);
   const load=useCallback(()=>api(`/api/history?brands=${encodeURIComponent(brands.join(","))}&status=${status}`).then(setD),[brands,status]);
@@ -891,7 +912,8 @@ function History({admin, brands, setBrands}) {
 /* ═══════════════════════════════════════════════════════════════
    ALERTS
 ═══════════════════════════════════════════════════════════════ */
-function Alerts({admin, brands, setBrands}) {
+function Alerts({admin}) {
+  const [brands,setBrands]=useState([]);
   const [thr,setThr]=useState(15); const [dir,setDir]=useState("all"); const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
   const load=useCallback(()=>api(`/api/alerts?threshold=${thr}&direction=${dir}&brands=${encodeURIComponent(brands.join(","))}`).then(setD),[thr,dir,brands]);
   useEffect(()=>{ load(); },[load]);
@@ -942,7 +964,8 @@ function Alerts({admin, brands, setBrands}) {
 /* ═══════════════════════════════════════════════════════════════
    INTEGRATIONS
 ═══════════════════════════════════════════════════════════════ */
-function Integrations({admin, brands, setBrands}) {
+function Integrations({admin}) {
+  const [brands,setBrands]=useState([]);
   const [cfg,setCfg]=useState({shop_domain:"",api_version:"2024-10",dry_run:true,has_token:false,price_url_source:"mbo"});
   const [token,setToken]=useState(""); const [brandRows,setBrandRows]=useState([]); const [v,setV]=useState("");
   const load=()=>{ api("/api/integration").then(d=>setCfg(c=>({...c,...d}))); api("/api/integrations").then(d=>setBrandRows(d.brands||[])); };
@@ -1061,7 +1084,6 @@ function Settings({me, admin}) {
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
   const [me,setMe]=useState(undefined); const [view,setView]=useState("pipeline"); const [meta,setMeta]=useState({counts:{},alerts:0});
-  const [brands,setBrands]=useState([]);
   useEffect(()=>{ api("/api/me").then(d=>setMe(d&&d.email?d:null)); },[]);
   useEffect(()=>{ if(!me) return; const f=()=>{
     api("/api/meta").then(d=>d.counts&&setMeta(m=>JSON.stringify(m)===JSON.stringify(d)?m:d));
@@ -1135,13 +1157,13 @@ export default function App() {
 
       {/* Page content */}
       <div style={{flex:1,minHeight:0,padding:"20px 24px",overflow:"auto"}}>
-        {view==="pipeline"    && <Pipeline    admin={admin} brands={brands} setBrands={setBrands}/>}
+        {view==="pipeline"    && <Pipeline    admin={admin}/>}
         {view==="add"         && <AddProducts admin={admin}/>}
-        {view==="review"      && <Review      admin={admin} brands={brands} setBrands={setBrands}/>}
-        {view==="history"     && <History     admin={admin} brands={brands} setBrands={setBrands}/>}
-        {view==="alerts"      && <Alerts      admin={admin} brands={brands} setBrands={setBrands}/>}
-        {view==="integrations"&& <Integrations admin={admin} brands={brands} setBrands={setBrands}/>}
-        {view==="home"        && <Home        go={setView} admin={admin} brands={brands} setBrands={setBrands}/>}
+        {view==="review"      && <Review      admin={admin}/>}
+        {view==="history"     && <History     admin={admin}/>}
+        {view==="alerts"      && <Alerts      admin={admin}/>}
+        {view==="integrations"&& <Integrations admin={admin}/>}
+        {view==="home"        && <Home        go={setView} admin={admin}/>}
         {view==="settings"    && <Settings    me={me} admin={admin}/>}
       </div>
     </div>
