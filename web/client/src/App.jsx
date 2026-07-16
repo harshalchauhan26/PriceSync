@@ -64,9 +64,9 @@ function Toggle({on, onChange}) {
 }
 
 /* ─── Global brand filter (multi-select) — lives in the Topbar, shared by every page ── */
-function GlobalBrandFilter({value, onChange}) {
+function GlobalBrandFilter({value, onChange, source}) {
   const [vs,setVs]=useState([]); const [open,setOpen]=useState(false); const [q,setQ]=useState(""); const ref=useRef(null);
-  useEffect(()=>{ api("/api/vendors").then(d=>setVs(d.vendors||[])); },[]);
+  useEffect(()=>{ api("/api/vendors"+(source?"?source="+source:"")).then(d=>setVs(d.vendors||[])); },[source]);
   useEffect(()=>{ const h=(e)=>{ if(ref.current&&!ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown",h); return()=>document.removeEventListener("mousedown",h); },[]);
   const sel=new Set(value);
   const toggle=(v)=>{ const n=new Set(sel); n.has(v)?n.delete(v):n.add(v); onChange([...n]); };
@@ -440,10 +440,11 @@ function Pipeline({admin, brands, setBrands}) {
         </div>
       </div>
 
-      {/* Scope — same Brand filter as the Topbar, usable right here too */}
+      {/* Scope — dynamic: lists brands from the uploaded sheet while in
+          "Sheet products" mode, or every DB brand in "Database products" mode */}
       <div className="card" style={{padding:14}}>
         <div className="lbl" style={{marginBottom:10}}>Scope</div>
-        <GlobalBrandFilter value={brands} onChange={setBrands}/>
+        <GlobalBrandFilter value={brands} onChange={setBrands} source={cfg.data_source}/>
         <div style={{fontSize:11,color:"var(--on3)",marginTop:8}}>
           Products in scope: <b style={{color:"var(--on)"}}>{fmtInt(vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):sourceTotal)}</b>
         </div>
