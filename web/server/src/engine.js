@@ -173,12 +173,17 @@ export function detectCurrency(text) {
   return null;
 }
 
-export function extractPriceFromHtml(html, customRegex = null, preferHigh = false) {
+// Returns { price, source }. The source matters because only prices read out
+// of embedded Shopify-style JSON ("price": 120250000) can be integer cents —
+// og:meta/itemprop/Woo markup always carries the display (decimal) amount, so
+// the caller must never cents-descale those (a genuine ₹1.2M couture price
+// crossed the 1M threshold and got halved to ₹12,025 — seen live 2026-07-17).
+export function extractPriceDetail(html, customRegex = null, preferHigh = false) {
   // Range-high preference outranks a custom regex: brands flagged range-high
   // must capture the top of a variable-product price range.
   if (preferHigh) {
     const h = html.match(/"highPrice"\s*:\s*"?([0-9][0-9,.]*)"?/);
-    if (h) return sanitizePrice(h[1]);
+    if (h) return { price: sanitizePrice(h[1]), source: "jsonld" };
   }
   if (customRegex) {
     // No generic fallback on regex miss: removed/redirected product pages must
@@ -187,13 +192,13 @@ export function extractPriceFromHtml(html, customRegex = null, preferHigh = fals
       const m = html.match(new RegExp(customRegex, "s"));
       if (m) {
         const g = m.slice(1).find((x) => x !== undefined); // first group that matched (supports alternation)
-        return sanitizePrice(g !== undefined ? g : m[0]);
+        return { price: sanitizePrice(g !== undefined ? g : m[0]), source: "custom" };
       }
     } catch {}
-    return null;
+    return { price: null, source: null };
   }
   let m = html.match(/property=["']product:price:amount["'][^>]*content=["']([^"']+)["']|content=["']([^"']+)["'][^>]*property=["']product:price:amount["']/);
-  if (m) return sanitizePrice(m[1] || m[2]);
+  if (m) return { price: sanitizePrice(m[1] || m[2]), source: "og" };
   // A page showing both a sale price and a struck-through original/MRP price
   // (e.g. anitadongre.com) often tags BOTH with itemprop="price" -- plain
   // .match() only ever returns the first (usually the sale price, since it's
@@ -203,14 +208,18 @@ export function extractPriceFromHtml(html, customRegex = null, preferHigh = fals
   const itempropPrices = [...html.matchAll(/itemprop=["']price["'][^>]*content=["']([^"']+)["']|content=["']([^"']+)["'][^>]*itemprop=["']price["']/g)]
     .map((mm) => sanitizePrice(mm[1] || mm[2]))
     .filter((v) => v != null);
-  if (itempropPrices.length) return Math.max(...itempropPrices);
+  if (itempropPrices.length) return { price: Math.max(...itempropPrices), source: "itemprop" };
   m = html.match(/itemprop=["']price["'][^>]*>([^<]+)</);
-  if (m) return sanitizePrice(m[1]);
+  if (m) return { price: sanitizePrice(m[1]), source: "itemprop" };
   m = html.match(/"(?:price|lowPrice)"\s*:\s*"?([0-9][0-9,.]*)"?/);
-  if (m) return sanitizePrice(m[1]);
+  if (m) return { price: sanitizePrice(m[1]), source: "json" };
   m = html.match(/woocommerce-Price-amount[^>]*>(?:<bdi>)?\s*(?:<span[^>]*>[^<]*<\/span>)?\s*([0-9][0-9,.]*)/);
-  if (m) return sanitizePrice(m[1]);
-  return null;
+  if (m) return { price: sanitizePrice(m[1]), source: "woo" };
+  return { price: null, source: null };
+}
+
+export function extractPriceFromHtml(html, customRegex = null, preferHigh = false) {
+  return extractPriceDetail(html, customRegex, preferHigh).price;
 }
 
 // Removed products on some stores (anitadongre's SFCC especially) don't 404 —
@@ -289,7 +298,11 @@ export async function extractShopify(fetcher, url, preferHigh = false) {
     if (code === 404) throw new Error("product unavailable (removed / 404)");
     throw new Error(`store returned HTTP ${code}`);
   }
-  let price = descaleIfCents(extractPriceFromHtml(html, null, preferHigh));
+  // Only descale prices scraped from embedded JSON — Shopify theme JSON is
+  // integer cents, but og:meta/itemprop/Woo markup is the display amount and
+  // a real price above the threshold (INR couture) must not be divided.
+  const det = extractPriceDetail(html, null, preferHigh);
+  let price = det.source === "json" ? descaleIfCents(det.price) : det.price;
   // HTML meta/JSON-LD advertise the SALE price; the theme's embedded product
   // JSON carries the original. First occurrence belongs to the main product.
   const cm = html.match(/"compare_at_price"\s*:\s*"?(\d+(?:\.\d+)?)"?/);
