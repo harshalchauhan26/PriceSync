@@ -213,6 +213,29 @@ export function extractPriceFromHtml(html, customRegex = null, preferHigh = fals
   return null;
 }
 
+// Removed products on some stores (anitadongre's SFCC especially) don't 404 —
+// they 302 the product URL to a category page or the homepage. Extracting
+// there records some OTHER product's price (seen live: 13 removed products
+// all storing the same 6,520 USD category-tile price). If the response landed
+// on a URL that no longer carries the requested product's slug, refuse to
+// extract — the row must surface as "product unavailable", never as a price.
+export function redirectedOffProduct(requestedUrl, resp) {
+  try {
+    const req = new URL(requestedUrl);
+    const slug = decodeURIComponent(req.pathname.replace(/\/+$/, "").split("/").pop() || "").toLowerCase();
+    if (!slug) return false;
+    // Relayed fetches: the axios final URL is the relay's own — only the
+    // x-relay-final-url debug header knows where the ORIGIN ended up.
+    const relayFinal = resp.headers?.["x-relay-final-url"];
+    const finalUrl = relayFinal || resp.request?.res?.responseUrl;
+    if (!finalUrl) return false;
+    const fin = new URL(finalUrl);
+    const bare = req.host.replace(/^www\./, "");
+    if (!relayFinal && fin.host !== req.host && !fin.host.endsWith(bare)) return false;
+    return !decodeURIComponent(fin.pathname + fin.search).toLowerCase().includes(slug);
+  } catch { return false; }
+}
+
 function shopifyJsUrl(url) {
   const u = new URL(url);
   let p = u.pathname.replace(/\/+$/, "");
@@ -255,8 +278,13 @@ export async function extractShopify(fetcher, url, preferHigh = false) {
     }
   } catch {}
   let html;
-  try { html = (await fetcher.get(url)).data; }
+  try {
+    const resp = await fetcher.get(url);
+    if (redirectedOffProduct(url, resp)) throw new Error("product unavailable (redirected off product page)");
+    html = resp.data;
+  }
   catch (e) {
+    if (e.message.startsWith("product unavailable")) throw e;
     const code = e instanceof HttpError ? e.status : "?";
     if (code === 404) throw new Error("product unavailable (removed / 404)");
     throw new Error(`store returned HTTP ${code}`);
@@ -275,7 +303,9 @@ export async function extractShopify(fetcher, url, preferHigh = false) {
 }
 
 export async function extractWordpress(fetcher, url, preferHigh = false) {
-  const html = (await fetcher.get(url)).data;
+  const resp = await fetcher.get(url);
+  if (redirectedOffProduct(url, resp)) throw new Error("product unavailable (redirected off product page)");
+  const html = resp.data;
   return [extractPriceFromHtml(html, null, preferHigh), detectCurrency(html)];
 }
 
@@ -306,7 +336,9 @@ export async function extractWooApi(fetcher, url, preferHigh = false) {
 }
 
 export async function extractCustom(fetcher, url, customRegex, preferHigh = false) {
-  const html = (await fetcher.get(url)).data;
+  const resp = await fetcher.get(url);
+  if (redirectedOffProduct(url, resp)) throw new Error("product unavailable (redirected off product page)");
+  const html = resp.data;
   return [extractPriceFromHtml(html, customRegex, preferHigh), detectCurrency(html)];
 }
 
