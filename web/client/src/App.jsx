@@ -425,7 +425,10 @@ function Pipeline({admin}) {
           <div className="lbl" style={{marginTop:4}}>MAX 64MB</div>
         </div>
         <input id="pipe-fi" type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>onFile(e.target.files[0])}/>
-        <div style={{fontSize:11,color:"var(--on3)",marginTop:8}}>{fmtInt(sourceTotal)} products in source</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:8}}>
+          <span style={{fontSize:11,color:"var(--on3)"}}>{fmtInt(sourceTotal)} products in source</span>
+          <span style={{fontSize:11,color:"var(--blue)",cursor:"pointer"}} onClick={()=>window.location="/api/products/add_template"} title="Blank sheet with the exact columns the importer expects">Get template</span>
+        </div>
         <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div>
             <div style={{fontSize:12,fontWeight:600}}>{cfg.data_source==="imported"?"Sheet products":"Database products"}</div>
@@ -655,6 +658,12 @@ function AddProducts({admin}) {
           <div className="lbl" style={{marginTop:4}}>Columns: Designer Product URL *, MBO Product URL, Platform Type, Custom Regex, Studio East Price *</div>
         </div>
         <input id="add-fi" type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>onFile(e.target.files[0])}/>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginTop:12}}>
+          <button className="btn btn-ghost btn-sm" onClick={()=>window.location="/api/products/add_template"}>
+            <Icon n="dl" s={12}/>Download template sheet
+          </button>
+          <span style={{fontSize:11,color:"var(--on3)"}}>Blank sheet with the exact columns — fill the “products” tab and drop it back here.</span>
+        </div>
       </> : <>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
           <div style={{fontSize:12,color:"var(--on3)"}}>{preview.length} row(s) parsed · {preview.filter(r=>r._error).length} invalid (will be skipped)</div>

@@ -225,6 +225,39 @@ app.get("/api/pipe/status", (req, res) => {
 // Purely additive — see store.addProducts. Never touches or removes an
 // existing product, so it's safe to use without the sheet-sync hazards
 // import/commit has.
+// Blank template sheet with the exact column names the importer expects.
+// Sheet 1 ("products") is headers-only on purpose — parseAddSheet/importSheet
+// read the FIRST sheet, so example rows live on sheet 2 where they can never
+// be imported by accident.
+app.get("/api/products/add_template", wrap(async (req, res) => {
+  const HEADERS = ["MBO Product URL", "Designer Product URL", "Platform Type", "Custom Regex", "Studio East Price"];
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("products");
+  ws.addRow(HEADERS);
+  ws.getRow(1).eachCell((c) => {
+    c.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F2A40" } };
+  });
+  ws.columns = [{ width: 45 }, { width: 45 }, { width: 14 }, { width: 30 }, { width: 18 }];
+  const ex = wb.addWorksheet("how to fill (examples)");
+  ex.addRow(["Fill your products into the FIRST sheet ('products'). This sheet is just a guide — it is ignored on upload."]);
+  ex.addRow([]);
+  ex.addRow(HEADERS);
+  ex.getRow(3).eachCell((c) => { c.font = { bold: true }; });
+  ex.addRow(["https://your-mbo-store.com/products/example-kurta", "https://designerbrand.com/products/example-kurta", "shopify", "", 45000]);
+  ex.addRow(["", "https://otherbrand.in/product/example-saree/", "wordpress", "", 112500]);
+  ex.addRow([]);
+  ex.addRow(["Column notes:"]);
+  ex.addRow(["- Designer Product URL (required): the designer's own product page — this is what gets scraped."]);
+  ex.addRow(["- Studio East Price (required): your base price, numbers only (no ₹ or commas needed)."]);
+  ex.addRow(["- MBO Product URL (optional): your store's product page — used when pushing prices to Shopify."]);
+  ex.addRow(["- Platform Type (optional): shopify / wordpress / Custom. Leave blank to auto-detect."]);
+  ex.addRow(["- Custom Regex (optional): only for sites needing a custom price pattern — leave blank normally."]);
+  ex.columns = [{ width: 110 }];
+  res.setHeader("Content-Disposition", "attachment; filename=add_products_template.xlsx");
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  await wb.xlsx.write(res); res.end();
+}));
 app.post("/api/products/add_preview", upload.single("file"), wrap(async (req, res) => {
   if (!req.file) return res.status(400).json({ ok: false, error: "no file" });
   try { res.json({ ok: true, rows: store.parseAddSheet(req.file.buffer) }); }
