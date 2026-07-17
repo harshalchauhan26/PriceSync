@@ -313,18 +313,27 @@ async function approveOne(client, prow, body) {
     : store.computeFinal(prow.base_price, liveInr, ref, markup, custom, convert, targetRate);
   const final = store.roundFinal(finalRaw);
   const archived = await store.archiveApproved(client, prow, final, markup, ref, body.note || "", body._by);
-  if (liveInr != null && Number.isFinite(liveInr) && liveInr > 0) {
-    // Baseline follows the approved live price (markup only affects final_price).
+  // Baseline follows the approved live price (markup only affects final_price).
+  // Native-currency brands (native_currency_brands) store base_price in their
+  // own currency and the pipeline compares live against it with NO FX — for
+  // them the new baseline must be the raw live number, never the INR
+  // conversion (that would guarantee a false mismatch on every future run).
+  const nativeCur = (await store.nativeCurrencyBrands())[store.normBrand(prow.brand)];
+  const curUp = String(prow.currency || "").trim().toUpperCase();
+  const isNative = !!(nativeCur && curUp === nativeCur);
+  const baseNew = isNative ? Number(prow.live_price) : liveInr;
+  if (baseNew != null && Number.isFinite(baseNew) && baseNew > 0) {
     // USD-baseline brands compare against base_usd, so sync it too — otherwise
     // the next run re-flags the same mismatch against the stale USD baseline.
-    const baseUsd = String(prow.currency || "").trim().toUpperCase() === "USD" ? prow.live_price : null;
+    const baseUsd = !isNative && curUp === "USD" ? prow.live_price : null;
+    const statusLabel = `Price Matched (${isNative ? nativeCur : "INR"})`;
     await client.query(`UPDATE products SET base_price=$1, base_usd=$2, state='matched',
-      status='Price Matched (INR)', delta=0 WHERE id=$3`, [liveInr, baseUsd, prow.id]);
-    await client.query("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [liveInr, prow.key]);
+      status=$3, delta=0 WHERE id=$4`, [baseNew, baseUsd, statusLabel, prow.id]);
+    await client.query("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [baseNew, prow.key]);
     await store.syncBucket(client.query.bind(client),
       { key: prow.key, mbo_url: prow.mbo_url, url: prow.url, platform: prow.platform,
-        brand: prow.brand, base_price: liveInr, live_price: prow.live_price,
-        currency: prow.currency, delta: 0, status: 'Price Matched (INR)' },
+        brand: prow.brand, base_price: baseNew, live_price: prow.live_price,
+        currency: prow.currency, delta: 0, status: statusLabel },
       'matched');
   }
   return { final, archived, pushCur: targetCur };
@@ -392,20 +401,24 @@ app.post("/api/review/update_base", wrap(async (req, res) => {
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
   if (it.live_price == null) return res.status(400).json({ ok: false, error: "row has no live price" });
   const cur = String(req.body.currency || it.currency || "INR").trim().toUpperCase();
-  const baseInr = await toInr(it.live_price, cur);
+  // Native-currency brands keep base_price in their own currency (no FX) —
+  // converting to INR here would corrupt the baseline for every future run.
+  const nativeCur = (await store.nativeCurrencyBrands())[store.normBrand(it.brand)];
+  const isNative = !!(nativeCur && cur === nativeCur);
+  const baseInr = isNative ? Number(it.live_price) : await toInr(it.live_price, cur);
   if (baseInr == null || !Number.isFinite(baseInr) || baseInr <= 0) {
     return res.status(400).json({ ok: false, error: "could not convert live price to INR" });
   }
   // USD baseline only makes sense when the live price itself is USD; otherwise
   // clear it so the next USD-fetch run freezes a fresh baseline.
-  const baseUsd = cur === "USD" ? it.live_price : null;
+  const baseUsd = !isNative && cur === "USD" ? it.live_price : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await q(`UPDATE products SET base_price=$1, base_usd=$2, live_price=NULL, currency=NULL,
       delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$3
     WHERE id=$4`, [baseInr, baseUsd, now, it.id]);
   await q("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [baseInr, it.key]);
   await store.clearBuckets(q, it.key);
-  res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, currency: cur, counts: await store.counts() });
+  res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, currency: cur, native: isNative, counts: await store.counts() });
 }));
 app.post("/api/review/update_base_all", wrap(async (req, res) => {
   const stateMap = { mismatch: "mismatch", error: "error", resolved: "matched" };
@@ -413,14 +426,16 @@ app.post("/api/review/update_base_all", wrap(async (req, res) => {
   const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
   if (!brands.length) return res.status(400).json({ ok: false, error: "select at least one vendor before updating base = live for all" });
   const cl = ["state=$1", "live_price IS NOT NULL", `brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`]; const p = [state, ...brands];
-  const rows = await q(`SELECT id,key,live_price,currency FROM products WHERE ${cl.join(" AND ")}`, p);
+  const rows = await q(`SELECT id,key,brand,live_price,currency FROM products WHERE ${cl.join(" AND ")}`, p);
+  const nativeMap = await store.nativeCurrencyBrands();
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   let updated = 0;
   for (const r of rows) {
     const cur = String(r.currency || "INR").trim().toUpperCase();
-    const baseInr = await toInr(r.live_price, cur);
+    const isNative = nativeMap[store.normBrand(r.brand)] === cur;
+    const baseInr = isNative ? Number(r.live_price) : await toInr(r.live_price, cur);
     if (baseInr == null || !Number.isFinite(baseInr) || baseInr <= 0) continue;
-    const baseUsd = cur === "USD" ? r.live_price : null;
+    const baseUsd = !isNative && cur === "USD" ? r.live_price : null;
     await q(`UPDATE products SET base_price=$1, base_usd=$2, live_price=NULL, currency=NULL,
         delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$3
       WHERE id=$4`, [baseInr, baseUsd, now, r.id]);
@@ -625,6 +640,10 @@ app.get("/api/fetch/local_only", wrap(async (req, res) => res.json({ relay_confi
 app.post("/api/fetch/local_only", wrap(async (req, res) => res.json({ ok: true, local_only_brands: await store.setLocalOnlyBrands(req.body.brands ?? req.body.list ?? "") })));
 app.get("/api/fetch/native_currency", wrap(async (req, res) => res.json({ native_currency_brands: await store.nativeCurrencyBrands() })));
 app.post("/api/fetch/native_currency", wrap(async (req, res) => res.json({ ok: true, native_currency_brands: await store.setNativeCurrencyBrands(req.body.brands || {}) })));
+app.get("/api/fetch/woo_api", wrap(async (req, res) => res.json({ woo_api_brands: [...(await store.wooApiBrandSet())] })));
+app.post("/api/fetch/woo_api", wrap(async (req, res) => res.json({ ok: true, woo_api_brands: await store.setWooApiBrands(req.body.brands ?? req.body.list ?? "") })));
+app.get("/api/fetch/relay_params", wrap(async (req, res) => res.json({ relay_append_params: await store.relayAppendParams() })));
+app.post("/api/fetch/relay_params", wrap(async (req, res) => res.json({ ok: true, relay_append_params: await store.setRelayAppendParams(req.body.params || {}) })));
 app.post("/api/shopify/update_price", wrap(async (req, res) => {
   const productUrl = String(req.body.product_url || "").trim();
   const newPrice = req.body.new_price;

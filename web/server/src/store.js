@@ -411,7 +411,7 @@ export function roundFinal(n) {
 
 // ---- push currency per brand ----
 let _cadCache = { at: 0, set: null };
-const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
+export const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
 export async function cadBrandSet() {
   if (_cadCache.set && Date.now() - _cadCache.at < 30_000) return _cadCache.set;
   const raw = await getMeta("push_cad_brands", "");

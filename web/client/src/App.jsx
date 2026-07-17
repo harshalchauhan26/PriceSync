@@ -421,8 +421,8 @@ function Pipeline({admin}) {
         <div className="lbl" style={{marginBottom:10}}>Source Configuration</div>
         <div className="dropzone" onClick={()=>document.getElementById("pipe-fi").click()}>
           <div className="dz-icon"><Icon n="upload" s={18} c="var(--on3)"/></div>
-          <div style={{fontSize:12,color:"var(--on2)",fontWeight:600}}>Drop .MBO or .JSON</div>
-          <div className="lbl" style={{marginTop:4}}>MAX 50MB</div>
+          <div style={{fontSize:12,color:"var(--on2)",fontWeight:600}}>Drop .xlsx or .csv</div>
+          <div className="lbl" style={{marginTop:4}}>MAX 64MB</div>
         </div>
         <input id="pipe-fi" type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>onFile(e.target.files[0])}/>
         <div style={{fontSize:11,color:"var(--on3)",marginTop:8}}>{fmtInt(sourceTotal)} products in source</div>
@@ -546,7 +546,7 @@ function Pipeline({admin}) {
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
         <div style={{display:"flex",gap:10,alignItems:"center"}}>
           <span className="lbl">Stream Console</span>
-          <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(34,197,94,.12)",color:"var(--green)",fontWeight:700}}>WebSocket Active</span>
+          <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(34,197,94,.12)",color:"var(--green)",fontWeight:700}}>{st.running?"Live · streaming":"Live · idle"}</span>
         </div>
         <div style={{display:"flex",gap:6}}>
           <button className="btn btn-ghost btn-sm" onClick={()=>{const bq=vsel.length?`&brands=${encodeURIComponent(vsel.join(","))}`:""; window.location=`/api/export?kind=all${bq}`;}} title={vsel.length?`Export ${vsel.length} selected brand(s)`:"Export all brands"}><Icon n="dl" s={12}/>{vsel.length?` ${vsel.length}`:""}</button>
@@ -707,7 +707,10 @@ function Review({admin}) {
   useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); setCad(d.overrides?.CAD??""); }); },[]);
 
   const liveInr=(it)=>{ if(it.live_price==null) return null; const c=(it.currency||"INR").toUpperCase(); if(c==="INR") return it.live_price; return it.live_price*(fxr[c]||1); };
-  const dInr=(it)=>{ const li=liveInr(it); return li!=null&&it.base_price!=null?li-it.base_price:null; };
+  // Prefer the delta the pipeline stored — it already applies per-brand rules
+  // (USD baseline via base_usd, native-currency no-FX compare) that a plain
+  // liveInr − base recompute gets wrong for those brands.
+  const dInr=(it)=>{ if(it.delta!=null&&it.delta!=="") return Number(it.delta); const li=liveInr(it); return li!=null&&it.base_price!=null?li-it.base_price:null; };
   const targetRate=convCur==="INR"?1:(fxr[convCur]||1);
   const amtInr=(amount,currency)=>{ const n=Number(amount); if(!Number.isFinite(n)||n<=0) return null; const c=(currency||"INR").toUpperCase(); const r=(c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1); return Math.round(n*r*100)/100; };
   const previewFinal=(it)=>{ const manual=amtInr(it._amt,it._cur); if(manual!=null) return roundFinal(manual/targetRate); const refInr=liveInr(it)??it.base_price; if(refInr==null) return null; return roundFinal(refInr/targetRate+Number(gm||0)); };
@@ -718,7 +721,7 @@ function Review({admin}) {
     if(!confirm(`Set base price = ${fmt(it.live_price)} ${it._cur}${it._cur==="INR"?"":" (converted to ₹)"} and clear live price?`)) return;
     setItems(xs=>xs.filter(x=>x.id!==it.id));
     const r=await aj("/api/review/update_base",{row:it.id,currency:it._cur});
-    r.ok?toast(`Base updated to ₹${fmt(r.base_price)} — live cleared`,"ok"):toast(r.error||"Failed","err"); load(); };
+    r.ok?toast(`Base updated to ${r.native?r.currency+" ":"₹"}${fmt(r.base_price)} — live cleared`,"ok"):toast(r.error||"Failed","err"); load(); };
   const rerunOne=async(it)=>{
     if(!admin) return toast("Admin only","err");
     setRerunning(s=>new Set(s).add(it.id));
@@ -794,7 +797,7 @@ function Review({admin}) {
     {/* Table */}
     <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
       <table className="tbl">
-        <thead><tr>{["Product","State","Base ₹","Live","Δ₹","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <thead><tr>{["Product","State","Base","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
           {items.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; return <tr key={it.id}>
             <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,32)}</a>
@@ -914,10 +917,12 @@ function History({admin}) {
 ═══════════════════════════════════════════════════════════════ */
 function Alerts({admin}) {
   const [brands,setBrands]=useState([]);
-  const [thr,setThr]=useState(15); const [dir,setDir]=useState("all"); const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
+  // Default 5% to match the nav badge (store.alertCount(5) in /api/meta) —
+  // a page that opens at 15% shows fewer alerts than the badge promises.
+  const [thr,setThr]=useState(5); const [dir,setDir]=useState("all"); const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
   const load=useCallback(()=>api(`/api/alerts?threshold=${thr}&direction=${dir}&brands=${encodeURIComponent(brands.join(","))}`).then(setD),[thr,dir,brands]);
   useEffect(()=>{ load(); },[load]);
-  const clear=()=>{ setDir("all"); setThr(15); };
+  const clear=()=>{ setDir("all"); setThr(5); };
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
     <PageBar title="Price Movement Alerts" subtitle="Volatility monitoring across designer brands."
@@ -958,6 +963,81 @@ function Alerts({admin}) {
         </tbody>
       </table>
     </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   BRAND RULES — the per-brand fetch/push flags that were previously
+   API-only (managed via curl). Comma-separated domains, no www.
+═══════════════════════════════════════════════════════════════ */
+const BRAND_RULE_LISTS=[
+  {key:"usd_brands",         url:"/api/fetch/usd",         label:"Fetch in USD",        help:"Fetch with a USD currency param and compare against the USD baseline (base_usd), not INR"},
+  {key:"range_high_brands",  url:"/api/fetch/range_high",  label:"Range-high price",    help:"Variable-price products: track the top of the price range (outranks custom regex)"},
+  {key:"gentle_brands",      url:"/api/fetch/gentle",      label:"Gentle fetch",        help:"Bot-protected sites (Akamai etc.): keep all rows on one worker so pacing is truthful"},
+  {key:"local_only_brands",  url:"/api/fetch/local_only",  label:"Local-only / relay",  help:"Sites that ban the cloud server's IP — cloud runs fetch via the relay if configured, else skip"},
+  {key:"woo_api_brands",     url:"/api/fetch/woo_api",     label:"Woo Store API",       help:"On relayed fetches read /wp-json/wc/store/v1 JSON instead of the bot-blocked product HTML"},
+  {key:"proxy_brands",       url:"/api/fetch/proxy",       label:"Proxy fetch",         help:"Egress via FETCH_PROXY_URL (dormant unless that env var is set)"},
+  {key:"cad_brands",         url:"/api/push/cad",          label:"Push in CAD",         help:"Shopify pushes for these brands send the price in CAD instead of the USD default"},
+];
+function BrandRules({admin}) {
+  const [vals,setVals]=useState({}); const [nat,setNat]=useState(""); const [flags,setFlags]=useState({});
+  const [busy,setBusy]=useState("");
+  useEffect(()=>{
+    BRAND_RULE_LISTS.forEach(r=>api(r.url).then(d=>{
+      setVals(v=>({...v,[r.key]:(d[r.key]||[]).join(", ")}));
+      setFlags(f=>({...f,proxy:d.proxy_configured??f.proxy,relay:d.relay_configured??f.relay}));
+    }));
+    api("/api/fetch/native_currency").then(d=>{
+      const m=d.native_currency_brands||{};
+      setNat(Object.entries(m).map(([b,c])=>`${b}=${c}`).join(", "));
+    });
+  },[]);
+  const saveList=async(r)=>{
+    if(!admin) return toast("Admin only","err");
+    setBusy(r.key);
+    const d=await aj(r.url,{brands:vals[r.key]||""});
+    setBusy("");
+    if(!d.ok) return toast(d.error||"Save failed","err");
+    setVals(v=>({...v,[r.key]:(d[r.key]||[]).join(", ")}));
+    toast(`${r.label} saved (${(d[r.key]||[]).length} brand${(d[r.key]||[]).length===1?"":"s"})`,"ok");
+  };
+  const saveNative=async()=>{
+    if(!admin) return toast("Admin only","err");
+    const map={};
+    for(const part of nat.split(",").map(s=>s.trim()).filter(Boolean)){
+      const m=part.match(/^([^=:\s]+)\s*[=:]\s*([A-Za-z]{3})$/);
+      if(!m) return toast(`Can't parse "${part}" — use brand.com=CAD`,"err");
+      map[m[1]]=m[2].toUpperCase();
+    }
+    setBusy("native");
+    const d=await aj("/api/fetch/native_currency",{brands:map});
+    setBusy("");
+    if(!d.ok) return toast(d.error||"Save failed","err");
+    const saved=d.native_currency_brands||{};
+    setNat(Object.entries(saved).map(([b,c])=>`${b}=${c}`).join(", "));
+    toast(`Native currency saved (${Object.keys(saved).length} brand${Object.keys(saved).length===1?"":"s"})`,"ok");
+  };
+  const Row=({label,help,children})=><div style={{display:"grid",gridTemplateColumns:"170px 1fr auto",gap:10,alignItems:"start",padding:"10px 0",borderBottom:"1px solid var(--border)"}}>
+    <div><div style={{fontSize:12,fontWeight:600}}>{label}</div><div style={{fontSize:10,color:"var(--on3)",marginTop:2,lineHeight:1.5}}>{help}</div></div>
+    {children}
+  </div>;
+  return <div className="card" style={{padding:20,marginBottom:16}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+      <div className="lbl">Per-brand fetch & push rules</div>
+      {flags.relay!=null&&<span style={{fontSize:10,color:flags.relay?"var(--green)":"var(--on3)"}}>relay {flags.relay?"configured ✓":"not set"}</span>}
+      {flags.proxy!=null&&<span style={{fontSize:10,color:flags.proxy?"var(--green)":"var(--on3)"}}>proxy {flags.proxy?"configured ✓":"not set"}</span>}
+    </div>
+    <div style={{fontSize:11,color:"var(--on3)",marginBottom:8}}>Comma-separated domains without www (e.g. <span className="mono">brand.com, other.in</span>). Changes apply from the next pipeline run.</div>
+    {BRAND_RULE_LISTS.map(r=><Row key={r.key} label={r.label} help={r.help}>
+      <input className="inp mono" style={{width:"100%"}} placeholder="none" value={vals[r.key]??""} disabled={!admin}
+        onChange={e=>setVals(v=>({...v,[r.key]:e.target.value}))}/>
+      <button className="btn btn-ghost btn-sm" onClick={()=>saveList(r)} disabled={!admin||busy===r.key}><Icon n="check" s={12}/>{busy===r.key?"…":"Save"}</button>
+    </Row>)}
+    <Row label="Native currency" help="Brands whose base price is stored in their own currency (no FX conversion, forced label) — format brand.com=CAD">
+      <input className="inp mono" style={{width:"100%"}} placeholder="brand.com=CAD, other.com=USD" value={nat} disabled={!admin}
+        onChange={e=>setNat(e.target.value)}/>
+      <button className="btn btn-ghost btn-sm" onClick={saveNative} disabled={!admin||busy==="native"}><Icon n="check" s={12}/>{busy==="native"?"…":"Save"}</button>
+    </Row>
   </div>;
 }
 
@@ -1006,6 +1086,9 @@ function Integrations({admin}) {
       </div>
       {v&&<div style={{fontSize:11,color:"var(--on2)",marginTop:8}}>{v}</div>}
     </div>
+
+    {/* Per-brand fetch/push rules */}
+    <BrandRules admin={admin}/>
 
     {/* Brands table */}
     <div className="lbl" style={{marginBottom:8}}>Brands in catalog (live)</div>
@@ -1095,6 +1178,7 @@ export default function App() {
 
   const admin=me.role==="admin"||me.role==="owner";
   const nav=[
+    ["home","Insights","home"],
     ["pipeline","Pipeline","pipeline"],
     ["add","Add Products","plus"],
     ["review","Review","review"],

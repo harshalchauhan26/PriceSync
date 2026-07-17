@@ -45,7 +45,9 @@ export async function toInr(amount, cur) {
   return Math.round(amount * (await rateOf(c)) * 100) / 100;
 }
 
-export async function snapshot(curs = ["USD", "CAD", "INR"]) {
+// EUR/GBP included because Review's per-row override currency select offers
+// them — without a real rate the client previews those amounts at rate 1.
+export async function snapshot(curs = ["USD", "CAD", "EUR", "GBP", "INR"]) {
   const rr = await rates();
   const out = {};
   for (const c of curs) out[c] = Math.round((rr[c] || FALLBACK[c] || 1) * 10000) / 10000;
