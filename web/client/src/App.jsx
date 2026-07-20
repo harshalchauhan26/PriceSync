@@ -704,6 +704,8 @@ function Review({admin}) {
   const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
   const [rerunning,setRerunning]=useState(()=>new Set());
   const [pushBusy,setPushBusy]=useState(false); const [pushJob,setPushJob]=useState(null);
+  const [onlyMismatch,setOnlyMismatch]=useState(false);
+  const [stateFilter,setStateFilter]=useState("all");
   const [cleanBusy,setCleanBusy]=useState(false);
   const [retryBusy,setRetryBusy]=useState(false); const [retryProgress,setRetryProgress]=useState(null);
   const convOn=convCur!=="INR";
@@ -756,11 +758,12 @@ function Review({admin}) {
   const pushBrand=async()=>{
     if(!admin) return toast("Admin only","err");
     if(!brands.length) return toast("Select at least one brand up top first","err");
-    if(!items.length) return toast("Nothing to push","err");
-    if(!confirm(`Archive ${items.length} row(s) to History and push the price to Shopify now, for ${brands.length===1?brands[0]:brands.length+" selected brands"}?`)) return;
+    const pushItems=onlyMismatch?items.filter(it=>it.state==="mismatch"):items;
+    if(!pushItems.length) return toast(onlyMismatch?"No mismatched rows to push":"Nothing to push","err");
+    if(!confirm(`Archive ${pushItems.length} ${onlyMismatch?"MISMATCHED ":""}row(s) to History and push the price to Shopify now, for ${brands.length===1?brands[0]:brands.length+" selected brands"}?`)) return;
     setPushBusy(true);
-    const overrides=items.filter(it=>it._amt).map(it=>({id:it.id,price_amount:it._amt,price_currency:it._cur}));
-    const r=await aj("/api/review/push_brand",{brands,markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",overrides});
+    const overrides=pushItems.filter(it=>it._amt).map(it=>({id:it.id,price_amount:it._amt,price_currency:it._cur}));
+    const r=await aj("/api/review/push_brand",{brands,markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",overrides,only_mismatch:onlyMismatch});
     setPushBusy(false);
     if(!r.ok) return toast(r.error||"Failed","err");
     if(!r.queued) return toast("Nothing to push","ok");
@@ -785,6 +788,16 @@ function Review({admin}) {
       brands={brands} setBrands={setBrands} brandScope="review"
       extraLeft={<button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
 
+    {/* State filter strip — view-only, narrows the table to one state */}
+    {(()=>{const c={matched:0,mismatch:0,error:0}; items.forEach(it=>{ if(c[it.state]!=null) c[it.state]++; });
+      const F=[["all","All",items.length],["mismatch","Mismatch",c.mismatch],["error","Error",c.error],["matched","Matched",c.matched]];
+      return <div className="card" style={{padding:"10px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span className="lbl">Filter</span>
+        <div className="pill-group">
+          {F.map(([k,l,n])=><button key={k} className={`pill${stateFilter===k?" active":""}`} onClick={()=>setStateFilter(k)}>{l} ({n})</button>)}
+        </div>
+      </div>;})()}
+
     {/* Global pricing strip */}
     <div className="card" style={{padding:"12px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
       <span className="lbl">Global Pricing</span>
@@ -808,7 +821,7 @@ function Review({admin}) {
       <table className="tbl">
         <thead><tr>{["Product","State","Base","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
-          {items.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; return <tr key={it.id}>
+          {(stateFilter==="all"?items:items.filter(it=>it.state===stateFilter)).map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; return <tr key={it.id}>
             <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,32)}</a>
               <div className="mono" style={{fontSize:10,color:"var(--on3)"}}>{(it.brand||"").replace(/^www\./,"")}</div></td>
             <td><span className="mono" style={{fontSize:11,fontWeight:700,color:pc}}>{pl}</span></td>
@@ -830,17 +843,23 @@ function Review({admin}) {
               <button className="btn btn-danger btn-sm" title="Hide this product from Review — product & price data stay in the database" onClick={()=>del(it)} disabled={!admin}><Icon n="trash" s={12}/>Clear</button>
             </div></td>
           </tr>;})}
-          {!items.length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>Nothing here.</td></tr>}
+          {!(stateFilter==="all"?items:items.filter(it=>it.state===stateFilter)).length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>{items.length&&stateFilter!=="all"?`No ${stateFilter} rows in this view.`:"Nothing here."}</td></tr>}
         </tbody>
       </table>
     </div>
 
     {/* Footer: combined archive + push (scoped to brand(s) up top), and a master "hide from Review" for the current view */}
     <div style={{marginTop:12,flexShrink:0,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-      <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!items.length||!brands.length}
-        title={brands.length?undefined:"Select at least one brand up top before pushing — never runs across every brand at once"}>
-        <Icon n="share" s={14}/>{pushBusy?"Starting…":`Push and update price (${items.length})`}
+      {(()=>{const mmCount=items.filter(it=>it.state==="mismatch").length; const pushCount=onlyMismatch?mmCount:items.length; return <>
+      <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!pushCount||!brands.length}
+        title={brands.length?(onlyMismatch?"Pushes only price-mismatch rows":undefined):"Select at least one brand up top before pushing — never runs across every brand at once"}>
+        <Icon n="share" s={14}/>{pushBusy?"Starting…":`Push and update price (${pushCount})`}
       </button>
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"var(--on2)",cursor:"pointer",userSelect:"none"}} title="Push only rows in the Price Mismatch state — skips matched and errored rows">
+        <input type="checkbox" checked={onlyMismatch} onChange={e=>setOnlyMismatch(e.target.checked)}/>
+        Only mismatched{onlyMismatch?` (${mmCount})`:""}
+      </label>
+      </>;})()}
       <button className="btn btn-danger" onClick={cleanAll} disabled={!admin||cleanBusy||!items.length}
         title="Hide every product currently shown below from Review — nothing is deleted from the database">
         <Icon n="trash" s={14}/>{cleanBusy?"Cleaning…":`Master Clean (${items.length})`}

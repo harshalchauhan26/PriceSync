@@ -390,8 +390,12 @@ async function archiveForPush(prow, spec) {
 app.post("/api/review/push_brand", wrap(async (req, res) => {
   const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
   if (!brands.length) return res.status(400).json({ ok: false, error: "select at least one brand before pushing" });
+  // Optional "only mismatched" scope — push just the price-mismatch rows and
+  // leave matched/error rows untouched (the default pushes all three states).
+  const onlyMismatch = req.body.only_mismatch === true || req.body.only_mismatch === "true";
+  const stateClause = onlyMismatch ? "state='mismatch'" : "state IN ('mismatch','error','matched')";
   const rows = await q(`SELECT * FROM products WHERE brand = ANY($1::text[]) AND decision='pending'
-    AND state IN ('mismatch','error','matched') AND review_dismissed_at IS NULL
+    AND ${stateClause} AND review_dismissed_at IS NULL
     ORDER BY ${store.STATE_PRIORITY_SQL}`, [brands]);
   if (!rows.length) return res.json({ ok: true, queued: 0 });
   const by = sec.currentUser(req)?.email;
