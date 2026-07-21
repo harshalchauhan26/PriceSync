@@ -1,6 +1,16 @@
 import crypto from 'node:crypto';
 import bcrypt from "bcryptjs";
 import { q, one } from "./db.js";
+import { config } from "./config.js";
+
+// Self-registration gate. Only emails whose domain is in the configured
+// allowlist may create their own account; an empty allowlist closes
+// self-registration entirely (owner creates users instead).
+export function signupAllowed(email) {
+  const domain = String(email || "").toLowerCase().trim().split("@")[1] || "";
+  if (!domain) return false;
+  return config.allowedSignupDomains.includes(domain);
+}
 
 const WRITE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const PUBLIC = new Set(["/api/login", "/api/register", "/api/health"]);
@@ -70,19 +80,35 @@ export async function verify(email, password) {
   if (valid) return u;
   return null;
 }
+export async function setPassword(email, password) {
+  const hash = await bcrypt.hash(password, 10);
+  await q("UPDATE users SET password_hash=$1 WHERE email=$2",
+    [hash, email.toLowerCase().trim()]);
+}
 export async function seedOwner(email, password) {
   await ensureUsers();
   const u = await getUser(email);
   if (!u) { await createUser(email, password, "owner"); return email + " (created)"; }
   let changed = false;
   if (u.role !== "owner") { await setRole(email, "owner"); changed = true; }
+  // Deliberate password rotation: seedOwner otherwise never touches an
+  // existing owner's password, so a changed ADMIN_PASSWORD had no effect.
+  // Guarded by SEED_OWNER_RESET_PASSWORD=1 so a normal reboot can't silently
+  // reset the password back to the env value.
+  if (config.seedOwnerResetPassword && password) {
+    await setPassword(email, password); changed = true;
+    return email + " (password reset)";
+  }
   return changed ? email + ' (updated)' : null;
 }
 
 // ---- rate limit ----
+// Use req.ip, which Express resolves correctly from the trust-proxy setting
+// (1 hop on Render). The previous code read the LEFT-most X-Forwarded-For
+// value, which the client fully controls — an attacker could rotate it to
+// dodge the login lockout. Never trust a raw client-supplied XFF here.
 export function ipOf(req) {
-  const xff = req.headers["x-forwarded-for"];
-  return (xff ? String(xff).split(",")[0].trim() : req.ip) || "?";
+  return req.ip || "?";
 }
 export function isLocked(ip) {
   const now = Date.now();

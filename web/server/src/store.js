@@ -34,6 +34,13 @@ const SCHEMA = [
   // "Clear view" in Review: hides a row from the review queue permanently
   // without touching its price data — an UPDATE, never a DELETE.
   'ALTER TABLE products ADD COLUMN IF NOT EXISTS review_dismissed_at TIMESTAMPTZ',
+  // Human/verified "dead link" marker. Set only when a link has failed as a
+  // PERMANENT error (404 / removed / redirected-off-product) across two or
+  // more separate runs — see markVerifiedDead(). Purely a label so tooling
+  // can stop re-fetching known-dead URLs; the row stays state=\'error\' and
+  // still shows in Review. Never auto-set from a single failure, never a DELETE.
+  'ALTER TABLE products ADD COLUMN IF NOT EXISTS verified_dead_at TIMESTAMPTZ',
+  'ALTER TABLE products ADD COLUMN IF NOT EXISTS dead_fail_count INTEGER DEFAULT 0',
   'CREATE TABLE IF NOT EXISTS import_catalog (' +
     'key TEXT PRIMARY KEY, mbo_url TEXT, url TEXT, platform TEXT,' +
     'custom_regex TEXT, brand TEXT, base_price DOUBLE PRECISION, imported_at TEXT)',
@@ -793,6 +800,42 @@ export async function commitImportToProducts() {
     return { added: after - before, staged, total: after };
   } catch (e) { await client.query("ROLLBACK"); throw e; }
   finally { client.release(); }
+}
+
+// ---- verified-dead link marker ----
+// A permanent failure is one where the product is genuinely gone, not a
+// transient block/timeout. Transient errors (timeout / 403 / 429 / 5xx)
+// must NEVER count toward marking a link dead.
+export function isPermanentError(status) {
+  const s = String(status || "").toLowerCase();
+  return s.includes("removed") || s.includes("404") ||
+    s.includes("unavailable") || s.includes("redirected off") ||
+    s.includes("price not found");
+}
+// Call after a run for the error rows. Increments a per-row permanent-failure
+// counter and only stamps verified_dead_at once a link has failed as
+// permanent on TWO OR MORE separate runs. Transient errors reset the counter
+// so a temporary block never accumulates toward "dead". Returns how many rows
+// were newly marked dead. Read/label only — never deletes, never changes state.
+export async function markVerifiedDead(runId) {
+  // Bump counter for permanent errors seen this run; reset it for anything else.
+  await q(`UPDATE products SET dead_fail_count = COALESCE(dead_fail_count,0) + 1
+    WHERE state='error' AND (
+      LOWER(status) LIKE '%removed%' OR LOWER(status) LIKE '%404%' OR
+      LOWER(status) LIKE '%unavailable%' OR LOWER(status) LIKE '%redirected off%' OR
+      LOWER(status) LIKE '%price not found%')`);
+  await q(`UPDATE products SET dead_fail_count = 0
+    WHERE state <> 'error' OR NOT (
+      LOWER(status) LIKE '%removed%' OR LOWER(status) LIKE '%404%' OR
+      LOWER(status) LIKE '%unavailable%' OR LOWER(status) LIKE '%redirected off%' OR
+      LOWER(status) LIKE '%price not found%')`);
+  const r = await q(`UPDATE products SET verified_dead_at = now()
+    WHERE verified_dead_at IS NULL AND state='error' AND COALESCE(dead_fail_count,0) >= 2
+    RETURNING key`);
+  return r.length;
+}
+export async function clearVerifiedDead(key) {
+  await q("UPDATE products SET verified_dead_at=NULL, dead_fail_count=0 WHERE key=$1", [key]);
 }
 
 export { STORE_KEY };

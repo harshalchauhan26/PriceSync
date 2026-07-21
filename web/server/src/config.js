@@ -19,6 +19,17 @@ export const config = {
   googleClientId: (e.GOOGLE_CLIENT_ID || "").trim(),
   adminEmail: (e.ADMIN_EMAIL || "admin@pricesync.local").toLowerCase(),
   adminPassword: e.ADMIN_PASSWORD || "admin",
+  // Self-registration allowlist. Comma-separated email domains (e.g.
+  // "growify.in,example.com") that may sign up via /api/register or Google.
+  // EMPTY (default) = self-registration is CLOSED; the owner creates users
+  // from the owner console. This stops anyone who can reach the URL from
+  // registering a viewer and reading the whole catalog.
+  allowedSignupDomains: (e.ALLOWED_SIGNUP_DOMAINS || "")
+    .split(",").map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean),
+  // When "1", seedOwner resets an EXISTING owner's password to ADMIN_PASSWORD
+  // on boot (a clean, deliberate rotation). Unset it again afterwards.
+  seedOwnerResetPassword: e.SEED_OWNER_RESET_PASSWORD === "1",
+  maxUploadMb: Math.max(1, parseInt(e.MAX_UPLOAD_MB || "16", 10) || 16),
   host: e.NODE_HOST || ((e.PORT && !e.NODE_PORT) || e.HOST === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1"),
   port: parseInt(e.NODE_PORT || e.PORT || "8090", 10),
   isCloud: ((!!e.PORT && !e.NODE_PORT) || e.NODE_ENV === "production"),

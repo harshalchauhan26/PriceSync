@@ -24,12 +24,24 @@ import { startPushJob, getPushJob, runningPushJob, startReviewPushJob } from './
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.resolve(__dirname, "../../client/dist");
 const app = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config.maxUploadMb * 1024 * 1024 } });
 const pendingUploads = new Map();
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(compression());
+// Lightweight request log with a short request id (no extra dependency).
+// Skips the health check so uptime pings don't flood the log.
+app.use((req, res, next) => {
+  if (req.path === "/api/health") return next();
+  const rid = crypto.randomBytes(4).toString("hex");
+  req.rid = rid;
+  const started = Date.now();
+  res.on("finish", () => {
+    console.log(`[MBO] ${rid} ${req.method} ${req.path} ${res.statusCode} ${Date.now() - started}ms`);
+  });
+  next();
+});
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
@@ -44,8 +56,12 @@ app.use(session({
   cookie: { httpOnly: true, sameSite: "lax", secure: config.isCloud, maxAge: 12 * 3600 * 1000 },
 }));
 
+// Log the real error server-side (with the request id) but return a generic
+// message — internal error text must not leak to the client. Validation
+// errors are still returned explicitly with 400 inside each handler.
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
-  console.error(e); res.status(500).json({ ok: false, error: e.message });
+  console.error(`[MBO] ${req.rid || "-"} handler error:`, e);
+  res.status(500).json({ ok: false, error: "internal error" });
 });
 
 // ---------- auth (public) ----------
@@ -60,6 +76,7 @@ app.post("/api/login", wrap(async (req, res) => {
 app.post("/api/register", wrap(async (req, res) => {
   const email = (req.body.email || "").trim(); const pw = req.body.password || "";
   if (!email.includes("@")) return res.status(400).json({ ok: false, error: "valid email required" });
+  if (!sec.signupAllowed(email)) return res.status(403).json({ ok: false, error: "self sign-up is not open — ask an administrator to create your account" });
   if (pw.length < 6) return res.status(400).json({ ok: false, error: "password must be 6+ chars" });
   if (await sec.getUser(email)) return res.status(400).json({ ok: false, error: "user already exists" });
   const u = await sec.createUser(email, pw, "viewer"); sec.loginUser(req, u);
@@ -81,7 +98,13 @@ app.post("/api/auth/google", wrap(async (req, res) => {
   const email = String(info.email || "").toLowerCase().trim();
   if (!email.includes("@")) return res.status(400).json({ ok: false, error: "no email in Google account" });
   let u = await sec.getUser(email);
-  if (!u) u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer");
+  // Existing users can always sign in with Google; a NEW account is only
+  // auto-created when the email domain is on the self-signup allowlist,
+  // otherwise Google login can't be used to bypass the closed registration.
+  if (!u) {
+    if (!sec.signupAllowed(email)) return res.status(403).json({ ok: false, error: "no account for this email — ask an administrator to create one" });
+    u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer");
+  }
   sec.loginUser(req, u);
   res.json({ ok: true, email: u.email, role: u.role });
 }));

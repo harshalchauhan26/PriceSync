@@ -6,7 +6,9 @@
   "description": "MBO Tracker — Node/Express backend (Supabase-backed price tracker)",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/price.test.mjs",
+    "verify-prices": "node tools/verify-prices.mjs"
   },
   "dependencies": {
     "axios": "^1.7.7",
