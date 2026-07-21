@@ -1,0 +1,64 @@
+# Render Blueprint for PriceSync (MBO Tracker).
+# The app is a single always-on Node service: it builds the Vite React client
+# and the Express server serves that build + the /api routes from ONE process.
+# Pipeline state, login sessions, rate-limits and the live log live in memory,
+# so this MUST run as a single Node instance (numInstances: 1) — NOT Python,
+# NOT serverless, and never scaled past one instance.
+#
+# To use: Render → New → Blueprint → pick this repo. It creates a Node service
+# with the settings below; then fill in the secret env vars (sync:false ones)
+# in the dashboard. Existing Python service can't be switched to Node in place —
+# this Blueprint stands up the correct Node service.
+services:
+  - type: web
+    name: pricesync
+    runtime: node
+    region: singapore            # closest Render region to the Mumbai (ap-south-1) Supabase DB
+    plan: free                   # ⚠ Free spins down when idle and LOSES in-memory pipeline/session
+                                 #    state mid-run. Upgrade to "starter" before relying on it.
+    branch: main
+    numInstances: 1              # do not increase — in-memory state breaks with 2+ instances
+    buildCommand: cd web/client && npm ci && npm run build && cd ../server && npm ci
+    startCommand: cd web/server && npm start
+    healthCheckPath: /api/health
+    autoDeploy: true             # redeploy on every push to main
+    envVars:
+      # --- required (enter values in the dashboard; never commit secrets) ---
+      - key: SUPABASE_DB_URL
+        sync: false              # Mumbai session-pooler / direct Postgres URI
+      - key: SECRET_KEY
+        sync: false              # long random hex — signs sessions + encrypts the Shopify token.
+                                 # MUST stay identical across redeploys or the saved token won't decrypt.
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false              # strong password; seeds the first owner on an empty DB
+      # --- self-registration (blank/absent = closed; owner creates users) ---
+      - key: ALLOWED_SIGNUP_DOMAINS
+        sync: false              # e.g. "growify.in" to let those emails self-register
+      # --- email reports (start / 50% / complete+2 sheets / errors-resolved) ---
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false              # Gmail app password
+      - key: SMTP_FROM
+        sync: false
+      - key: ALERT_TO
+        sync: false              # where the pipeline reports go
+      # --- fetch relay (lets cloud runs reach IP-banned brands; optional) ---
+      - key: FETCH_RELAY_URL
+        sync: false
+      - key: FETCH_RELAY_SECRET
+        sync: false
+      # --- optional ---
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: MAX_CONCURRENT_RUNS
+        value: "3"
+      # NOTE: do NOT set NODE_PORT on Render — the platform injects PORT, and
+      # leaving NODE_PORT unset makes the app bind 0.0.0.0 with secure cookies.
+      # There is NO PYTHON_VERSION here — this is a Node service.
