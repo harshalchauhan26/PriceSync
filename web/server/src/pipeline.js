@@ -324,11 +324,18 @@ export async function rerunOne(prod) {
   eng.rangeHighBrands = await store.rangeHighBrandSet();
   eng.proxyBrands = await store.proxyBrandSet();
   eng.localOnlyBrands = await store.localOnlyBrandSet();
+  eng.cloudSkipBrands = await store.cloudSkipBrandSet();
   eng.relay = (config.isCloud && config.fetchRelayUrl)
     ? { url: config.fetchRelayUrl, secret: config.fetchRelaySecret } : null;
   eng.wooApiBrands = await store.wooApiBrandSet();
   eng.relayParams = await store.relayAppendParams();
   eng.nativeCurrency = await store.nativeCurrencyBrands();
+  // Never re-fetch a cloud-blocked brand from the cloud — it would 400 and
+  // overwrite the good local INR price with an error. Leave the row untouched;
+  // it's refreshed from a local run instead.
+  if (config.isCloud && eng.cloudSkipBrands.has(normBrand(prod.brand))) {
+    return store.productByKey(prod.key);
+  }
   const fetcher = new Fetcher({ cooldown: [600, 1500] });
   const runId = "rerun-" + Date.now().toString(36);
   // A manual rerun is an explicit human recheck — un-void the link first so
@@ -362,19 +369,31 @@ export async function startPipeline(eng, runId) {
     // fetch would only clobber good local data with errors) and must be
     // refreshed from a local run — run-local-only.mjs.
     eng.localOnlyBrands = await store.localOnlyBrandSet();
+    eng.cloudSkipBrands = await store.cloudSkipBrandSet();
     eng.relay = (config.isCloud && config.fetchRelayUrl)
       ? { url: config.fetchRelayUrl, secret: config.fetchRelaySecret }
       : null;
     eng.wooApiBrands = await store.wooApiBrandSet();
     eng.relayParams = await store.relayAppendParams();
     eng.nativeCurrency = await store.nativeCurrencyBrands();
-    if (config.isCloud && eng.localOnlyBrands.size && !eng.relay) {
-      const before = rows.length;
-      rows = rows.filter((r) => !eng.localOnlyBrands.has(normBrand(r.brand)));
-      const skipped = before - rows.length;
-      total -= skipped;
-      if (skipped) log(eng, { row: "—", domain: "local-only", url: "", currency: "-", price: "-",
-        status: "Skipped", msg: `${skipped} row(s) of ${eng.localOnlyBrands.size} local-only brand(s) — set FETCH_RELAY_URL or refresh from the local machine` });
+    // Cloud skip rules:
+    //  - cloud-skip brands are dropped ALWAYS (even with a relay) — the store
+    //    blocks/geo-distorts every non-India IP incl. the relay, so a cloud
+    //    fetch only clobbers good local data with errors.
+    //  - other local-only brands are dropped only when there's no relay (with
+    //    a relay they're fetched through it).
+    if (config.isCloud) {
+      const skip = eng.relay
+        ? new Set(eng.cloudSkipBrands)
+        : new Set([...eng.localOnlyBrands, ...eng.cloudSkipBrands]);
+      if (skip.size) {
+        const before = rows.length;
+        rows = rows.filter((r) => !skip.has(normBrand(r.brand)));
+        const skipped = before - rows.length;
+        total -= skipped;
+        if (skipped) log(eng, { row: "—", domain: "local-only", url: "", currency: "-", price: "-",
+          status: "Skipped", msg: `${skipped} row(s) skipped on cloud — refresh these brand(s) from the local machine` });
+      }
     }
     Object.assign(st, { total_rows: total, pre_done: Math.max(0, total - rows.length),
       phase: "main", message: `Main pass — ${rows.length} product(s) from ${source}` });

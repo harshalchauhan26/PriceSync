@@ -565,6 +565,23 @@ export async function setLocalOnlyBrands(list) {
   return uniq;
 }
 
+// Brands that must NEVER be fetched from the cloud — not even via the relay.
+// The store hard-blocks/geo-distorts every non-India IP: labelanushree returns
+// HTTP 400 to the relay's Cloudflare IP and USD-converted prices to the Render
+// IP, so a cloud run only clobbers the good India-fetched INR data with errors.
+// These are skipped on cloud runs REGARDLESS of the relay and refreshed solely
+// from a local run (run-label-local.mjs / run-local-only.mjs). Superset-safe:
+// they're also in local-only, so local runs still fetch them.
+const DEFAULT_CLOUD_SKIP_BRANDS = new Set(["labelanushree.com"]);
+let _cloudSkipCache = { at: 0, set: null };
+export async function cloudSkipBrandSet() {
+  if (_cloudSkipCache.set && Date.now() - _cloudSkipCache.at < 30_000) return _cloudSkipCache.set;
+  const raw = await getMeta("cloud_skip_brands", "");
+  const set = new Set([...DEFAULT_CLOUD_SKIP_BRANDS, ...String(raw || "").split(",").map(normBrand).filter(Boolean)]);
+  _cloudSkipCache = { at: Date.now(), set };
+  return set;
+}
+
 // ---- per-brand relay fetch tweaks (only applied when fetching via relay) ----
 let _wooApiCache = { at: 0, set: null };
 export async function wooApiBrandSet() {
