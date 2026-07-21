@@ -349,7 +349,7 @@ export async function reviewItemsByBrands(brands) {
   const items = await q(`SELECT * FROM products
     ${where} decision='pending' AND review_dismissed_at IS NULL
       AND state IN ('mismatch','error','matched')
-    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC LIMIT 2000`, scoped ? [brands] : []);
+    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC`, scoped ? [brands] : []);
   return { items, counts: await counts() };
 }
 
@@ -383,7 +383,7 @@ export async function reviewItems(kind, brands) {
     where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands);
   }
   const items = await q(`SELECT * FROM products WHERE ${where}
-    ORDER BY (decision='pending') DESC, ABS(COALESCE(delta,0)) DESC LIMIT 1000`, p);
+    ORDER BY (decision='pending') DESC, ABS(COALESCE(delta,0)) DESC`, p);
   return { items, counts: await counts() };
 }
 
