@@ -541,11 +541,18 @@ export async function setProxyBrands(list) {
 }
 
 // ---- per-brand LOCAL-ONLY fetch (cloud IP banned; refresh from local runs) ----
+const DEFAULT_LOCAL_ONLY_BRANDS = new Set([
+  // WOOCS ("FOX") currency switcher geo-converts prices by IP: from the cloud
+  // server's foreign IP it serves USD-converted numbers labelled USD (a genuine
+  // ₹34,000 lehenga came back as $375 -> mismatch), while an India IP serves the
+  // correct INR. No relay/proxy fixes the number itself, so fetch it locally.
+  "labelanushree.com",
+]);
 let _localOnlyCache = { at: 0, set: null };
 export async function localOnlyBrandSet() {
   if (_localOnlyCache.set && Date.now() - _localOnlyCache.at < 30_000) return _localOnlyCache.set;
   const raw = await getMeta("local_only_brands", "");
-  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  const set = new Set([...DEFAULT_LOCAL_ONLY_BRANDS, ...String(raw || "").split(",").map(normBrand).filter(Boolean)]);
   _localOnlyCache = { at: Date.now(), set };
   return set;
 }

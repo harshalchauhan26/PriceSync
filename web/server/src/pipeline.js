@@ -3,7 +3,7 @@ import { Fetcher, extractRow } from "./engine.js";
 import { toInr } from "./fx.js";
 import { config } from "./config.js";
 import * as store from "./store.js";
-import { sendPipelineReport } from "./mailer.js";
+import { sendPipelineStarted, sendPipelineProgress, sendErrorsResolved, sendPipelineComplete } from "./mailer.js";
 
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
@@ -60,6 +60,16 @@ function log(eng, e) {
 }
 
 const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
+
+// Fire-and-forget an email and record the outcome in the run log. Never throws
+// — a mail failure must not abort or fail the pipeline run.
+function mailLog(eng, promise, label) {
+  return Promise.resolve(promise)
+    .then((r) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-",
+      status: "Email", msg: `${label}: ${r?.ok ? `sent to ${r.to}` : `not sent (${r?.error || "unknown"})`}` }))
+    .catch((e) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-",
+      status: "Email", msg: `${label}: send failed — ${e.message}` }));
+}
 
 // Compare a fetched price against the baseline, persist and log it.
 // Shared by the inline path and the worker-thread path (workers only fetch).
@@ -372,8 +382,17 @@ export async function startPipeline(eng, runId) {
     const cdMin = sec(cfg.cooldown_min, 400);
     const cdMax = Math.max(cdMin, sec(cfg.cooldown_max, 1200));
     const fetcher = new Fetcher({ timeout: cfg.timeout_ms, cooldown: [cdMin, cdMax] });
+    // Email: run started (skip in simulation — those are throwaway dry runs).
+    if (!cfg.simulation) mailLog(eng, sendPipelineStarted({ total: rows.length, runId }), "start");
+    const mainTotal = rows.length;
+    let halfSent = false;
     await runPass(eng, rows, Math.min(25, Math.max(1, cfg.concurrency)), fetcher, runId, (r) => {
       st.completed++; st[r === "matched" ? "matched" : r === "mismatch" ? "mismatch" : "errors"]++;
+      // Email: fire once when the main pass crosses the halfway mark.
+      if (!halfSent && !cfg.simulation && mainTotal > 0 && st.completed >= mainTotal / 2) {
+        halfSent = true;
+        mailLog(eng, sendPipelineProgress({ done: st.completed, total: mainTotal }), "50%");
+      }
     });
     if (!st.abort && cfg.safe_retry) {
       const errKeys = new Set((await store.dbProducts("update", vendors))
@@ -390,6 +409,9 @@ export async function startPipeline(eng, runId) {
         if (r !== "error") { st.retry_recovered++; st.errors = Math.max(0, st.errors - 1);
           if (r === "matched") st.matched++; else if (r === "mismatch") st.mismatch++; }
       });
+      // Email: errors-resolved summary (only when there were errors to retry).
+      if (!cfg.simulation && err.length) mailLog(eng, sendErrorsResolved({
+        stats: { retry_total: st.retry_total, retry_recovered: st.retry_recovered } }), "errors-resolved");
     }
     // Label links that failed as permanent across their last two runs so
     // incremental runs stop re-fetching them (a fresh run still rechecks).
@@ -406,15 +428,11 @@ export async function startPipeline(eng, runId) {
   } finally {
     st.running = false;
   }
-  if (!st.abort) {
+  if (!st.abort && !cfg.simulation) {
     const stats = { completed: st.completed, matched: st.matched, mismatch: st.mismatch,
       errors: st.errors, recovered: st.retry_recovered,
       elapsed: st.started_at ? Math.floor((Date.now() - st.started_at) / 1000) : null };
-    sendPipelineReport({ stats })
-      .then((r) => {
-        if (r?.ok) log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: `report sent to ${r.to} (${r.count} mismatch, ${r.errors} error, ${r.alerts} alert)` });
-        else log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: `not sent: ${r?.error || "unknown"}` });
-      })
-      .catch((e) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email", msg: "send failed: " + e.message }));
+    // Completion email with the two sheets (price updates + full fetch snapshot).
+    await mailLog(eng, sendPipelineComplete({ stats }), "complete");
   }
 }

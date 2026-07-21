@@ -707,6 +707,7 @@ function Review({admin}) {
   const [pushBusy,setPushBusy]=useState(false); const [pushJob,setPushJob]=useState(null);
   const [onlyMismatch,setOnlyMismatch]=useState(false);
   const [stateFilter,setStateFilter]=useState("all");
+  const [page,setPage]=useState(0); const PAGE_SIZE=500;
   const [cleanBusy,setCleanBusy]=useState(false);
   const [retryBusy,setRetryBusy]=useState(false); const [retryProgress,setRetryProgress]=useState(null);
   const convOn=convCur!=="INR";
@@ -724,6 +725,9 @@ function Review({admin}) {
     });
   },[brands]);
   useEffect(()=>{ load(); },[load]);
+  // Reset to the first page only when the view scope changes — NOT on every
+  // items change (row edits replace the items array and must not jump the page).
+  useEffect(()=>{ setPage(0); },[stateFilter,brands]);
   useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); setCad(d.overrides?.CAD??""); }); },[]);
 
   const liveInr=(it)=>{ if(it.live_price==null) return null; const c=(it.currency||"INR").toUpperCase(); if(c==="INR") return it.live_price; return it.live_price*(fxr[c]||1); };
@@ -827,12 +831,31 @@ function Review({admin}) {
       </div>
     </div>
 
-    {/* Table */}
+    {/* Table — paginated so the DOM stays bounded. Rendering all rows at once
+        (8k+ rows, several inputs each) freezes the browser; it silently stops
+        painting after a couple thousand. Filtering/actions still act on the
+        full items array, not just the visible page. */}
+    {(()=>{
+      const shown=stateFilter==="all"?items:items.filter(it=>it.state===stateFilter);
+      const pageCount=Math.max(1,Math.ceil(shown.length/PAGE_SIZE));
+      const safePage=Math.min(page,pageCount-1);
+      const from=safePage*PAGE_SIZE, to=Math.min(shown.length,from+PAGE_SIZE);
+      const pageRows=shown.slice(from,to);
+      return <>
+      {shown.length>PAGE_SIZE&&<div className="card" style={{padding:"8px 16px",marginBottom:8,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span style={{fontSize:12,color:"var(--on2)"}}>Showing <b>{fmtInt(from+1)}–{fmtInt(to)}</b> of <b>{fmtInt(shown.length)}</b></span>
+        <div style={{flex:1}}/>
+        <button className="btn btn-ghost btn-sm" onClick={()=>setPage(0)} disabled={safePage<=0}>« First</button>
+        <button className="btn btn-ghost btn-sm" onClick={()=>setPage(p=>Math.max(0,p-1))} disabled={safePage<=0}>‹ Prev</button>
+        <span style={{fontSize:12,color:"var(--on2)"}}>Page {safePage+1} / {pageCount}</span>
+        <button className="btn btn-ghost btn-sm" onClick={()=>setPage(p=>Math.min(pageCount-1,p+1))} disabled={safePage>=pageCount-1}>Next ›</button>
+        <button className="btn btn-ghost btn-sm" onClick={()=>setPage(pageCount-1)} disabled={safePage>=pageCount-1}>Last »</button>
+      </div>}
     <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
       <table className="tbl">
         <thead><tr>{["Product","State","Base","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
-          {(stateFilter==="all"?items:items.filter(it=>it.state===stateFilter)).map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; return <tr key={it.id}>
+          {pageRows.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; return <tr key={it.id}>
             <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,32)}</a>
               <div className="mono" style={{fontSize:10,color:"var(--on3)"}}>{(it.brand||"").replace(/^www\./,"")}</div></td>
             <td><span className="mono" style={{fontSize:11,fontWeight:700,color:pc}}>{pl}</span></td>
@@ -854,10 +877,11 @@ function Review({admin}) {
               <button className="btn btn-danger btn-sm" title="Hide this product from Review — product & price data stay in the database" onClick={()=>del(it)} disabled={!admin}><Icon n="trash" s={12}/>Clear</button>
             </div></td>
           </tr>;})}
-          {!(stateFilter==="all"?items:items.filter(it=>it.state===stateFilter)).length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>{items.length&&stateFilter!=="all"?`No ${stateFilter} rows in this view.`:"Nothing here."}</td></tr>}
+          {!shown.length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>{items.length&&stateFilter!=="all"?`No ${stateFilter} rows in this view.`:"Nothing here."}</td></tr>}
         </tbody>
       </table>
     </div>
+    </>;})()}
 
     {/* Footer: combined archive + push (scoped to brand(s) up top), and a master "hide from Review" for the current view */}
     <div style={{marginTop:12,flexShrink:0,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>

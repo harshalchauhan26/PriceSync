@@ -107,6 +107,156 @@ function recipient(to) {
   return (to || config.smtp.to || "").trim();
 }
 
+// Shared guard for every mail entry point: returns { ok:false, error } when
+// email can't be sent (unconfigured SMTP / no recipient) so callers can log
+// and move on without throwing inside the pipeline.
+function mailGuard(to) {
+  const { user, pass } = config.smtp;
+  to = recipient(to);
+  if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
+  if (!to) return { ok: false, error: "no recipient (ALERT_TO)" };
+  return { ok: true, to };
+}
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+// One flat, Excel-autofilterable sheet from an array of row objects.
+function flatSheet(wb, sheetName, columns, rows) {
+  const ws = wb.addWorksheet(safeSheetName(sheetName, new Set()));
+  ws.addRow(columns.map((c) => c.header));
+  styleHeader(ws);
+  rows.forEach((r) => {
+    const row = ws.addRow(columns.map((c) => r[c.key]));
+    const fill = r.state === "mismatch" ? "FFFFF2CC" : r.state === "error" ? "FFF8CBAD"
+      : r.state === "matched" ? "FFE2EFDA" : null;
+    if (fill) row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } }; });
+  });
+  ws.columns.forEach((c) => { c.width = 24; });
+  if (rows.length) ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columns.length } };
+  return ws;
+}
+
+// ---- pipeline lifecycle emails ----
+
+// Sent the moment a run kicks off.
+export async function sendPipelineStarted({ to, total, runId } = {}) {
+  const g = mailGuard(to); if (!g.ok) return g;
+  const { from } = config.smtp;
+  await transport().sendMail({
+    from, to: g.to,
+    subject: `MBO Tracker — pipeline started: ${total ?? "?"} product(s) (${today()})`,
+    text: `A pricing pipeline run just started.\n\n` +
+      `• Products to check: ${total ?? "?"}\n• Run id: ${runId || "—"}\n\n` +
+      `You'll get a note at the halfway mark and a full report with two ` +
+      `attached sheets when it finishes.\n\n— MBO Tracker`,
+  });
+  return { ok: true, to: g.to };
+}
+
+// Sent once, when the main pass crosses 50%.
+export async function sendPipelineProgress({ to, done, total } = {}) {
+  const g = mailGuard(to); if (!g.ok) return g;
+  const { from } = config.smtp;
+  const pct = total ? Math.round((done / total) * 100) : 50;
+  await transport().sendMail({
+    from, to: g.to,
+    subject: `MBO Tracker — pipeline ${pct}% done (${done}/${total}) (${today()})`,
+    text: `The pricing pipeline run is about halfway.\n\n` +
+      `• Checked so far: ${done} of ${total} (${pct}%)\n\n— MBO Tracker`,
+  });
+  return { ok: true, to: g.to };
+}
+
+// Sent after the safe-retry pass — how many fetch errors recovered vs remain.
+export async function sendErrorsResolved({ to, stats } = {}) {
+  const g = mailGuard(to); if (!g.ok) return g;
+  const { from } = config.smtp;
+  const total = stats?.retry_total ?? 0;
+  const recovered = stats?.retry_recovered ?? 0;
+  const remaining = Math.max(0, total - recovered);
+  const rows = await stateRows(["error"]);
+  const wb = new ExcelJS.Workbook();
+  flatSheet(wb, "Remaining Errors", [
+    { key: "brand", header: "brand" }, { key: "url", header: "url" },
+    { key: "base_price", header: "base_price" }, { key: "status", header: "status" },
+  ], rows);
+  const attach = rows.length
+    ? [{ filename: `remaining_errors_${today()}.xlsx`, content: Buffer.from(await wb.xlsx.writeBuffer()) }]
+    : [];
+  await transport().sendMail({
+    from, to: g.to,
+    subject: `MBO Tracker — error retry done: ${recovered}/${total} recovered, ${remaining} remain (${today()})`,
+    text: `The safe-retry pass finished re-checking fetch errors.\n\n` +
+      `• Retried: ${total}\n• Recovered: ${recovered}\n• Still failing: ${remaining}\n\n` +
+      (attach.length ? `The attached sheet lists the ${rows.length} row(s) still in error.\n\n` : ``) +
+      `— MBO Tracker`,
+    attachments: attach,
+  });
+  return { ok: true, to: g.to, recovered, remaining };
+}
+
+// Sent when the whole run is done. TWO attachments:
+//   1. price_updates  — products actually pushed to Shopify in the last 24h
+//      (approved in Review and confirmed updated) = "latest price updates".
+//   2. price_fetch_all — every product the pipeline holds, with a state column
+//      (matched / mismatch / error) so it filters in Excel = "latest fetch".
+export async function sendPipelineComplete({ to, stats } = {}) {
+  const g = mailGuard(to); if (!g.ok) return g;
+  const { from } = config.smtp;
+
+  const updated = await q(
+    `SELECT brand, url, base_price, final_price, currency, status, shopify_status, approved_at
+       FROM review_history
+      WHERE (shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')
+        AND approved_at >= now() - interval '24 hours'
+      ORDER BY approved_at DESC`).catch(() => []);
+  const allRows = await q(
+    `SELECT brand, url, base_price, live_price, currency, state, status, delta
+       FROM products ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`).catch(() => []);
+
+  const wbUpdated = new ExcelJS.Workbook();
+  flatSheet(wbUpdated, "Price Updates", [
+    { key: "brand", header: "brand" }, { key: "url", header: "url" },
+    { key: "base_price", header: "base_price" }, { key: "final_price", header: "pushed_price" },
+    { key: "currency", header: "currency" }, { key: "shopify_status", header: "shopify_status" },
+    { key: "approved_at", header: "pushed_at" },
+  ], updated);
+
+  const wbAll = new ExcelJS.Workbook();
+  flatSheet(wbAll, "All Fetched", [
+    { key: "brand", header: "brand" }, { key: "url", header: "url" },
+    { key: "base_price", header: "base_price" }, { key: "live_price", header: "live_price" },
+    { key: "currency", header: "currency" }, { key: "state", header: "state" },
+    { key: "delta", header: "delta" }, { key: "status", header: "status" },
+  ], allRows);
+
+  const parts = [];
+  if (stats) parts.push(
+    `${stats.completed ?? 0} product(s) checked — ${stats.matched ?? 0} matched, ` +
+    `${stats.mismatch ?? 0} mismatched, ${stats.errors ?? 0} error(s)` +
+    (stats.recovered ? ` (${stats.recovered} recovered on retry)` : "") +
+    (stats.elapsed != null ? ` in ${stats.elapsed}s` : ""));
+  parts.push(`${updated.length} price update(s) pushed to Shopify in the last 24h`);
+  parts.push(`${allRows.length} product(s) in the latest fetch snapshot`);
+
+  await transport().sendMail({
+    from, to: g.to,
+    subject: `MBO Tracker — pipeline finished: ${stats ? `${stats.completed ?? 0} checked, ` : ""}${stats?.mismatch ?? 0} mismatch, ${stats?.errors ?? 0} error (${today()})`,
+    text: `A pricing pipeline run just finished.\n\n` +
+      parts.map((p) => `• ${p}`).join("\n") + `\n\n` +
+      `Two sheets are attached:\n` +
+      `  1. price_updates — products whose price was updated (pushed to Shopify, last 24h).\n` +
+      `  2. price_fetch_all — every product from the latest fetch; filter the "state" ` +
+      `column into matched / mismatch / error.\n\n` +
+      `Mismatches are PENDING APPROVAL — nothing is pushed automatically.\n\n— MBO Tracker`,
+    attachments: [
+      { filename: `price_updates_${today()}.xlsx`, content: Buffer.from(await wbUpdated.xlsx.writeBuffer()) },
+      { filename: `price_fetch_all_${today()}.xlsx`, content: Buffer.from(await wbAll.xlsx.writeBuffer()) },
+    ],
+  });
+  return { ok: true, to: g.to, updated: updated.length, all: allRows.length };
+}
+
 export async function sendMismatchReport(to, brands) {
   const { user, pass, from } = config.smtp;
   to = recipient(to);
