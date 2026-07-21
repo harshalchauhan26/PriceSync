@@ -30,7 +30,7 @@ async function main() {
   const usdFetch = await usdFetchBrandSet();
 
   const rows = await q(`SELECT key, brand, platform, url, base_price, live_price, currency,
-    state, status, updated_at, verified_dead_at, dead_fail_count FROM products ORDER BY brand, key`);
+    state, status, updated_at, verified_dead_at FROM products ORDER BY brand, key`);
 
   const priceAnomalies = [];
   const currencyAnomalies = [];
@@ -104,7 +104,7 @@ async function main() {
   add("price_ratio_flags", priceAnomalies, ["brand", "url", "base_price", "live_price", "currency", "live_inr", "ratio", "flag"]);
   add("currency_flags", currencyAnomalies, ["brand", "url", "currency", "live_price", "issue"]);
   add("high_error_brands", highErrorBrands, ["brand", "total", "error", "error_pct", "permanent", "transient"]);
-  add("permanent_error_rows", deadCandidates.map((r) => ({ brand: r.brand, url: r.url, status: r.status, dead_fail_count: r.dead_fail_count })), ["brand", "url", "status", "dead_fail_count"]);
+  add("permanent_error_rows", deadCandidates.map((r) => ({ brand: r.brand, url: r.url, status: r.status, verified_dead: r.verified_dead_at ? "yes" : "no" })), ["brand", "url", "status", "verified_dead"]);
 
   const out = path.resolve(fileURLToPath(new URL(".", import.meta.url)), `../../../PriceVerify_${new Date().toISOString().slice(0, 10)}.xlsx`);
   await wb.xlsx.writeFile(out);

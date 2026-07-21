@@ -1,6 +1,6 @@
 import { q } from "./db.js";
 import { pushRowPrice } from "./price-update.js";
-import { clearBuckets } from "./store.js";
+import { clearBuckets, promoteLiveToBase } from "./store.js";
 
 // Batched Shopify push with live progress. One job at a time; batches of 10
 // run in order, items inside a batch run concurrently. Pushes go over the
@@ -95,7 +95,7 @@ async function pushOne(job, batch, item) {
       item.key ? q("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE key=$3",
         [result.status, at, item.key]) : null,
     ]);
-    if (result.ok && item.key) await clearBuckets(q, item.key);
+    if (result.ok && item.key) { await promoteLiveToBase(q, item._row); await clearBuckets(q, item.key); }
   } catch (e) { console.error("[MBO] push job status write:", e.message); }
 }
 
@@ -173,7 +173,7 @@ async function pushWithArchive(job, batch, item, archiveFn) {
       item.key ? q("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE key=$3",
         [result.status, at, item.key]) : null,
     ]);
-    if (result.ok && item.key) await clearBuckets(q, item.key);
+    if (result.ok && item.key) { await promoteLiveToBase(q, item._row); await clearBuckets(q, item.key); }
   } catch (e) { console.error("[MBO] review push job status write:", e.message); }
 }
 

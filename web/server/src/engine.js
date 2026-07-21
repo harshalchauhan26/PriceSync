@@ -7,6 +7,11 @@ export const COOLDOWN_MS = [1200, 2800];
 export const SHOPIFY_CENTS_THRESHOLD = 1_000_000;
 export const MATCH_TOLERANCE = 1.0;
 const CURRENCIES = ["USD", "CAD", "INR"];
+const DEFAULT_APPEND_PARAMS = {
+  // Moledro uses MLveda country selection; without this the Shopify JSON can
+  // return geo-converted decimal INR values instead of the India catalog price.
+  "mymoledro.com": { mlveda_country: "in" },
+};
 
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -147,7 +152,7 @@ export function sanitizePrice(raw) {
   if (typeof raw === "number") return raw;
   let text = String(raw);
   text = text.replace(/\b(USD|CAD|INR|Rs\.?|MRP)\b/gi, "");
-  text = text.replace(/₹/g, "").replace(/C\$/g, "").replace(/\$/g, "");
+  text = text.replace(/\u20B9|\u00e2\u201a\u00b9/g, "").replace(/C\$/g, "").replace(/\$/g, "");
   text = text.replace(/[,  ' ]/g, "");
   const m = text.match(/\d+(?:\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
@@ -161,13 +166,13 @@ export function detectCurrency(text) {
   if (!text) return null;
   let m = text.match(/(?:og|product):price:currency["'][^>]*content=["']([A-Z]{3})["']|content=["']([A-Z]{3})["'][^>]*(?:og|product):price:currency/);
   if (m) { const c = (m[1] || m[2]).toUpperCase(); if (CURRENCIES.includes(c)) return c; }
+  if (/\u20B9|\u00e2\u201a\u00b9/.test(text) || /\bRs\.?\s*\d/i.test(text)) return "INR";
   m = text.match(/"(?:priceCurrency|price_currency|currency)"\s*:\s*"([A-Z]{3})"/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   m = text.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Z]{3})["']/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   m = text.match(/Shopify\.currency\s*=\s*\{[^}]*?["']active["']\s*:\s*["']([A-Z]{3})["']/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
-  if (text.includes("₹") || /\bRs\.?\s*\d/i.test(text)) return "INR";
   if (/\bC\$|\bCAD\b/.test(text)) return "CAD";
   if (/\bUSD\b/.test(text) || text.includes("$")) return "USD";
   return null;
@@ -363,13 +368,15 @@ export function withCurrencyParam(url, param, currency) {
 
 export async function extractRow(fetcher, url, platform, customRegex, opts = {}) {
   const p = (platform || "").trim().toLowerCase();
+  const domain = (() => { try { return new URL(url).host.replace(/^www\./, "").toLowerCase(); } catch { return ""; } })();
+  const appendParams = { ...(DEFAULT_APPEND_PARAMS[domain] || {}), ...(opts.appendParams || {}) };
   let u = opts.fetchCurrency
     ? withCurrencyParam(url, opts.currencyParam || "wmc-currency", opts.fetchCurrency)
     : url;
   // Per-brand extra query params (e.g. anitadongre's switch=true suppresses
   // its geo-redirect when fetching from a foreign/relay IP).
-  if (opts.appendParams) {
-    for (const [k, v] of Object.entries(opts.appendParams)) u = withCurrencyParam(u, k, v);
+  if (Object.keys(appendParams).length) {
+    for (const [k, v] of Object.entries(appendParams)) u = withCurrencyParam(u, k, v);
   }
   const hi = opts.preferHighPrice === true;
   let res;

@@ -369,29 +369,6 @@ async function approveOne(client, prow, body) {
     : store.computeFinal(prow.base_price, liveInr, ref, markup, custom, convert, targetRate);
   const final = store.roundFinal(finalRaw);
   const archived = await store.archiveApproved(client, prow, final, markup, ref, body.note || "", body._by);
-  // Baseline follows the approved live price (markup only affects final_price).
-  // Native-currency brands (native_currency_brands) store base_price in their
-  // own currency and the pipeline compares live against it with NO FX — for
-  // them the new baseline must be the raw live number, never the INR
-  // conversion (that would guarantee a false mismatch on every future run).
-  const nativeCur = (await store.nativeCurrencyBrands())[store.normBrand(prow.brand)];
-  const curUp = String(prow.currency || "").trim().toUpperCase();
-  const isNative = !!(nativeCur && curUp === nativeCur);
-  const baseNew = isNative ? Number(prow.live_price) : liveInr;
-  if (baseNew != null && Number.isFinite(baseNew) && baseNew > 0) {
-    // USD-baseline brands compare against base_usd, so sync it too — otherwise
-    // the next run re-flags the same mismatch against the stale USD baseline.
-    const baseUsd = !isNative && curUp === "USD" ? prow.live_price : null;
-    const statusLabel = `Price Matched (${isNative ? nativeCur : "INR"})`;
-    await client.query(`UPDATE products SET base_price=$1, base_usd=$2, state='matched',
-      status=$3, delta=0 WHERE id=$4`, [baseNew, baseUsd, statusLabel, prow.id]);
-    await client.query("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [baseNew, prow.key]);
-    await store.syncBucket(client.query.bind(client),
-      { key: prow.key, mbo_url: prow.mbo_url, url: prow.url, platform: prow.platform,
-        brand: prow.brand, base_price: baseNew, live_price: prow.live_price,
-        currency: prow.currency, delta: 0, status: statusLabel },
-      'matched');
-  }
   return { final, archived, pushCur: targetCur };
 }
 // approveOne wrapped in its own short transaction — used by the combined
@@ -604,7 +581,7 @@ app.post("/api/history/push", wrap(async (req, res) => {
   const r = await pushRowPrice(it, it.final_price);
   await q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
     [r.status, new Date().toISOString(), it.id]);
-  if (r.ok && it.key) await store.clearBuckets(q, it.key);
+  if (r.ok && it.key) { await store.promoteLiveToBase(q, it); await store.clearBuckets(q, it.key); }
   res.json({ ok: r.ok, status: r.status });
 }));
 app.post("/api/history/push_all", wrap(async (req, res) => {

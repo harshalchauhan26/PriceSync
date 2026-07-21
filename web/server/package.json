@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test test/price.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "verify-prices": "node tools/verify-prices.mjs"
   },
   "dependencies": {

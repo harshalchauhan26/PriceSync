@@ -321,6 +321,9 @@ export async function rerunOne(prod) {
   eng.nativeCurrency = await store.nativeCurrencyBrands();
   const fetcher = new Fetcher({ cooldown: [600, 1500] });
   const runId = "rerun-" + Date.now().toString(36);
+  // A manual rerun is an explicit human recheck — un-void the link first so
+  // a previously dead URL gets a genuine fresh attempt and re-earns its state.
+  await store.clearVerifiedDead(prod.key).catch(() => {});
   await processOne(eng, fetcher, prod, runId);
   return store.productByKey(prod.key);
 }
@@ -388,9 +391,16 @@ export async function startPipeline(eng, runId) {
           if (r === "matched") st.matched++; else if (r === "mismatch") st.mismatch++; }
       });
     }
+    // Label links that failed as permanent across their last two runs so
+    // incremental runs stop re-fetching them (a fresh run still rechecks).
+    // Best-effort: a failure here must not fail the run.
+    let voided = 0;
+    if (!st.abort) { try { voided = await store.markVerifiedDead(); } catch (e) {
+      log(eng, { row: "—", domain: "void", url: "", currency: "-", price: "-", status: "Warning", msg: "verified-dead marking skipped: " + e.message }); } }
     st.phase = "done";
     st.message = (st.abort ? "Aborted" : "Completed") +
-      (st.retry_recovered ? ` (${st.retry_recovered} recovered)` : "") + ". Saved to database.";
+      (st.retry_recovered ? ` (${st.retry_recovered} recovered)` : "") +
+      (voided ? ` · ${voided} link(s) marked dead` : "") + ". Saved to database.";
   } catch (e) {
     st.phase = "done"; st.message = "Error: " + e.message;
   } finally {

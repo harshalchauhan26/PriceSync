@@ -4,11 +4,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   sanitizePrice, descaleIfCents, detectCurrency, extractPriceDetail,
-  redirectedOffProduct, withCurrencyParam, wooApiUrl,
+  redirectedOffProduct, withCurrencyParam, wooApiUrl, extractRow,
 } from "../src/engine.js";
 import {
   roundFinal, computeFinal, matchTol, stateOf, brandOf, canonicalUrl,
-  normBrand, isPermanentError,
+  normBrand, isPermanentError, liveBaseValue,
 } from "../src/store.js";
 import { toInr, setOverrides } from "../src/fx.js";
 
@@ -67,6 +67,27 @@ test("detectCurrency reads meta, symbols and JSON", () => {
   assert.equal(detectCurrency(""), null);
 });
 
+test("real rupee symbol outranks stray US dollar copy", () => {
+  assert.equal(sanitizePrice("\u20B933,000.00"), 33000);
+  assert.equal(detectCurrency("\u20B933,000 Free Shipping above US$ 500"), "INR");
+  assert.equal(detectCurrency('"priceCurrency":"USD" visible \u20B933,000'), "INR");
+});
+
+test("Moledro Shopify fetch is pinned to India catalog prices", async () => {
+  const seen = [];
+  const fetcher = { async get(url) {
+    seen.push(url);
+    if (url.endsWith(".js?mlveda_country=in")) {
+      return { data: JSON.stringify({ variants: [{ price: 26500000 }] }) };
+    }
+    return { data: "\u20B9265,000" };
+  } };
+  const [price, currency] = await extractRow(fetcher, "https://www.mymoledro.com/products/azura-lehenga-set", "shopify", null);
+  assert.equal(price, 265000);
+  assert.equal(currency, "INR");
+  assert.equal(seen[0], "https://www.mymoledro.com/products/azura-lehenga-set.js?mlveda_country=in");
+});
+
 test("redirectedOffProduct catches removed products that 302 off the slug", () => {
   const requested = "https://brand.com/products/my-kurta";
   const offProduct = { headers: {}, request: { res: { responseUrl: "https://brand.com/collections/all" } } };
@@ -121,6 +142,14 @@ test("isPermanentError separates dead links from transient blocks", () => {
   assert.equal(isPermanentError("Fetch Error (timeout of 12000ms exceeded)"), false);
   assert.equal(isPermanentError("Fetch Error (store returned HTTP 403)"), false);
   assert.equal(isPermanentError("Price Matched (INR)"), false);
+});
+
+test("pushed baseline uses fetched live price before markup", async () => {
+  setOverrides({ USD: 80 });
+  const next = await liveBaseValue({ brand: "labelanushree.com", live_price: 440, currency: "USD" });
+  assert.equal(next.baseNew, 35200);
+  assert.equal(next.baseUsd, 440);
+  assert.equal(next.statusLabel, "Price Matched (INR)");
 });
 
 test("toInr: INR passthrough, foreign uses override rate (deterministic)", async () => {

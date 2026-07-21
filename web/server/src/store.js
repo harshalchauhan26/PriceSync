@@ -40,7 +40,6 @@ const SCHEMA = [
   // can stop re-fetching known-dead URLs; the row stays state=\'error\' and
   // still shows in Review. Never auto-set from a single failure, never a DELETE.
   'ALTER TABLE products ADD COLUMN IF NOT EXISTS verified_dead_at TIMESTAMPTZ',
-  'ALTER TABLE products ADD COLUMN IF NOT EXISTS dead_fail_count INTEGER DEFAULT 0',
   'CREATE TABLE IF NOT EXISTS import_catalog (' +
     'key TEXT PRIMARY KEY, mbo_url TEXT, url TEXT, platform TEXT,' +
     'custom_regex TEXT, brand TEXT, base_price DOUBLE PRECISION, imported_at TEXT)',
@@ -225,7 +224,9 @@ export async function historyVendors() {
 // ---- products work list (DB source) ----
 export async function dbProducts(mode = "fresh", vendorList = null) {
   const cl = []; const p = [];
-  if (mode !== "fresh") cl.push("state IN ('pending','error')");
+  // Incremental (update) runs re-fetch only unresolved rows and SKIP links
+  // already confirmed dead across two runs — a fresh run still rechecks them.
+  if (mode !== "fresh") { cl.push("state IN ('pending','error')"); cl.push("verified_dead_at IS NULL"); }
   if (vendorList && vendorList.length) {
     cl.push(`brand IN (${vendorList.map((_, i) => `$${i + 1}`).join(",")})`);
     p.push(...vendorList);
@@ -248,7 +249,7 @@ export async function importedProducts(mode = 'fresh', vendorList = null) {
     clauses.push(`c.brand IN (${vendorList.map((_, i) => `$${i + 1}`).join(',')})`);
     params.push(...vendorList);
   }
-  if (mode !== 'fresh') clauses.push(`COALESCE(p.state, 'pending') IN ('pending','error')`);
+  if (mode !== 'fresh') { clauses.push(`COALESCE(p.state, 'pending') IN ('pending','error')`); clauses.push('p.verified_dead_at IS NULL'); }
   const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
   return q(`SELECT c.key,c.mbo_url,c.url,c.platform,c.custom_regex,c.brand,c.base_price,
       p.base_usd, COALESCE(p.state,'pending') state
@@ -460,11 +461,16 @@ export async function fetchCurrencyFor(brand) {
 }
 
 // ---- per-brand RANGE price preference ----
+const DEFAULT_RANGE_HIGH_BRANDS = new Set([
+  // Masaba products can expose a low first variant/sale option while the
+  // Studio East baseline tracks the full/high variant price.
+  "houseofmasaba.com",
+]);
 let _rangeHighCache = { at: 0, set: null };
 export async function rangeHighBrandSet() {
   if (_rangeHighCache.set && Date.now() - _rangeHighCache.at < 30_000) return _rangeHighCache.set;
   const raw = await getMeta("range_high_brands", "");
-  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  const set = new Set([...DEFAULT_RANGE_HIGH_BRANDS, ...String(raw || "").split(",").map(normBrand).filter(Boolean)]);
   _rangeHighCache = { at: Date.now(), set };
   return set;
 }
@@ -589,6 +595,32 @@ export async function setNativeCurrencyBrands(obj) {
 // ---- approval archive ----
 const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
+export async function liveBaseValue(prow) {
+  if (!prow || prow.live_price == null) return null;
+  const curUp = String(prow.currency || "INR").trim().toUpperCase();
+  const nativeCur = (await nativeCurrencyBrands())[normBrand(prow.brand)];
+  const isNative = !!(nativeCur && curUp === nativeCur);
+  const baseNew = isNative ? Number(prow.live_price) : await toInr(prow.live_price, curUp);
+  if (baseNew == null || !Number.isFinite(baseNew) || baseNew <= 0) return null;
+  return {
+    baseNew,
+    baseUsd: !isNative && curUp === "USD" ? Number(prow.live_price) : null,
+    statusLabel: `Price Matched (${isNative ? nativeCur : "INR"})`,
+  };
+}
+
+export async function promoteLiveToBase(run, prow) {
+  if (!prow?.key) return null;
+  const next = await liveBaseValue(prow);
+  if (!next) return null;
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  await run(`UPDATE products SET base_price=$1, base_usd=$2, state='matched',
+      status=$3, delta=0, updated_at=$4 WHERE key=$5`,
+    [next.baseNew, next.baseUsd, next.statusLabel, now, prow.key]);
+  await run("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [next.baseNew, prow.key]);
+  return { base_price: next.baseNew, base_usd: next.baseUsd, status: next.statusLabel };
+}
+
 export async function archiveApproved(client, prow, final, markup, ref, note, by) {
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const inserted = await client.query(`INSERT INTO review_history (${HIST_COLS})
@@ -812,30 +844,43 @@ export function isPermanentError(status) {
     s.includes("unavailable") || s.includes("redirected off") ||
     s.includes("price not found");
 }
-// Call after a run for the error rows. Increments a per-row permanent-failure
-// counter and only stamps verified_dead_at once a link has failed as
-// permanent on TWO OR MORE separate runs. Transient errors reset the counter
-// so a temporary block never accumulates toward "dead". Returns how many rows
-// were newly marked dead. Read/label only — never deletes, never changes state.
-export async function markVerifiedDead(runId) {
-  // Bump counter for permanent errors seen this run; reset it for anything else.
-  await q(`UPDATE products SET dead_fail_count = COALESCE(dead_fail_count,0) + 1
-    WHERE state='error' AND (
-      LOWER(status) LIKE '%removed%' OR LOWER(status) LIKE '%404%' OR
-      LOWER(status) LIKE '%unavailable%' OR LOWER(status) LIKE '%redirected off%' OR
-      LOWER(status) LIKE '%price not found%')`);
-  await q(`UPDATE products SET dead_fail_count = 0
-    WHERE state <> 'error' OR NOT (
-      LOWER(status) LIKE '%removed%' OR LOWER(status) LIKE '%404%' OR
-      LOWER(status) LIKE '%unavailable%' OR LOWER(status) LIKE '%redirected off%' OR
-      LOWER(status) LIKE '%price not found%')`);
-  const r = await q(`UPDATE products SET verified_dead_at = now()
-    WHERE verified_dead_at IS NULL AND state='error' AND COALESCE(dead_fail_count,0) >= 2
-    RETURNING key`);
+// SQL fragment: does a status string describe a PERMANENT (dead) failure?
+// Kept identical to isPermanentError() above.
+const PERMANENT_ERR_SQL = `(
+  LOWER(status) LIKE '%removed%' OR LOWER(status) LIKE '%404%' OR
+  LOWER(status) LIKE '%unavailable%' OR LOWER(status) LIKE '%redirected off%' OR
+  LOWER(status) LIKE '%price not found%')`;
+
+// Call once after a pipeline run finishes. Decides "dead" from price_history,
+// not a global counter, so a vendor-scoped run can't inflate rows it never
+// touched: a link is stamped verified_dead_at only when its TWO most recent
+// history entries are BOTH permanent errors. Also clears the marker for any
+// row that is no longer in the error state (it recovered). Read/label only —
+// never deletes, never changes state or price. Returns how many were newly
+// marked dead.
+export async function markVerifiedDead() {
+  // A recovered row (matched/mismatch/pending) is not dead anymore.
+  await q(`UPDATE products SET verified_dead_at = NULL
+    WHERE verified_dead_at IS NOT NULL AND state <> 'error'`);
+  const r = await q(`
+    WITH ranked AS (
+      SELECT key, status,
+        ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) rn
+      FROM price_history
+    ),
+    last2 AS (
+      SELECT key, COUNT(*) n, bool_and(${PERMANENT_ERR_SQL}) both_dead
+      FROM ranked WHERE rn <= 2 GROUP BY key
+    )
+    UPDATE products p SET verified_dead_at = now()
+    FROM last2 l
+    WHERE p.key = l.key AND l.n >= 2 AND l.both_dead
+      AND p.state = 'error' AND p.verified_dead_at IS NULL
+    RETURNING p.key`);
   return r.length;
 }
 export async function clearVerifiedDead(key) {
-  await q("UPDATE products SET verified_dead_at=NULL, dead_fail_count=0 WHERE key=$1", [key]);
+  await q("UPDATE products SET verified_dead_at=NULL WHERE key=$1", [key]);
 }
 
 export { STORE_KEY };
