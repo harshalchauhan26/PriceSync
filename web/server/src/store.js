@@ -343,14 +343,35 @@ export const productByKey = (key) => one("SELECT * FROM products WHERE key=$1", 
 
 // ---- review (one or more brands, priority-ordered: mismatch, then error, then matched) ----
 export const STATE_PRIORITY_SQL = "CASE state WHEN 'mismatch' THEN 0 WHEN 'error' THEN 1 ELSE 2 END";
+async function reviewSummaryByBrands(brands) {
+  const scoped = brands && brands.length;
+  const where = scoped ? "WHERE brand = ANY($1::text[]) AND" : "WHERE";
+  const r = await one(`SELECT COUNT(*) total,
+    COUNT(*) FILTER (WHERE state='mismatch') mismatch,
+    COUNT(*) FILTER (WHERE state='error') error,
+    COUNT(*) FILTER (WHERE state='matched') matched
+    FROM products
+    ${where} decision='pending' AND review_dismissed_at IS NULL
+      AND state IN ('mismatch','error','matched')`, scoped ? [brands] : []);
+  return {
+    total: num(r?.total),
+    mismatch: num(r?.mismatch),
+    error: num(r?.error),
+    matched: num(r?.matched),
+  };
+}
+
 export async function reviewItemsByBrands(brands) {
   const scoped = brands && brands.length;
   const where = scoped ? "WHERE brand = ANY($1::text[]) AND" : "WHERE";
-  const items = await q(`SELECT * FROM products
+  const [items, summary] = await Promise.all([
+    q(`SELECT * FROM products
     ${where} decision='pending' AND review_dismissed_at IS NULL
       AND state IN ('mismatch','error','matched')
-    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC`, scoped ? [brands] : []);
-  return { items, counts: await counts() };
+    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC`, scoped ? [brands] : []),
+    reviewSummaryByBrands(brands),
+  ]);
+  return { items, counts: await counts(), summary };
 }
 
 // Hides a single row from the review queue -- an UPDATE flag
@@ -643,7 +664,7 @@ export async function historyList(brands, status) {
   else if (status === "failed") cl.push(`shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}`);
   else if (status === "not_pushed") cl.push("shopify_status IS NULL");
   const where = cl.length ? "WHERE " + cl.join(" AND ") : "";
-  const rows = await q(`SELECT * FROM review_history ${where} ORDER BY approved_at DESC LIMIT 2000`, p);
+  const rows = await q(`SELECT * FROM review_history ${where} ORDER BY approved_at DESC`, p);
   const s = await one(`SELECT COUNT(*) c, COALESCE(SUM(final_price),0) v,
     COUNT(*) FILTER (WHERE ${PUSH_SUCCESS}) pushed,
     COUNT(*) FILTER (WHERE shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}) failed,

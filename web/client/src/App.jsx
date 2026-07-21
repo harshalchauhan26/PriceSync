@@ -700,6 +700,7 @@ const STATE_PILL={mismatch:["WARN","var(--amber)"],error:["FAIL","var(--red)"],m
 function Review({admin}) {
   const [brands,setBrands]=useState([]);
   const [items,setItems]=useState([]);
+  const [summary,setSummary]=useState({total:0,mismatch:0,error:0,matched:0});
   const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
   const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
   const [rerunning,setRerunning]=useState(()=>new Set());
@@ -709,10 +710,18 @@ function Review({admin}) {
   const [cleanBusy,setCleanBusy]=useState(false);
   const [retryBusy,setRetryBusy]=useState(false); const [retryProgress,setRetryProgress]=useState(null);
   const convOn=convCur!=="INR";
+  const queueTotal=Number(summary.total ?? items.length) || 0;
 
   const load=useCallback(async()=>{
     const d=await api(`/api/review/items_by_brand?brands=${encodeURIComponent(brands.join(","))}`);
-    setItems((d.items||[]).map(it=>({...it,_amt:"",_cur:(it.currency||"INR").toUpperCase()})));
+    const rows=d.items||[];
+    setItems(rows.map(it=>({...it,_amt:"",_cur:(it.currency||"INR").toUpperCase()})));
+    setSummary({
+      total:Number(d.summary?.total ?? rows.length) || 0,
+      mismatch:Number(d.summary?.mismatch ?? rows.filter(it=>it.state==="mismatch").length) || 0,
+      error:Number(d.summary?.error ?? rows.filter(it=>it.state==="error").length) || 0,
+      matched:Number(d.summary?.matched ?? rows.filter(it=>it.state==="matched").length) || 0,
+    });
   },[brands]);
   useEffect(()=>{ load(); },[load]);
   useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); setCad(d.overrides?.CAD??""); }); },[]);
@@ -759,8 +768,9 @@ function Review({admin}) {
     if(!admin) return toast("Admin only","err");
     if(!brands.length) return toast("Select at least one brand up top first","err");
     const pushItems=onlyMismatch?items.filter(it=>it.state==="mismatch"):items;
-    if(!pushItems.length) return toast(onlyMismatch?"No mismatched rows to push":"Nothing to push","err");
-    if(!confirm(`Archive ${pushItems.length} ${onlyMismatch?"MISMATCHED ":""}row(s) to History and push the price to Shopify now, for ${brands.length===1?brands[0]:brands.length+" selected brands"}?`)) return;
+    const pushCount=onlyMismatch?(Number(summary.mismatch) || pushItems.length):queueTotal;
+    if(!pushCount) return toast(onlyMismatch?"No mismatched rows to push":"Nothing to push","err");
+    if(!confirm(`Archive ${fmtInt(pushCount)} ${onlyMismatch?"MISMATCHED ":""}row(s) to History and push the price to Shopify now, for ${brands.length===1?brands[0]:brands.length+" selected brands"}?`)) return;
     setPushBusy(true);
     const overrides=pushItems.filter(it=>it._amt).map(it=>({id:it.id,price_amount:it._amt,price_currency:it._cur}));
     const r=await aj("/api/review/push_brand",{brands,markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",overrides,only_mismatch:onlyMismatch});
@@ -772,9 +782,9 @@ function Review({admin}) {
   };
   const cleanAll=async()=>{
     if(!admin) return toast("Admin only","err");
-    if(!items.length) return toast("Nothing to clean","err");
+    if(!queueTotal) return toast("Nothing to clean","err");
     const scope=brands.length?(brands.length===1?brands[0]:`${brands.length} selected brands`):"ALL brands";
-    if(!confirm(`Clear all ${items.length} product(s) shown below (${scope}) from the Review queue?\n\nThey stay in the database with their prices untouched — this only hides them from Review.`)) return;
+    if(!confirm(`Clear all ${fmtInt(queueTotal)} product(s) shown below (${scope}) from the Review queue?\n\nThey stay in the database with their prices untouched — this only hides them from Review.`)) return;
     setCleanBusy(true);
     setItems([]);
     const r=await aj("/api/review/hide_all",{brands});
@@ -789,8 +799,9 @@ function Review({admin}) {
       extraLeft={<button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
 
     {/* State filter strip — view-only, narrows the table to one state */}
-    {(()=>{const c={matched:0,mismatch:0,error:0}; items.forEach(it=>{ if(c[it.state]!=null) c[it.state]++; });
-      const F=[["all","All",items.length],["mismatch","Mismatch",c.mismatch],["error","Error",c.error],["matched","Matched",c.matched]];
+    {(()=>{let c={matched:0,mismatch:0,error:0}; items.forEach(it=>{ if(c[it.state]!=null) c[it.state]++; });
+      c={matched:summary.matched??c.matched,mismatch:summary.mismatch??c.mismatch,error:summary.error??c.error};
+      const F=[["all","All",queueTotal],["mismatch","Mismatch",c.mismatch],["error","Error",c.error],["matched","Matched",c.matched]];
       return <div className="card" style={{padding:"10px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
         <span className="lbl">Filter</span>
         <div className="pill-group">
@@ -850,7 +861,7 @@ function Review({admin}) {
 
     {/* Footer: combined archive + push (scoped to brand(s) up top), and a master "hide from Review" for the current view */}
     <div style={{marginTop:12,flexShrink:0,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-      {(()=>{const mmCount=items.filter(it=>it.state==="mismatch").length; const pushCount=onlyMismatch?mmCount:items.length; return <>
+      {(()=>{const mmCount=Number(summary.mismatch ?? items.filter(it=>it.state==="mismatch").length) || 0; const pushCount=onlyMismatch?mmCount:queueTotal; return <>
       <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!pushCount||!brands.length}
         title={brands.length?(onlyMismatch?"Pushes only price-mismatch rows":undefined):"Select at least one brand up top before pushing — never runs across every brand at once"}>
         <Icon n="share" s={14}/>{pushBusy?"Starting…":`Push and update price (${pushCount})`}
@@ -860,9 +871,9 @@ function Review({admin}) {
         Only mismatched{onlyMismatch?` (${mmCount})`:""}
       </label>
       </>;})()}
-      <button className="btn btn-danger" onClick={cleanAll} disabled={!admin||cleanBusy||!items.length}
+      <button className="btn btn-danger" onClick={cleanAll} disabled={!admin||cleanBusy||!queueTotal}
         title="Hide every product currently shown below from Review — nothing is deleted from the database">
-        <Icon n="trash" s={14}/>{cleanBusy?"Cleaning…":`Master Clean (${items.length})`}
+        <Icon n="trash" s={14}/>{cleanBusy?"Cleaning…":`Master Clean (${fmtInt(queueTotal)})`}
       </button>
       <button className="btn btn-ghost" onClick={retryErrors} disabled={!admin||retryBusy||!items.some(it=>it.state==="error")}
         title="Re-fetch a fresh live price for every FAIL row currently shown below">
