@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "rewrites": [
+    {
+      "//": "Proxy every API call to the Render backend so the browser stays same-origin (keeps the session cookie working — the client uses relative /api paths and no CORS). REPLACE the host below with your Node service's Render URL.",
+      "source": "/api/:path*",
+      "destination": "https://YOUR-RENDER-BACKEND.onrender.com/api/:path*"
+    },
+    {
+      "//": "SPA fallback: serve the app shell for any non-file, non-API route.",
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
