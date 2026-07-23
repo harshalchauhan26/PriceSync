@@ -547,6 +547,12 @@ const DEFAULT_LOCAL_ONLY_BRANDS = new Set([
   // ₹34,000 lehenga came back as $375 -> mismatch), while an India IP serves the
   // correct INR. No relay/proxy fixes the number itself, so fetch it locally.
   "labelanushree.com",
+  // Shopify Markets geo-pricing inflates the .js variant JSON by a duty/landed-
+  // cost multiplier (~1.23-1.25x) for non-India request IPs, still labelled
+  // INR — every one of 44 rows fetched from the cloud (Singapore) came back
+  // mismatched at that ratio while a same-day India-IP fetch matched base
+  // exactly. No query param/header override worked; fetch it locally.
+  "mymoledro.com",
 ]);
 let _localOnlyCache = { at: 0, set: null };
 export async function localOnlyBrandSet() {
@@ -572,7 +578,7 @@ export async function setLocalOnlyBrands(list) {
 // These are skipped on cloud runs REGARDLESS of the relay and refreshed solely
 // from a local run (run-label-local.mjs / run-local-only.mjs). Superset-safe:
 // they're also in local-only, so local runs still fetch them.
-const DEFAULT_CLOUD_SKIP_BRANDS = new Set(["labelanushree.com"]);
+const DEFAULT_CLOUD_SKIP_BRANDS = new Set(["labelanushree.com", "mymoledro.com"]);
 let _cloudSkipCache = { at: 0, set: null };
 export async function cloudSkipBrandSet() {
   if (_cloudSkipCache.set && Date.now() - _cloudSkipCache.at < 30_000) return _cloudSkipCache.set;

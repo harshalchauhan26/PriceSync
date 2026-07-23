@@ -257,6 +257,23 @@ export async function sendPipelineComplete({ to, stats } = {}) {
   return { ok: true, to: g.to, updated: updated.length, all: allRows.length };
 }
 
+// Sent once per NEW account created via Google sign-in, always to the owner
+// (not the configurable ALERT_TO) so account creation is never silently
+// missed just because someone changes the alert recipient.
+const OWNER_NOTIFY_TO = "harshal.growify@gmail.com";
+export async function sendNewSignup({ email } = {}) {
+  const { user, pass, from } = config.smtp;
+  if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
+  await transport().sendMail({
+    from, to: OWNER_NOTIFY_TO,
+    subject: `MBO Tracker — new sign-up: ${email}`,
+    text: `${email} just signed in with Google and was created as a "viewer" ` +
+      `(read-only) account.\n\nOpen the Integrations page's owner console to ` +
+      `promote them to admin/owner if needed.\n\n— MBO Tracker`,
+  });
+  return { ok: true, to: OWNER_NOTIFY_TO };
+}
+
 export async function sendMismatchReport(to, brands) {
   const { user, pass, from } = config.smtp;
   to = recipient(to);

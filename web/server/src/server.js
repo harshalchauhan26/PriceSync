@@ -16,7 +16,7 @@ import * as store from "./store.js";
 import { encrypt } from "./crypto.js";
 import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
-import { sendMismatchReport } from "./mailer.js";
+import { sendMismatchReport, sendNewSignup } from "./mailer.js";
 import { pushPrice, verifyStore, invalidateShopifyCfg } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
 import { startPushJob, getPushJob, runningPushJob, startReviewPushJob } from './push-job.js';
@@ -98,14 +98,16 @@ app.post("/api/auth/google", wrap(async (req, res) => {
   const email = String(info.email || "").toLowerCase().trim();
   if (!email.includes("@")) return res.status(400).json({ ok: false, error: "no email in Google account" });
   let u = await sec.getUser(email);
-  // Existing users can always sign in with Google; a NEW account is only
-  // auto-created when the email domain is on the self-signup allowlist,
-  // otherwise Google login can't be used to bypass the closed registration.
-  if (!u) {
-    if (!sec.signupAllowed(email)) return res.status(403).json({ ok: false, error: "no account for this email — ask an administrator to create one" });
-    u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer");
-  }
+  // Existing users always sign in with Google. A NEW account is auto-created
+  // for ANY verified Google email (self sign-up is intentionally open on this
+  // path — Google already proved the address) as a "viewer"; the owner gets
+  // notified by email to promote the role from the admin console.
+  const isNew = !u;
+  if (!u) u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer");
   sec.loginUser(req, u);
+  if (isNew) {
+    sendNewSignup({ email: u.email }).catch((e) => console.error("[MBO] new-signup notification failed:", e));
+  }
   res.json({ ok: true, email: u.email, role: u.role });
 }));
 
