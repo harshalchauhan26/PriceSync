@@ -96,6 +96,19 @@ test("redirectedOffProduct catches removed products that 302 off the slug", () =
   assert.equal(redirectedOffProduct(requested, onProduct), false);
 });
 
+test("INCIDENT: a regional-subdomain redirect (us.brand.com -> www.brand.com) is still same-site, so an off-product bounce is caught", () => {
+  // anitadongre.com 2026-07-23: us.anitadongre.com/<slug>.html 302s to the bare
+  // www.anitadongre.com homepage on removed products. bare-domain comparison
+  // used to only strip a literal "www." prefix, so "us.anitadongre.com" never
+  // matched "www.anitadongre.com" and the guard silently let it extract the
+  // homepage's price instead of flagging "redirected off product page".
+  const requested = "https://us.brand.com/products/my-kurta";
+  const offProduct = { headers: {}, request: { res: { responseUrl: "https://www.brand.com/" } } };
+  const onProduct = { headers: {}, request: { res: { responseUrl: "https://us.brand.com/category/my-kurta" } } };
+  assert.equal(redirectedOffProduct(requested, offProduct), true);
+  assert.equal(redirectedOffProduct(requested, onProduct), false);
+});
+
 test("withCurrencyParam / wooApiUrl build URLs correctly", () => {
   assert.equal(withCurrencyParam("https://x.com/p", "wmc-currency", "USD"), "https://x.com/p?wmc-currency=USD");
   assert.equal(withCurrencyParam("https://x.com/p", "wmc-currency", null), "https://x.com/p");

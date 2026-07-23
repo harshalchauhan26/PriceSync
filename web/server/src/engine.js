@@ -233,6 +233,11 @@ export function extractPriceFromHtml(html, customRegex = null, preferHigh = fals
 // all storing the same 6,520 USD category-tile price). If the response landed
 // on a URL that no longer carries the requested product's slug, refuse to
 // extract — the row must surface as "product unavailable", never as a price.
+// Apex domain (last two labels) — "us.anitadongre.com" and "www.anitadongre.com"
+// both reduce to "anitadongre.com" so a regional-subdomain redirect is still
+// recognized as the same site, not exempted from the off-product check below.
+const apexDomain = (h) => { const p = String(h || "").split("."); return p.length > 2 ? p.slice(-2).join(".") : p.join("."); };
+
 export function redirectedOffProduct(requestedUrl, resp) {
   try {
     const req = new URL(requestedUrl);
@@ -244,8 +249,7 @@ export function redirectedOffProduct(requestedUrl, resp) {
     const finalUrl = relayFinal || resp.request?.res?.responseUrl;
     if (!finalUrl) return false;
     const fin = new URL(finalUrl);
-    const bare = req.host.replace(/^www\./, "");
-    if (!relayFinal && fin.host !== req.host && !fin.host.endsWith(bare)) return false;
+    if (!relayFinal && fin.host !== req.host && apexDomain(fin.host) !== apexDomain(req.host)) return false;
     return !decodeURIComponent(fin.pathname + fin.search).toLowerCase().includes(slug);
   } catch { return false; }
 }
