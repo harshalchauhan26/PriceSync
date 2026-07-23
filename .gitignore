@@ -33,3 +33,4 @@ web/server/uploads/
 web/client/dist/
 dist/
 .vite/
+web/local-relay/bin/
