@@ -17,14 +17,28 @@ export const config = {
   fetchRelayUrl: (e.FETCH_RELAY_URL || "").trim().replace(/\/+$/, ""),
   fetchRelaySecret: (e.FETCH_RELAY_SECRET || "").trim(),
   googleClientId: (e.GOOGLE_CLIENT_ID || "").trim(),
-  // Bootstraps the platform SUPER-ADMIN account (mbo_id NULL) — not a
-  // tenant owner. Self-serve signup is closed platform-wide (onboarding is
-  // admin-provisioned only via scripts/create-tenant.mjs), so there is no
-  // allowlist-domain setting anymore.
+  // Legacy/back-compat only — no longer used to seed anything (see
+  // superAdminEmail below). Kept so an old .env with these set doesn't
+  // throw on a missing key.
   adminEmail: (e.ADMIN_EMAIL || "admin@pricesync.local").toLowerCase(),
   adminPassword: e.ADMIN_PASSWORD || "admin",
-  // When "1", seedSuperAdmin resets an EXISTING super-admin's password to ADMIN_PASSWORD
-  // on boot (a clean, deliberate rotation). Unset it again afterwards.
+  // Bootstraps the platform SUPER-ADMIN account (mbo_id NULL, cross-tenant
+  // support role) — deliberately a SEPARATE env var from ADMIN_EMAIL/
+  // ADMIN_PASSWORD (which used to seed a tenant owner pre-multi-tenancy).
+  // BLANK (default) = no super-admin seeding at boot at all — this must
+  // never silently repurpose an existing tenant-owner login. Incident
+  // 2026-07-23: seeding used ADMIN_EMAIL, which was still the user's daily
+  // owner login for Tenant 1; ensureUsers()'s per-boot backfill kept
+  // re-assigning it back to a tenant, and seedSuperAdmin kept converting it
+  // back to super_admin — flapping between roles on every restart and
+  // breaking the client (which has no super_admin UI). Set BOTH vars only
+  // for a NEW, dedicated support email, never an email you also use as a
+  // tenant's owner.
+  superAdminEmail: (e.SUPERADMIN_EMAIL || "").trim().toLowerCase(),
+  superAdminPassword: e.SUPERADMIN_PASSWORD || "",
+  // When "1", seedSuperAdmin resets an EXISTING super-admin's password to
+  // SUPERADMIN_PASSWORD on boot (a clean, deliberate rotation). Unset it
+  // again afterwards.
   seedOwnerResetPassword: e.SEED_OWNER_RESET_PASSWORD === "1",
   maxUploadMb: Math.max(1, parseInt(e.MAX_UPLOAD_MB || "16", 10) || 16),
   host: e.NODE_HOST || ((e.PORT && !e.NODE_PORT) || e.HOST === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1"),

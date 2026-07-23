@@ -29,10 +29,22 @@ services:
       - key: SECRET_KEY
         sync: false              # long random hex — signs sessions + encrypts the Shopify token.
                                  # MUST stay identical across redeploys or the saved token won't decrypt.
+      # ADMIN_EMAIL/ADMIN_PASSWORD are legacy/unused — do NOT repurpose them
+      # for the super-admin bootstrap below (see the 2026-07-23 incident note
+      # in config.js: sharing that email with a real tenant-owner login
+      # caused it to flap between roles on every restart).
       - key: ADMIN_EMAIL
-        sync: false              # bootstraps the PLATFORM SUPER-ADMIN (cross-tenant support role), not a tenant owner
+        sync: false
       - key: ADMIN_PASSWORD
-        sync: false              # strong password
+        sync: false
+      # --- platform super-admin (cross-tenant support role) — OPTIONAL, leave
+      # both blank/unset to disable seeding entirely (the safe default). If
+      # you do want one, use a NEW email you don't also log in with as a
+      # tenant owner. ---
+      - key: SUPERADMIN_EMAIL
+        sync: false
+      - key: SUPERADMIN_PASSWORD
+        sync: false
       # --- self-registration is closed platform-wide: MBOs (tenants) are provisioned
       # via `node scripts/create-tenant.mjs`; users within a tenant are created from
       # that tenant's own owner console. ---

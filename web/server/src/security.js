@@ -42,7 +42,11 @@ export async function ensureUsers() {
   // data); mbo_id stays nullable here — NULL is reserved for the platform
   // super-admin account(s), not used by the backfill below.
   await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)`);
-  await q(`UPDATE users SET mbo_id=1 WHERE mbo_id IS NULL`);
+  // This runs on EVERY boot (same pattern as initStore's SCHEMA array), so
+  // it must never re-assign an already-converted super_admin back to a
+  // tenant — that clobbered the super-admin conversion back to mbo_id=1 on
+  // every restart until this exclusion was added (2026-07-23 incident).
+  await q(`UPDATE users SET mbo_id=1 WHERE mbo_id IS NULL AND role <> 'super_admin'`);
 }
 // Global-by-email lookup — deliberately NOT tenant-scoped. Used for login,
 // where the tenant isn't known yet (that's exactly what this discovers).

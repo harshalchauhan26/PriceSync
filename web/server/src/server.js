@@ -845,11 +845,14 @@ pipe.setDefault('data_source', 'database');
 // one via /api/fx/override — fx.js's getOverrides()/rates() handle a tenant
 // with no Map entry gracefully (empty overrides).
 setOverrides(1, { USD: await store.getMeta(1, 'fx_override_usd'), CAD: await store.getMeta(1, 'fx_override_cad') });
-// The ADMIN_EMAIL/ADMIN_PASSWORD bootstrap account is now the PLATFORM
-// super-admin (mbo_id NULL), not a tenant owner — Tenant #1's real owner
-// logins are its existing `users` rows (mbo_id=1), untouched by this call.
-const seeded = await sec.seedSuperAdmin(config.adminEmail, config.adminPassword);
-if (seeded) console.log("[MBO] Super-admin:", seeded);
+// Super-admin seeding is opt-in and uses a SEPARATE email from any tenant
+// owner (see config.js's superAdminEmail comment for the 2026-07-23
+// incident this fixes) — blank (default) means no seeding happens at all,
+// so an existing tenant-owner login is never silently repurposed.
+if (config.superAdminEmail && config.superAdminPassword) {
+  const seeded = await sec.seedSuperAdmin(config.superAdminEmail, config.superAdminPassword);
+  if (seeded) console.log("[MBO] Super-admin:", seeded);
+}
 const server = app.listen(config.port, config.host,
   () => console.log(`[MBO] http://${config.host}:${config.port}`));
 server.on('error', (error) => {
