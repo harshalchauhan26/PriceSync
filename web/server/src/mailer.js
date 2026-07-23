@@ -6,30 +6,30 @@ import { config } from "./config.js";
 const COLS = ["brand", "url", "base_price", "live_price", "currency", "status", "state",
   "delta", "decision", "final_price"];
 
-async function stateRows(states, brands) {
-  const p = [...states];
-  let where = `state IN (${states.map((_, i) => `$${i + 1}`).join(",")})`;
+async function stateRows(mboId, states, brands) {
+  const p = [mboId, ...states];
+  let where = `mbo_id=$1 AND state IN (${states.map((_, i) => `$${i + 2}`).join(",")})`;
   if (brands && brands.length) {
-    where += ` AND brand IN (${brands.map((_, i) => `$${i + 1 + states.length}`).join(",")})`;
+    where += ` AND brand IN (${brands.map((_, i) => `$${i + 2 + states.length}`).join(",")})`;
     p.push(...brands);
   }
   return q(`SELECT brand,url,base_price,live_price,currency,status,state,delta,
     decision,final_price FROM products WHERE ${where}
     ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, p);
 }
-const mismatchRows = (brands) => stateRows(["mismatch"], brands);
+const mismatchRows = (mboId, brands) => stateRows(mboId, ["mismatch"], brands);
 
-async function alertRows(threshold = 5) {
+async function alertRows(mboId, threshold = 5) {
   try {
     return await q(`SELECT brand,url,prev,live_price,
         ROUND(((live_price-prev)/prev*100)::numeric,2) AS pct
       FROM ( SELECT brand,url,live_price,
           LAG(live_price) OVER (PARTITION BY key ORDER BY created_at) AS prev,
           ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) AS rn
-        FROM price_history WHERE live_price IS NOT NULL) t
+        FROM price_history WHERE mbo_id=$1 AND live_price IS NOT NULL) t
       WHERE rn=1 AND prev IS NOT NULL AND prev<>0
-        AND ABS((live_price-prev)/prev*100) >= $1
-      ORDER BY brand, ABS((live_price-prev)/prev*100) DESC LIMIT 1000`, [Math.abs(threshold)]);
+        AND ABS((live_price-prev)/prev*100) >= $2
+      ORDER BY brand, ABS((live_price-prev)/prev*100) DESC LIMIT 1000`, [mboId, Math.abs(threshold)]);
   } catch { return []; }
 }
 
@@ -168,13 +168,13 @@ export async function sendPipelineProgress({ to, done, total } = {}) {
 }
 
 // Sent after the safe-retry pass — how many fetch errors recovered vs remain.
-export async function sendErrorsResolved({ to, stats } = {}) {
+export async function sendErrorsResolved({ mboId, to, stats } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
   const total = stats?.retry_total ?? 0;
   const recovered = stats?.retry_recovered ?? 0;
   const remaining = Math.max(0, total - recovered);
-  const rows = await stateRows(["error"]);
+  const rows = await stateRows(mboId, ["error"]);
   const wb = new ExcelJS.Workbook();
   flatSheet(wb, "Remaining Errors", [
     { key: "brand", header: "brand" }, { key: "url", header: "url" },
@@ -200,19 +200,19 @@ export async function sendErrorsResolved({ to, stats } = {}) {
 //      (approved in Review and confirmed updated) = "latest price updates".
 //   2. price_fetch_all — every product the pipeline holds, with a state column
 //      (matched / mismatch / error) so it filters in Excel = "latest fetch".
-export async function sendPipelineComplete({ to, stats } = {}) {
+export async function sendPipelineComplete({ mboId, to, stats } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
 
   const updated = await q(
     `SELECT brand, url, base_price, final_price, currency, status, shopify_status, approved_at
        FROM review_history
-      WHERE (shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')
+      WHERE mbo_id=$1 AND (shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')
         AND approved_at >= now() - interval '24 hours'
-      ORDER BY approved_at DESC`).catch(() => []);
+      ORDER BY approved_at DESC`, [mboId]).catch(() => []);
   const allRows = await q(
     `SELECT brand, url, base_price, live_price, currency, state, status, delta
-       FROM products ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`).catch(() => []);
+       FROM products WHERE mbo_id=$1 ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, [mboId]).catch(() => []);
 
   const wbUpdated = new ExcelJS.Workbook();
   flatSheet(wbUpdated, "Price Updates", [
@@ -274,12 +274,12 @@ export async function sendNewSignup({ email } = {}) {
   return { ok: true, to: OWNER_NOTIFY_TO };
 }
 
-export async function sendMismatchReport(to, brands) {
+export async function sendMismatchReport(mboId, to, brands) {
   const { user, pass, from } = config.smtp;
   to = recipient(to);
   if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
   if (!to) return { ok: false, error: "no recipient (ALERT_TO)" };
-  const rows = await mismatchRows(brands);
+  const rows = await mismatchRows(mboId, brands);
   const wb = buildWorkbook(rows, []);
   const today = new Date().toISOString().slice(0, 10);
   const scope = brands && brands.length ? ` for ${brands.length} brand(s)` : "";
@@ -295,12 +295,12 @@ export async function sendMismatchReport(to, brands) {
 
 // Always sends after a pipeline run (any number of products). Attaches a
 // per-brand workbook covering mismatches AND fetch errors when any exist.
-export async function sendPipelineReport({ to, threshold = 5, stats = null } = {}) {
+export async function sendPipelineReport({ mboId, to, threshold = 5, stats = null } = {}) {
   const { user, pass, from } = config.smtp;
   to = recipient(to);
   if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
   if (!to) return { ok: false, error: "no recipient (ALERT_TO)" };
-  const [rows, alerts] = await Promise.all([stateRows(["mismatch", "error"]), alertRows(threshold)]);
+  const [rows, alerts] = await Promise.all([stateRows(mboId, ["mismatch", "error"]), alertRows(mboId, threshold)]);
   const mism = rows.filter((r) => r.state === "mismatch").length;
   const errs = rows.filter((r) => r.state === "error").length;
   const today = new Date().toISOString().slice(0, 10);

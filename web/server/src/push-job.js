@@ -1,10 +1,12 @@
-import { q } from "./db.js";
+import { withTenant } from "./db.js";
 import { pushRowPrice } from "./price-update.js";
 import { clearBuckets, promoteLiveToBase } from "./store.js";
 
-// Batched Shopify push with live progress. One job at a time; batches of 10
-// run in order, items inside a batch run concurrently. Pushes go over the
-// GraphQL Admin API (2 calls per product, cost-aware throttle retry in gql()).
+// Batched Shopify push with live progress. One job at a time PER TENANT
+// (jobs carry mbo_id so one tenant's bulk push can never block or leak
+// progress into another tenant's). Batches of 10 run in order, items inside
+// a batch run concurrently. Pushes go over the GraphQL Admin API (2 calls
+// per product, cost-aware throttle retry in shopify.js's gql()).
 const BATCH_SIZE = 10;
 const BATCH_CONCURRENCY = 5;
 const KEEP_JOBS = 5;
@@ -28,21 +30,26 @@ function publicJob(job) {
   };
 }
 
-export function getPushJob(id) {
-  if (id) return publicJob(jobs.get(id));
+// Tenant-scoped: a job belonging to a different mbo_id is invisible here —
+// one tenant can never poll or observe another tenant's push progress/URLs.
+export function getPushJob(mboId, id) {
+  if (id) {
+    const j = jobs.get(id);
+    return j && j.mbo_id === mboId ? publicJob(j) : null;
+  }
   let latest = null;
-  for (const j of jobs.values()) latest = j;
+  for (const j of jobs.values()) if (j.mbo_id === mboId) latest = j;
   return publicJob(latest);
 }
 
-export function runningPushJob() {
-  for (const j of jobs.values()) if (j.state === "running") return publicJob(j);
+export function runningPushJob(mboId) {
+  for (const j of jobs.values()) if (j.mbo_id === mboId && j.state === "running") return publicJob(j);
   return null;
 }
 
 // rows: review_history rows (id, key, brand, url, mbo_url, final_price).
-export function startPushJob(rows, label) {
-  const running = runningPushJob();
+export function startPushJob(mboId, rows, label) {
+  const running = runningPushJob(mboId);
   if (running) return { ok: false, error: "a Shopify push is already running", job: running };
   const batches = [];
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
@@ -56,7 +63,7 @@ export function startPushJob(rows, label) {
     });
   }
   const job = {
-    id: `push-${Date.now().toString(36)}-${++seq}`, label,
+    id: `push-${Date.now().toString(36)}-${++seq}`, label, mbo_id: mboId,
     state: rows.length ? "running" : "done", error: null,
     total: rows.length, done: 0, ok: 0, fail: 0,
     started_at: new Date().toISOString(),
@@ -64,22 +71,30 @@ export function startPushJob(rows, label) {
     batches,
   };
   jobs.set(job.id, job);
-  for (const key of jobs.keys()) {
-    if (jobs.size <= KEEP_JOBS || key === job.id) break;
-    jobs.delete(key);
-  }
-  if (rows.length) runJob(job).catch((e) => {
+  pruneOldJobs(mboId, job.id);
+  if (rows.length) runJob(mboId, job).catch((e) => {
     job.error = e.message; job.state = "done"; job.finished_at = new Date().toISOString();
     console.error("[MBO] push job", job.id, "crashed:", e);
   });
   return { ok: true, job: publicJob(job) };
 }
 
-async function pushOne(job, batch, item) {
+// Keeps at most KEEP_JOBS per tenant (not globally) — otherwise one very
+// active tenant could evict another tenant's recent job history.
+function pruneOldJobs(mboId, keepId) {
+  const tenantJobIds = [...jobs.entries()].filter(([, j]) => j.mbo_id === mboId).map(([id]) => id);
+  while (tenantJobIds.length > KEEP_JOBS) {
+    const oldest = tenantJobIds.shift();
+    if (oldest === keepId) continue;
+    jobs.delete(oldest);
+  }
+}
+
+async function pushOne(mboId, job, batch, item) {
   item.status = "pushing";
   let result;
   try {
-    result = await pushRowPrice(item._row, item.price, { queued: false });
+    result = await pushRowPrice(mboId, item._row, item.price, { queued: false });
   } catch (e) {
     result = { ok: false, status: "push error: " + e.message };
   }
@@ -89,22 +104,28 @@ async function pushOne(job, batch, item) {
   job.done++;
   const at = new Date().toISOString();
   try {
-    await Promise.all([
-      q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
-        [result.status, at, item.id]),
-      item.key ? q("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE key=$3",
-        [result.status, at, item.key]) : null,
-    ]);
-    if (result.ok && item.key) { await promoteLiveToBase(q, item._row); await clearBuckets(q, item.key); }
+    await withTenant(mboId, async (db) => {
+      await Promise.all([
+        db.client.query("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE mbo_id=$3 AND id=$4",
+          [result.status, at, mboId, item.id]),
+        item.key ? db.client.query("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE mbo_id=$3 AND key=$4",
+          [result.status, at, mboId, item.key]) : null,
+      ]);
+      if (result.ok && item.key) {
+        const run = (sql, params) => db.client.query(sql, params).then((r) => r.rows);
+        await promoteLiveToBase(mboId, run, item._row);
+        await clearBuckets(mboId, run, item.key);
+      }
+    });
   } catch (e) { console.error("[MBO] push job status write:", e.message); }
 }
 
-async function runJob(job) {
+async function runJob(mboId, job) {
   for (const batch of job.batches) {
     batch.status = "running";
     const queue = [...batch.items];
     await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, queue.length) },
-      async () => { for (let item = queue.shift(); item; item = queue.shift()) await pushOne(job, batch, item); }));
+      async () => { for (let item = queue.shift(); item; item = queue.shift()) await pushOne(mboId, job, batch, item); }));
     batch.status = "done";
   }
   job.state = "done";
@@ -116,8 +137,8 @@ async function runJob(job) {
 // (approveOne, in its own transaction) and returns {final, archived} — then
 // this pushes the freshly-archived row, same batching/progress shape as
 // startPushJob so the client can reuse the exact same progress panel.
-export function startReviewPushJob(rows, archiveFn, label) {
-  const running = runningPushJob();
+export function startReviewPushJob(mboId, rows, archiveFn, label) {
+  const running = runningPushJob(mboId);
   if (running) return { ok: false, error: "a Shopify push is already running", job: running };
   const batches = [];
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
@@ -131,7 +152,7 @@ export function startReviewPushJob(rows, archiveFn, label) {
     });
   }
   const job = {
-    id: `rpush-${Date.now().toString(36)}-${++seq}`, label,
+    id: `rpush-${Date.now().toString(36)}-${++seq}`, label, mbo_id: mboId,
     state: rows.length ? "running" : "done", error: null,
     total: rows.length, done: 0, ok: 0, fail: 0,
     started_at: new Date().toISOString(),
@@ -139,25 +160,22 @@ export function startReviewPushJob(rows, archiveFn, label) {
     batches,
   };
   jobs.set(job.id, job);
-  for (const key of jobs.keys()) {
-    if (jobs.size <= KEEP_JOBS || key === job.id) break;
-    jobs.delete(key);
-  }
-  if (rows.length) runReviewJob(job, archiveFn).catch((e) => {
+  pruneOldJobs(mboId, job.id);
+  if (rows.length) runReviewJob(mboId, job, archiveFn).catch((e) => {
     job.error = e.message; job.state = "done"; job.finished_at = new Date().toISOString();
     console.error("[MBO] review-push job", job.id, "crashed:", e);
   });
   return { ok: true, job: publicJob(job) };
 }
 
-async function pushWithArchive(job, batch, item, archiveFn) {
+async function pushWithArchive(mboId, job, batch, item, archiveFn) {
   item.status = "pushing";
   let result, archived;
   try {
     const arch = await archiveFn(item._row);
     archived = arch.archived;
     item.price = arch.final;
-    result = await pushRowPrice(archived, arch.final);
+    result = await pushRowPrice(mboId, archived, arch.final);
   } catch (e) {
     result = { ok: false, status: "error: " + e.message };
   }
@@ -167,22 +185,28 @@ async function pushWithArchive(job, batch, item, archiveFn) {
   job.done++;
   const at = new Date().toISOString();
   try {
-    await Promise.all([
-      archived ? q("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE id=$3",
-        [result.status, at, archived.id]) : null,
-      item.key ? q("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE key=$3",
-        [result.status, at, item.key]) : null,
-    ]);
-    if (result.ok && item.key) { await promoteLiveToBase(q, item._row); await clearBuckets(q, item.key); }
+    await withTenant(mboId, async (db) => {
+      await Promise.all([
+        archived ? db.client.query("UPDATE review_history SET shopify_status=$1,shopify_at=$2 WHERE mbo_id=$3 AND id=$4",
+          [result.status, at, mboId, archived.id]) : null,
+        item.key ? db.client.query("UPDATE products SET shopify_status=$1,shopify_at=$2 WHERE mbo_id=$3 AND key=$4",
+          [result.status, at, mboId, item.key]) : null,
+      ]);
+      if (result.ok && item.key) {
+        const run = (sql, params) => db.client.query(sql, params).then((r) => r.rows);
+        await promoteLiveToBase(mboId, run, item._row);
+        await clearBuckets(mboId, run, item.key);
+      }
+    });
   } catch (e) { console.error("[MBO] review push job status write:", e.message); }
 }
 
-async function runReviewJob(job, archiveFn) {
+async function runReviewJob(mboId, job, archiveFn) {
   for (const batch of job.batches) {
     batch.status = "running";
     const queue = [...batch.items];
     await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, queue.length) },
-      async () => { for (let item = queue.shift(); item; item = queue.shift()) await pushWithArchive(job, batch, item, archiveFn); }));
+      async () => { for (let item = queue.shift(); item; item = queue.shift()) await pushWithArchive(mboId, job, batch, item, archiveFn); }));
     batch.status = "done";
   }
   job.state = "done";

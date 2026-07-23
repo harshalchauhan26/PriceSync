@@ -22,20 +22,27 @@ function productRefOf(url) {
 }
 // The integration row rarely changes but was re-read from the DB (a remote
 // round-trip) for every single push — cache it and invalidate on save.
-let _cfgCache = { at: 0, val: null };
-export function invalidateShopifyCfg() { _cfgCache = { at: 0, val: null }; }
-async function cfg() {
-  if (_cfgCache.val && Date.now() - _cfgCache.at < 30000) return _cfgCache.val;
-  const c = await getStoreIntegration();
+// Keyed by mboId: one tenant's cached Shopify credentials must never be
+// served to another tenant's push.
+const _cfgCache = new Map();
+export function invalidateShopifyCfg(mboId) { _cfgCache.delete(mboId); }
+async function cfg(mboId) {
+  const cached = _cfgCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30000) return cached.val;
+  const c = await getStoreIntegration(mboId);
   const val = c ? { ...c, access_token: decrypt(c.access_token) } : null;
-  _cfgCache = { at: Date.now(), val };
+  _cfgCache.set(mboId, { at: Date.now(), val });
   return val;
 }
 
-let _pushChain = Promise.resolve();
-function enqueuePush(task) {
-  const run = _pushChain.then(task, task);
-  _pushChain = run.then(() => {}, () => {});
+// One serial push queue per tenant — otherwise tenant A's bulk push would
+// rate-limit-pace tenant B's push against a completely different Shopify
+// store, which is both wrong and needlessly slow.
+const _pushChains = new Map();
+function enqueuePush(mboId, task) {
+  const prior = _pushChains.get(mboId) || Promise.resolve();
+  const run = prior.then(task, task);
+  _pushChains.set(mboId, run.then(() => {}, () => {}));
   return run;
 }
 
@@ -76,15 +83,15 @@ async function gql(endpoint, headers, query, variables) {
 }
 const gidNum = (gid) => String(gid || "").split("/").pop();
 
-export function pushPrice(url, price) {
-  return enqueuePush(() => _pushPrice(url, price));
+export function pushPrice(mboId, url, price) {
+  return enqueuePush(mboId, () => _pushPrice(mboId, url, price));
 }
 // Unqueued variant for the batch push job, which manages its own concurrency.
-export function pushPriceNow(url, price) {
-  return _pushPrice(url, price);
+export function pushPriceNow(mboId, url, price) {
+  return _pushPrice(mboId, url, price);
 }
-async function _pushPrice(url, price) {
-  const c = await cfg();
+async function _pushPrice(mboId, url, price) {
+  const c = await cfg(mboId);
   if (!c || !c.shop_domain || !c.access_token) return {
     ok: false, product_url: url, old_price: null, new_price: price,
     update_status: "no Shopify store connected (Integrations)", status: "no Shopify store connected (Integrations)",
@@ -169,8 +176,8 @@ async function _pushPrice(url, price) {
   }
 }
 
-export async function verifyStore() {
-  const c = await cfg();
+export async function verifyStore(mboId) {
+  const c = await cfg(mboId);
   if (!c || !c.shop_domain || !c.access_token) return { ok: false, status: "no store connected" };
   const ver = c.api_version || "2024-10";
   try {

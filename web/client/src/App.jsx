@@ -17,7 +17,7 @@ function Toaster() {
   const [xs, setXs] = useState([]);
   _toast = (text, kind) => { const id = Math.random(); setXs(a=>[...a,{id,text,kind}]); setTimeout(()=>setXs(a=>a.filter(i=>i.id!==id)),3500); };
   return <div style={{ position:"fixed", top:16, right:16, zIndex:9999, display:"flex", flexDirection:"column", gap:8 }}>
-    {xs.map(t=><div key={t.id} className="toastin card2" style={{ padding:"10px 16px", fontSize:12.5, fontWeight:600, border:"1px solid "+(t.kind==="err"?"rgba(239,68,68,.4)":"rgba(34,197,94,.35)"), color: t.kind==="err"?"#ef4444":"#e2e0ee", minWidth:280, maxWidth:380, boxShadow:"0 8px 32px rgba(0,0,0,.6)" }}>{t.text}</div>)}
+    {xs.map(t=><div key={t.id} className="toastin card2" style={{ padding:"10px 16px", fontSize:12.5, fontWeight:600, border:"1px solid "+(t.kind==="err"?"rgba(239,68,68,.4)":"rgba(34,197,94,.35)"), color: t.kind==="err"?"#ef4444":"var(--on)", minWidth:280, maxWidth:380, boxShadow:"0 8px 32px rgba(0,0,0,.18)" }}>{t.text}</div>)}
   </div>;
 }
 const toast = (t, k="ok") => _toast(t, k);
@@ -58,8 +58,8 @@ const Icon = ({n,s=15,c="currentColor"}) =>
 /* ─── Toggle ───────────────────────────────────────────────── */
 function Toggle({on, onChange}) {
   return <button onClick={()=>onChange(!on)} className="tog-wrap"
-    style={{ background: on?"#22c55e":"rgba(255,255,255,.08)" }}>
-    <span className="tog-knob" style={{ left: on?20:3, background: on?"#03120a":"#5c5a72" }} />
+    style={{ background: on?"#22c55e":"rgba(0,0,0,.12)" }}>
+    <span className="tog-knob" style={{ left: on?20:3, background: on?"#03120a":"#9995a5" }} />
   </button>;
 }
 
@@ -179,10 +179,10 @@ function ChartBox({type,labels,datasets,options,h=200}) {
     if(!ref.current) return; if(inst.current) inst.current.destroy();
     inst.current=new Chart(ref.current.getContext("2d"),{type,data:{labels,datasets},
       options:Object.assign({responsive:true,maintainAspectRatio:false,animation:false,
-        plugins:{legend:{labels:{color:"#5c5a72",font:{size:10}}}},
+        plugins:{legend:{labels:{color:"#9995a5",font:{size:10}}}},
         scales:(type==="doughnut")?{}:{
-          x:{ticks:{color:"#5c5a72",font:{size:10}},grid:{color:"rgba(255,255,255,.04)"}},
-          y:{ticks:{color:"#5c5a72",font:{size:10}},grid:{color:"rgba(255,255,255,.04)"}}}},options||{})});
+          x:{ticks:{color:"#9995a5",font:{size:10}},grid:{color:"rgba(0,0,0,.05)"}},
+          y:{ticks:{color:"#9995a5",font:{size:10}},grid:{color:"rgba(0,0,0,.05)"}}}},options||{})});
     return()=>inst.current&&inst.current.destroy();
   },[sig,h]);
   return <div style={{height:h}}><canvas ref={ref}/></div>;
@@ -297,7 +297,7 @@ function Home({go, admin}) {
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
       <div className="card" style={{padding:16}}>
         <div className="lbl" style={{marginBottom:12}}>Catalog Status</div>
-        <ChartBox type="doughnut" h={200} labels={["Matched","Mismatch","Error","Pending"]} datasets={[{data:[c.matched,c.mismatch,c.error,c.pending],backgroundColor:["#22c55e","#f59e0b","#ef4444","#27273a"],borderWidth:0}]} options={{plugins:{legend:{position:"bottom"}},cutout:"60%"}}/>
+        <ChartBox type="doughnut" h={200} labels={["Matched","Mismatch","Error","Pending"]} datasets={[{data:[c.matched,c.mismatch,c.error,c.pending],backgroundColor:["#22c55e","#f59e0b","#ef4444","#b8b2a0"],borderWidth:0}]} options={{plugins:{legend:{position:"bottom"}},cutout:"60%"}}/>
       </div>
       <div className="card" style={{padding:16}}>
         <div className="lbl" style={{marginBottom:12}}>Top Vendors by Mismatch</div>

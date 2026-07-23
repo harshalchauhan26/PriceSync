@@ -2,16 +2,16 @@
 
 /* ── Design tokens ─────────────────────────────────────────── */
 :root {
-  --bg:      #0a0a0c;
-  --surface: #0f0f12;
-  --panel:   #13131a;
-  --card:    #16161e;
-  --card2:   #1a1a24;
-  --border:  #2a2a38;
-  --border2: #353548;
-  --on:      #e2e0ee;
-  --on2:     #9b99b4;
-  --on3:     #5c5a72;
+  --bg:      #faf8f3;
+  --surface: #fdfcf9;
+  --panel:   #f1ede3;
+  --card:    #ffffff;
+  --card2:   #f4f1e9;
+  --border:  #e6e0d2;
+  --border2: #d9d1bd;
+  --on:      #2a2733;
+  --on2:     #6b6778;
+  --on3:     #9995a5;
 
   --blue:    #3b82f6;
   --blue2:   #2563eb;
@@ -54,7 +54,7 @@ body {
 
 /* ── Scrollbars ────────────────────────────────────────────── */
 *::-webkit-scrollbar       { width: 5px; height: 5px; }
-*::-webkit-scrollbar-thumb { background: #2a2a38; border-radius: 4px; }
+*::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 *::-webkit-scrollbar-track { background: transparent; }
 
 /* ── Cards / Panels ────────────────────────────────────────── */
@@ -92,10 +92,10 @@ body {
   width: 100%;
   text-align: left;
 }
-.nav-item:hover { background: rgba(255,255,255,.04); color: var(--on); }
+.nav-item:hover { background: rgba(0,0,0,.035); color: var(--on); }
 .nav-item.active {
   background: rgba(59,130,246,.12);
-  color: #fff;
+  color: var(--blue2);
   border-left: 2px solid var(--blue);
 }
 
@@ -234,7 +234,7 @@ body {
   white-space: nowrap;
 }
 .tbl td { padding: 10px 12px; border-top: 1px solid var(--border); vertical-align: middle; }
-.tbl tbody tr:hover td { background: rgba(255,255,255,.02); }
+.tbl tbody tr:hover td { background: rgba(0,0,0,.02); }
 
 /* ── Vendor checkbox list ──────────────────────────────────── */
 .vendor-row {
@@ -247,7 +247,7 @@ body {
   transition: background .1s;
   font-size: 12px;
 }
-.vendor-row:hover { background: rgba(255,255,255,.04); }
+.vendor-row:hover { background: rgba(0,0,0,.035); }
 
 /* ── Upload drop zone ──────────────────────────────────────── */
 .dropzone {
@@ -308,7 +308,7 @@ body {
 }
 .tab.active {
   background: var(--card2);
-  color: #fff;
+  color: var(--on);
   border-color: var(--border2);
 }
 

@@ -157,18 +157,24 @@ test("isPermanentError separates dead links from transient blocks", () => {
   assert.equal(isPermanentError("Price Matched (INR)"), false);
 });
 
+// Tenant #1 — the pre-existing single-tenant production data; FX overrides
+// and native-currency lookups are scoped per-tenant, so tests need a real
+// mboId to key against (native_currency_brands doesn't include
+// labelanushree.com, so this exercises the non-native INR-conversion path).
+const TEST_MBO = 1;
+
 test("pushed baseline uses fetched live price before markup", async () => {
-  setOverrides({ USD: 80 });
-  const next = await liveBaseValue({ brand: "labelanushree.com", live_price: 440, currency: "USD" });
+  setOverrides(TEST_MBO, { USD: 80 });
+  const next = await liveBaseValue(TEST_MBO, { brand: "labelanushree.com", live_price: 440, currency: "USD" });
   assert.equal(next.baseNew, 35200);
   assert.equal(next.baseUsd, 440);
   assert.equal(next.statusLabel, "Price Matched (INR)");
 });
 
 test("toInr: INR passthrough, foreign uses override rate (deterministic)", async () => {
-  setOverrides({ USD: 80, CAD: 60 });
-  assert.equal(await toInr(100, "INR"), 100);
-  assert.equal(await toInr(null, "USD"), null);
-  assert.equal(await toInr(10, "USD"), 800);
-  assert.equal(await toInr(10, "CAD"), 600);
+  setOverrides(TEST_MBO, { USD: 80, CAD: 60 });
+  assert.equal(await toInr(TEST_MBO, 100, "INR"), 100);
+  assert.equal(await toInr(TEST_MBO, null, "USD"), null);
+  assert.equal(await toInr(TEST_MBO, 10, "USD"), 800);
+  assert.equal(await toInr(TEST_MBO, 10, "CAD"), 600);
 });

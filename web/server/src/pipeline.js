@@ -35,15 +35,18 @@ function newState() {
     message: "Idle. Configure and run.",
   };
 }
-function newEngine() {
-  return { config: newConfig(), state: newState(), log: [], logmeta: { offset: 0 } };
+function newEngine(mboId) {
+  return { mboId, config: newConfig(), state: newState(), log: [], logmeta: { offset: 0 } };
 }
 
+// Keyed by `${mboId}:${uid}` — an engine is scoped to one user's run within
+// one tenant. This also means two tenants' users can never share a slot even
+// if uids ever collided across a future non-global-uid scheme.
 const ENGINES = new Map();
-export function getEngine(uid) {
-  const k = String(uid);
+export function getEngine(mboId, uid) {
+  const k = `${mboId}:${uid}`;
   let e = ENGINES.get(k);
-  if (!e) { e = newEngine(); ENGINES.set(k, e); }
+  if (!e) { e = newEngine(mboId); ENGINES.set(k, e); }
   return e;
 }
 export function runningCount() {
@@ -74,6 +77,7 @@ function mailLog(eng, promise, label) {
 // Compare a fetched price against the baseline, persist and log it.
 // Shared by the inline path and the worker-thread path (workers only fetch).
 async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
+  const mboId = eng.mboId;
   const url = (prod.url || "").trim();
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
@@ -90,13 +94,13 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
     log(eng, { row: tag, domain: brand, url, currency: "-", price: "-", status: "Fetch Error", msg: detail });
     // Keep the "Fetch Error" prefix — stateOf() keys off it — but persist the
     // cause so the dashboard can distinguish a block/timeout from a regex miss.
-    await store.saveResult(prod, `Fetch Error (${detail})`, null, null, "error", runId);
+    await store.saveResult(mboId, prod, `Fetch Error (${detail})`, null, null, "error", runId);
     return "error";
   }
   const cur = currency || "UNKNOWN";
   if (base == null) {
     log(eng, { row: tag, domain: brand, url, currency: cur, price: String(live), status: "Fetch Error", msg: "baseline unreadable" });
-    await store.saveResult(prod, "Fetch Error (baseline unreadable)", live, cur, "error", runId);
+    await store.saveResult(mboId, prod, "Fetch Error (baseline unreadable)", live, cur, "error", runId);
     return "error";
   }
   if (fetchCur === "USD" && cur === "USD") {
@@ -112,7 +116,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
     }
     log(eng, { row: tag, domain: brand, url, currency: "USD", price: String(live),
       status: state === "matched" ? "Price Matched" : "Price Mismatch!", msg });
-    await store.saveResult(prod, status, live, cur, state, runId, { usdBaseline: true });
+    await store.saveResult(mboId, prod, status, live, cur, state, runId, { usdBaseline: true });
     return state;
   }
   if (nativeCur && cur === nativeCur) {
@@ -122,10 +126,10 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
     else { state = "mismatch"; status = `Price Mismatch! (${nativeCur})`; }
     log(eng, { row: tag, domain: brand, url, currency: nativeCur, price: String(live),
       status: state === "matched" ? "Price Matched" : "Price Mismatch!", msg: `${nativeCur} ${live} vs baseline ${base}` });
-    await store.saveResult(prod, status, live, cur, state, runId);
+    await store.saveResult(mboId, prod, status, live, cur, state, runId);
     return state;
   }
-  const liveInr = await toInr(live, cur);
+  const liveInr = await toInr(mboId, live, cur);
   const delta = liveInr - base;
   const disp = ["INR", "UNKNOWN"].includes(cur) ? cur : `${cur}->INR`;
   let state, status;
@@ -134,7 +138,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   log(eng, { row: tag, domain: brand, url, currency: disp, price: liveInr.toFixed(2),
     status: state === "matched" ? "Price Matched" : "Price Mismatch!",
     msg: cur === "INR" ? "" : `${cur} ${live} -> INR` });
-  await store.saveResult(prod, status, live, cur, state, runId);
+  await store.saveResult(mboId, prod, status, live, cur, state, runId);
   return state;
 }
 
@@ -159,18 +163,18 @@ async function processOne(eng, fetcher, prod, runId) {
     if (roll < 0.05 || base == null) {
       log(eng, { row: tag, domain: brand, url, currency: '-', price: '-',
         status: 'Fetch Error', msg: 'simulated failure' });
-      await store.saveResult(prod, 'Fetch Error', null, null, 'error', runId);
+      await store.saveResult(eng.mboId, prod, 'Fetch Error', null, null, 'error', runId);
       return 'error';
     }
     live = roll > 0.12 ? base :
       Math.round(base * (Math.random() > 0.5 ? 1.1 : 0.9) * 100) / 100;
     currency = brand?.endsWith('.in') ? 'INR' : 'USD';
-    const liveInr = await toInr(live, currency);
+    const liveInr = await toInr(eng.mboId, live, currency);
     const state = Math.abs(liveInr - base) <= engTol(base, currency) ? 'matched' : 'mismatch';
     const status = state === 'matched' ? 'Price Matched (simulation)' : 'Price Mismatch! (simulation)';
     log(eng, { row: tag, domain: brand, url, currency, price: liveInr.toFixed(2),
       status: state === 'matched' ? 'Price Matched' : 'Price Mismatch!', msg: 'simulation' });
-    await store.saveResult(prod, status, live, currency, state, runId);
+    await store.saveResult(eng.mboId, prod, status, live, currency, state, runId);
     return state;
   }
   let errMsg = null;
@@ -318,64 +322,65 @@ async function runPass(eng, rows, workers, fetcher, runId, onDone) {
 // processOne/finalizeOne so a manual rerun applies the exact same per-brand
 // rules (native currency, USD-fetch pin, relay/proxy, woo API) as a real
 // pipeline run, just for one product outside of a full run.
-export async function rerunOne(prod) {
-  const eng = { config: { simulation: false }, state: {}, log: [], logmeta: { offset: 0 } };
-  eng.usdFetchBrands = await store.usdFetchBrandSet();
-  eng.rangeHighBrands = await store.rangeHighBrandSet();
-  eng.proxyBrands = await store.proxyBrandSet();
-  eng.localOnlyBrands = await store.localOnlyBrandSet();
-  eng.cloudSkipBrands = await store.cloudSkipBrandSet();
+export async function rerunOne(mboId, prod) {
+  const eng = { mboId, config: { simulation: false }, state: {}, log: [], logmeta: { offset: 0 } };
+  eng.usdFetchBrands = await store.usdFetchBrandSet(mboId);
+  eng.rangeHighBrands = await store.rangeHighBrandSet(mboId);
+  eng.proxyBrands = await store.proxyBrandSet(mboId);
+  eng.localOnlyBrands = await store.localOnlyBrandSet(mboId);
+  eng.cloudSkipBrands = await store.cloudSkipBrandSet(mboId);
   eng.relay = (config.isCloud && config.fetchRelayUrl)
     ? { url: config.fetchRelayUrl, secret: config.fetchRelaySecret } : null;
-  eng.wooApiBrands = await store.wooApiBrandSet();
-  eng.relayParams = await store.relayAppendParams();
-  eng.nativeCurrency = await store.nativeCurrencyBrands();
+  eng.wooApiBrands = await store.wooApiBrandSet(mboId);
+  eng.relayParams = await store.relayAppendParams(mboId);
+  eng.nativeCurrency = await store.nativeCurrencyBrands(mboId);
   // Never re-fetch a cloud-blocked brand from the cloud — it would 400 and
   // overwrite the good local INR price with an error. Leave the row untouched;
   // it's refreshed from a local run instead.
   if (config.isCloud && eng.cloudSkipBrands.has(normBrand(prod.brand))) {
-    return store.productByKey(prod.key);
+    return store.productByKey(mboId, prod.key);
   }
   const fetcher = new Fetcher({ cooldown: [600, 1500] });
   const runId = "rerun-" + Date.now().toString(36);
   // A manual rerun is an explicit human recheck — un-void the link first so
   // a previously dead URL gets a genuine fresh attempt and re-earns its state.
-  await store.clearVerifiedDead(prod.key).catch(() => {});
+  await store.clearVerifiedDead(mboId, prod.key).catch(() => {});
   await processOne(eng, fetcher, prod, runId);
-  return store.productByKey(prod.key);
+  return store.productByKey(mboId, prod.key);
 }
 
 export async function startPipeline(eng, runId) {
+  const mboId = eng.mboId;
   const cfg = eng.config, st = eng.state;
   const mode = cfg.fresh_start ? "fresh" : "update";
   const vendors = (cfg.vendors && cfg.vendors.length) ? cfg.vendors : null;
   try {
-    eng.usdFetchBrands = await store.usdFetchBrandSet();
-    eng.rangeHighBrands = await store.rangeHighBrandSet();
-    eng.gentleBrands = await store.gentleBrandSet();
-    eng.proxyBrands = await store.proxyBrandSet();
+    eng.usdFetchBrands = await store.usdFetchBrandSet(mboId);
+    eng.rangeHighBrands = await store.rangeHighBrandSet(mboId);
+    eng.gentleBrands = await store.gentleBrandSet(mboId);
+    eng.proxyBrands = await store.proxyBrandSet(mboId);
     if (eng.proxyBrands.size && !config.fetchProxyUrl) {
       log(eng, { row: "—", domain: "proxy", url: "", currency: "-", price: "-", status: "Warning",
         msg: `${eng.proxyBrands.size} brand(s) flagged for proxy but FETCH_PROXY_URL is not set — fetching directly` });
     }
     const source = cfg.data_source === 'imported' ? 'imported' : 'database';
-    let rows = await store.workRows(mode, vendors, source);
+    let rows = await store.workRows(mboId, mode, vendors, source);
     let total = source === 'imported'
-      ? await store.countImported(vendors)
-      : await store.countProducts(vendors);
+      ? await store.countImported(mboId, vendors)
+      : await store.countProducts(mboId, vendors);
     // Local-only brands: their sites ban the cloud server's IP. With a fetch
     // relay configured (FETCH_RELAY_URL -> web/relay/worker.js) cloud runs
     // fetch them through it; without one they are skipped entirely (a blocked
     // fetch would only clobber good local data with errors) and must be
-    // refreshed from a local run — run-local-only.mjs.
-    eng.localOnlyBrands = await store.localOnlyBrandSet();
-    eng.cloudSkipBrands = await store.cloudSkipBrandSet();
+    // refreshed from a local run — scripts/run-local-only.mjs.
+    eng.localOnlyBrands = await store.localOnlyBrandSet(mboId);
+    eng.cloudSkipBrands = await store.cloudSkipBrandSet(mboId);
     eng.relay = (config.isCloud && config.fetchRelayUrl)
       ? { url: config.fetchRelayUrl, secret: config.fetchRelaySecret }
       : null;
-    eng.wooApiBrands = await store.wooApiBrandSet();
-    eng.relayParams = await store.relayAppendParams();
-    eng.nativeCurrency = await store.nativeCurrencyBrands();
+    eng.wooApiBrands = await store.wooApiBrandSet(mboId);
+    eng.relayParams = await store.relayAppendParams(mboId);
+    eng.nativeCurrency = await store.nativeCurrencyBrands(mboId);
     // Cloud skip rules:
     //  - cloud-skip brands are dropped ALWAYS (even with a relay) — the store
     //    blocks/geo-distorts every non-India IP incl. the relay, so a cloud
@@ -405,7 +410,7 @@ export async function startPipeline(eng, runId) {
     // Goes to the user who started the run (eng.userEmail, set by /api/pipe/start
     // from their logged-in session) — falls back to ALERT_TO only for engines
     // built outside the API (one-off local refresh scripts have no session).
-    if (!cfg.simulation) mailLog(eng, sendPipelineStarted({ to: eng.userEmail, total: rows.length, runId }), "start");
+    if (!cfg.simulation) mailLog(eng, sendPipelineStarted({ mboId, to: eng.userEmail, total: rows.length, runId }), "start");
     const mainTotal = rows.length;
     let halfSent = false;
     await runPass(eng, rows, Math.min(25, Math.max(1, cfg.concurrency)), fetcher, runId, (r) => {
@@ -417,7 +422,7 @@ export async function startPipeline(eng, runId) {
       }
     });
     if (!st.abort && cfg.safe_retry) {
-      const errKeys = new Set((await store.dbProducts("update", vendors))
+      const errKeys = new Set((await store.dbProducts(mboId, "update", vendors))
         .filter((r) => r.state === "error" && r.base_price != null).map((r) => r.key));
       const err = rows.filter((p) => errKeys.has(p.key));
       st.phase = "safe_retry"; st.retry_total = err.length; st.retry_completed = 0; st.retry_recovered = 0;
@@ -433,13 +438,13 @@ export async function startPipeline(eng, runId) {
       });
       // Email: errors-resolved summary (only when there were errors to retry).
       if (!cfg.simulation && err.length) mailLog(eng, sendErrorsResolved({
-        to: eng.userEmail, stats: { retry_total: st.retry_total, retry_recovered: st.retry_recovered } }), "errors-resolved");
+        mboId, to: eng.userEmail, stats: { retry_total: st.retry_total, retry_recovered: st.retry_recovered } }), "errors-resolved");
     }
     // Label links that failed as permanent across their last two runs so
     // incremental runs stop re-fetching them (a fresh run still rechecks).
     // Best-effort: a failure here must not fail the run.
     let voided = 0;
-    if (!st.abort) { try { voided = await store.markVerifiedDead(); } catch (e) {
+    if (!st.abort) { try { voided = await store.markVerifiedDead(mboId); } catch (e) {
       log(eng, { row: "—", domain: "void", url: "", currency: "-", price: "-", status: "Warning", msg: "verified-dead marking skipped: " + e.message }); } }
     st.phase = "done";
     st.message = (st.abort ? "Aborted" : "Completed") +
@@ -456,6 +461,6 @@ export async function startPipeline(eng, runId) {
       elapsed: st.started_at ? Math.floor((Date.now() - st.started_at) / 1000) : null };
     // Completion email with the two sheets (price updates + full fetch snapshot),
     // sent to whoever started the run — not a fixed owner address.
-    await mailLog(eng, sendPipelineComplete({ to: eng.userEmail, stats }), "complete");
+    await mailLog(eng, sendPipelineComplete({ mboId, to: eng.userEmail, stats }), "complete");
   }
 }

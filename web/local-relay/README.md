@@ -6,7 +6,7 @@ the existing `web/relay` Cloudflare Worker fixes the first two but Cloudflare's
 own edge egress isn't India either, so it can't fix mymoledro or any brand not
 explicitly special-cased in that Worker. This relay instead runs **on this
 machine** (a real Indian residential IP, the same one the daily
-`run-local-only.mjs` Task Scheduler job already uses) and is exposed to the
+`scripts/run-local-only.mjs` Task Scheduler job already uses) and is exposed to the
 internet via a free Cloudflare Tunnel — no VM, no card, no ongoing cost.
 
 Same wire contract as `web/relay/worker.js`: `GET <url>/?url=<target>` with

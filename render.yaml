@@ -30,12 +30,12 @@ services:
         sync: false              # long random hex — signs sessions + encrypts the Shopify token.
                                  # MUST stay identical across redeploys or the saved token won't decrypt.
       - key: ADMIN_EMAIL
-        sync: false
+        sync: false              # bootstraps the PLATFORM SUPER-ADMIN (cross-tenant support role), not a tenant owner
       - key: ADMIN_PASSWORD
-        sync: false              # strong password; seeds the first owner on an empty DB
-      # --- self-registration (blank/absent = closed; owner creates users) ---
-      - key: ALLOWED_SIGNUP_DOMAINS
-        sync: false              # e.g. "growify.in" to let those emails self-register
+        sync: false              # strong password
+      # --- self-registration is closed platform-wide: MBOs (tenants) are provisioned
+      # via `node scripts/create-tenant.mjs`; users within a tenant are created from
+      # that tenant's own owner console. ---
       # --- email reports (start / 50% / complete+2 sheets / errors-resolved) ---
       - key: SMTP_HOST
         value: smtp.gmail.com

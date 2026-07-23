@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import { q, one, pool } from "./db.js";
+import { pool, withTenant } from "./db.js";
 import { toInr } from "./fx.js";
 
 const REQUIRED = ["MBO Product URL", "Designer Product URL", "Platform Type",
@@ -87,6 +87,64 @@ const SCHEMA = [
     'status TEXT, run_id TEXT, flagged_at TIMESTAMPTZ DEFAULT now(),' +
     'updated_at TIMESTAMPTZ DEFAULT now())',
   'CREATE INDEX IF NOT EXISTS ix_resolved_brand ON resolved(brand)',
+
+  // ---- multi-tenant (MBO) foundation — Phase A: additive only ----
+  // `mbo` = one tenant (one retailer running one Shopify store over its own
+  // set of designer brands). Tenant #1 is seeded at a fixed id so every
+  // backfill below has a stable, predictable target — it represents the
+  // pre-existing single-tenant production data, not a new customer.
+  'CREATE TABLE IF NOT EXISTS mbo (' +
+    'id BIGSERIAL PRIMARY KEY, slug TEXT UNIQUE NOT NULL, name TEXT NOT NULL,' +
+    'status TEXT NOT NULL DEFAULT \'active\', created_at TIMESTAMPTZ DEFAULT now())',
+  `INSERT INTO mbo (id, slug, name) VALUES (1, 'tenant-1', 'Tenant 1') ON CONFLICT (id) DO NOTHING`,
+  `SELECT setval(pg_get_serial_sequence('mbo','id'), (SELECT MAX(id) FROM mbo))`,
+
+  // Every existing tenant-data table gains a nullable mbo_id (nullable for
+  // now — NOT NULL only lands once every row is confirmed backfilled, see
+  // Phase D), backfilled to Tenant #1 so no existing row is ever orphaned.
+  // New composite unique indexes are added ALONGSIDE the old bare ones
+  // (dropped only in Phase D) so nothing about today's ON CONFLICT targets
+  // breaks before the app code is updated to use them.
+  'ALTER TABLE products ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE products SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE INDEX IF NOT EXISTS ix_products_mbo ON products(mbo_id)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_products_mbo_key ON products(mbo_id, key)',
+
+  'ALTER TABLE import_catalog ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE import_catalog SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE INDEX IF NOT EXISTS ix_import_catalog_mbo ON import_catalog(mbo_id)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_import_catalog_mbo_key ON import_catalog(mbo_id, key)',
+
+  'ALTER TABLE price_history ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE price_history SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE INDEX IF NOT EXISTS ix_price_history_mbo ON price_history(mbo_id)',
+
+  'ALTER TABLE review_history ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE review_history SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE INDEX IF NOT EXISTS ix_review_history_mbo ON review_history(mbo_id)',
+
+  'ALTER TABLE integrations ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE integrations SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_integrations_mbo_brand ON integrations(mbo_id, brand)',
+
+  'ALTER TABLE meta ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE meta SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_meta_mbo_k ON meta(mbo_id, k)',
+
+  'ALTER TABLE mismatch ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE mismatch SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE INDEX IF NOT EXISTS ix_mismatch_mbo ON mismatch(mbo_id)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_mismatch_mbo_key ON mismatch(mbo_id, key)',
+
+  'ALTER TABLE error ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE error SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE INDEX IF NOT EXISTS ix_error_mbo ON error(mbo_id)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_error_mbo_key ON error(mbo_id, key)',
+
+  'ALTER TABLE resolved ADD COLUMN IF NOT EXISTS mbo_id BIGINT REFERENCES mbo(id)',
+  'UPDATE resolved SET mbo_id=1 WHERE mbo_id IS NULL',
+  'CREATE INDEX IF NOT EXISTS ix_resolved_mbo ON resolved(mbo_id)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_resolved_mbo_key ON resolved(mbo_id, key)',
 ];
 
 export async function initStore() {
@@ -138,13 +196,15 @@ export function matchTol(base, cur) {
 }
 const num = (v) => (v == null ? 0 : Number(v));
 
-// ---- meta ----
-export async function setMeta(k, v) {
-  await q("INSERT INTO meta(k,v) VALUES($1,$2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-    [k, String(v)]);
+// ---- meta (per-tenant key/value store) ----
+export async function setMeta(mboId, k, v) {
+  await withTenant(mboId, (db) => db.q(
+    "INSERT INTO meta(mbo_id,k,v) VALUES($1,$2,$3) ON CONFLICT(mbo_id,k) DO UPDATE SET v=excluded.v",
+    [mboId, k, String(v)]));
 }
-export async function getMeta(k, def = null) {
-  const r = await one("SELECT v FROM meta WHERE k=$1", [k]);
+export async function getMeta(mboId, k, def = null) {
+  const r = await withTenant(mboId, (db) => db.one(
+    "SELECT v FROM meta WHERE mbo_id=$1 AND k=$2", [mboId, k]));
   return r ? r.v : def;
 }
 
@@ -153,10 +213,10 @@ export async function getMeta(k, def = null) {
 // it) — only the state-bucket counts that back the Review tabs/badges
 // exclude dismissed rows, since dismissing is scoped to "stop showing me
 // this in Review", not "stop counting this product".
-export async function counts(brand) {
-  const where = brand ? "WHERE brand=$1" : "";
-  const params = brand ? [brand] : [];
-  const r = await one(`SELECT COUNT(*) total,
+export async function counts(mboId, brand) {
+  const params = [mboId]; let where = "mbo_id=$1";
+  if (brand) { params.push(brand); where += ` AND brand=$${params.length}`; }
+  const r = await withTenant(mboId, (db) => db.one(`SELECT COUNT(*) total,
     COUNT(*) FILTER (WHERE state='pending' AND review_dismissed_at IS NULL) pending,
     COUNT(*) FILTER (WHERE state='matched' AND review_dismissed_at IS NULL) matched,
     COUNT(*) FILTER (WHERE state='mismatch' AND review_dismissed_at IS NULL) mismatch,
@@ -165,111 +225,116 @@ export async function counts(brand) {
     COUNT(*) FILTER (WHERE state='mismatch' AND decision='pending' AND review_dismissed_at IS NULL) awaiting,
     COUNT(*) FILTER (WHERE state='error' AND decision='pending' AND review_dismissed_at IS NULL) error_awaiting,
     COUNT(*) FILTER (WHERE state='matched' AND decision='pending' AND review_dismissed_at IS NULL) resolved_awaiting,
-    COUNT(*) FILTER (WHERE decision='rejected') rejected FROM products ${where}`, params);
+    COUNT(*) FILTER (WHERE decision='rejected') rejected FROM products WHERE ${where}`, params));
   const o = {}; for (const k of Object.keys(r)) o[k] = num(r[k]); return o;
 }
 
-let _alertCache = { at: 0, threshold: null, value: 0 };
-export async function alertCount(threshold = 5) {
+// Per-tenant cache: keyed by `${mboId}:${threshold}` since alertCount also
+// varies by the caller-supplied threshold.
+const _alertCache = new Map();
+export async function alertCount(mboId, threshold = 5) {
+  const cacheKey = `${mboId}:${threshold}`;
   const now = Date.now();
-  if (now - _alertCache.at < 60_000 && _alertCache.threshold === threshold) return _alertCache.value;
+  const cached = _alertCache.get(cacheKey);
+  if (cached && now - cached.at < 60_000) return cached.value;
   try {
-    const r = await one(`SELECT COUNT(*) c FROM (
+    const r = await withTenant(mboId, (db) => db.one(`SELECT COUNT(*) c FROM (
       SELECT live_price, prev FROM (
         SELECT live_price,
           LAG(live_price) OVER (PARTITION BY key ORDER BY created_at) prev,
           ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) rn
-        FROM price_history WHERE live_price IS NOT NULL
+        FROM price_history WHERE mbo_id=$1 AND live_price IS NOT NULL
       ) t WHERE rn=1 AND prev IS NOT NULL AND prev<>0
-        AND ABS((live_price-prev)/prev*100) >= $1) z`, [Math.abs(threshold)]);
+        AND ABS((live_price-prev)/prev*100) >= $2) z`, [mboId, Math.abs(threshold)]));
     const value = num(r.c);
-    _alertCache = { at: now, threshold, value };
+    _alertCache.set(cacheKey, { at: now, value });
     return value;
   } catch { return 0; }
 }
 
 // ---- vendors ----
-export async function vendors(kind, source = 'database') {
+export async function vendors(mboId, kind, source = 'database') {
   if (source === 'imported' && !kind) {
-    const rows = await q(`SELECT brand, COUNT(*) c FROM import_catalog
-      WHERE brand<>'' GROUP BY brand ORDER BY brand`);
+    const rows = await withTenant(mboId, (db) => db.q(`SELECT brand, COUNT(*) c FROM import_catalog
+      WHERE mbo_id=$1 AND brand<>'' GROUP BY brand ORDER BY brand`, [mboId]));
     return rows.map((r) => ({ vendor: r.brand, count: num(r.c) }));
   }
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind];
-  const rows = state
-    ? await q("SELECT brand, COUNT(*) c FROM products WHERE brand<>'' AND state=$1 GROUP BY brand ORDER BY brand", [state])
-    : await q("SELECT brand, COUNT(*) c FROM products WHERE brand<>'' GROUP BY brand ORDER BY brand");
+  const rows = await withTenant(mboId, (db) => state
+    ? db.q("SELECT brand, COUNT(*) c FROM products WHERE mbo_id=$1 AND brand<>'' AND state=$2 GROUP BY brand ORDER BY brand", [mboId, state])
+    : db.q("SELECT brand, COUNT(*) c FROM products WHERE mbo_id=$1 AND brand<>'' GROUP BY brand ORDER BY brand", [mboId]));
   return rows.map((r) => ({ vendor: r.brand, count: num(r.c) }));
 }
 
 // Brand list scoped to exactly what the Review table shows (same WHERE as
 // reviewItemsByBrands) -- counts reflect pending mismatch/error/matched
 // rows per brand, not that brand's whole catalog.
-export async function reviewVendors() {
-  const rows = await q(`SELECT brand, COUNT(*) c FROM products
-    WHERE brand<>'' AND decision='pending' AND review_dismissed_at IS NULL
+export async function reviewVendors(mboId) {
+  const rows = await withTenant(mboId, (db) => db.q(`SELECT brand, COUNT(*) c FROM products
+    WHERE mbo_id=$1 AND brand<>'' AND decision='pending' AND review_dismissed_at IS NULL
       AND state IN ('mismatch','error','matched')
-    GROUP BY brand ORDER BY brand`);
+    GROUP BY brand ORDER BY brand`, [mboId]));
   return rows.map((r) => ({ vendor: r.brand, count: num(r.c) }));
 }
 
 // Brand list scoped to review_history (what the History page shows) --
 // counts are approvals archived per brand, not products.brand totals.
-export async function historyVendors() {
-  const rows = await q(`SELECT brand, COUNT(*) c FROM review_history
-    WHERE brand<>'' GROUP BY brand ORDER BY brand`);
+export async function historyVendors(mboId) {
+  const rows = await withTenant(mboId, (db) => db.q(`SELECT brand, COUNT(*) c FROM review_history
+    WHERE mbo_id=$1 AND brand<>'' GROUP BY brand ORDER BY brand`, [mboId]));
   return rows.map((r) => ({ vendor: r.brand, count: num(r.c) }));
 }
 
 // ---- products work list (DB source) ----
-export async function dbProducts(mode = "fresh", vendorList = null) {
-  const cl = []; const p = [];
+export async function dbProducts(mboId, mode = "fresh", vendorList = null) {
+  const cl = ["mbo_id=$1"]; const p = [mboId];
   // Incremental (update) runs re-fetch only unresolved rows and SKIP links
   // already confirmed dead across two runs — a fresh run still rechecks them.
   if (mode !== "fresh") { cl.push("state IN ('pending','error')"); cl.push("verified_dead_at IS NULL"); }
   if (vendorList && vendorList.length) {
-    cl.push(`brand IN (${vendorList.map((_, i) => `$${i + 1}`).join(",")})`);
+    cl.push(`brand IN (${vendorList.map((_, i) => `$${p.length + i + 1}`).join(",")})`);
     p.push(...vendorList);
   }
-  const where = cl.length ? "WHERE " + cl.join(" AND ") : "";
-  return q(`SELECT key,mbo_url,url,platform,custom_regex,brand,base_price,base_usd,state
-            FROM products ${where} ORDER BY id`, p);
+  return withTenant(mboId, (db) => db.q(`SELECT key,mbo_url,url,platform,custom_regex,brand,base_price,base_usd,state
+            FROM products WHERE ${cl.join(" AND ")} ORDER BY id`, p));
 }
-export async function countProducts(vendorList = null) {
+export async function countProducts(mboId, vendorList = null) {
+  const cl = ["mbo_id=$1"]; const p = [mboId];
   if (vendorList && vendorList.length) {
-    const r = await one(`SELECT COUNT(*) c FROM products WHERE brand IN (${vendorList.map((_, i) => `$${i + 1}`).join(",")})`, vendorList);
-    return num(r.c);
+    cl.push(`brand IN (${vendorList.map((_, i) => `$${p.length + i + 1}`).join(",")})`);
+    p.push(...vendorList);
   }
-  return num((await one("SELECT COUNT(*) c FROM products")).c);
+  const r = await withTenant(mboId, (db) => db.one(`SELECT COUNT(*) c FROM products WHERE ${cl.join(" AND ")}`, p));
+  return num(r.c);
 }
 
-export async function importedProducts(mode = 'fresh', vendorList = null) {
-  const clauses = []; const params = [];
+export async function importedProducts(mboId, mode = 'fresh', vendorList = null) {
+  const clauses = ["c.mbo_id=$1"]; const params = [mboId];
   if (vendorList && vendorList.length) {
-    clauses.push(`c.brand IN (${vendorList.map((_, i) => `$${i + 1}`).join(',')})`);
+    clauses.push(`c.brand IN (${vendorList.map((_, i) => `$${params.length + i + 1}`).join(',')})`);
     params.push(...vendorList);
   }
   if (mode !== 'fresh') { clauses.push(`COALESCE(p.state, 'pending') IN ('pending','error')`); clauses.push('p.verified_dead_at IS NULL'); }
-  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
-  return q(`SELECT c.key,c.mbo_url,c.url,c.platform,c.custom_regex,c.brand,c.base_price,
+  return withTenant(mboId, (db) => db.q(`SELECT c.key,c.mbo_url,c.url,c.platform,c.custom_regex,c.brand,c.base_price,
       p.base_usd, COALESCE(p.state,'pending') state
-    FROM import_catalog c LEFT JOIN products p ON p.key=c.key
-    ${where} ORDER BY c.key`, params);
+    FROM import_catalog c LEFT JOIN products p ON p.key=c.key AND p.mbo_id=c.mbo_id
+    WHERE ${clauses.join(' AND ')} ORDER BY c.key`, params));
 }
 
-export async function countImported(vendorList = null) {
+export async function countImported(mboId, vendorList = null) {
+  const cl = ["mbo_id=$1"]; const p = [mboId];
   if (vendorList && vendorList.length) {
-    const placeholders = vendorList.map((_, i) => `$${i + 1}`).join(',');
-    return num((await one(`SELECT COUNT(*) c FROM import_catalog
-      WHERE brand IN (${placeholders})`, vendorList)).c);
+    cl.push(`brand IN (${vendorList.map((_, i) => `$${p.length + i + 1}`).join(',')})`);
+    p.push(...vendorList);
   }
-  return num((await one('SELECT COUNT(*) c FROM import_catalog')).c);
+  const r = await withTenant(mboId, (db) => db.one(`SELECT COUNT(*) c FROM import_catalog WHERE ${cl.join(' AND ')}`, p));
+  return num(r.c);
 }
 
-export async function workRows(mode = "fresh", vendorList = null, source = 'database') {
+export async function workRows(mboId, mode = "fresh", vendorList = null, source = 'database') {
   return source === 'imported'
-    ? importedProducts(mode, vendorList)
-    : dbProducts(mode, vendorList);
+    ? importedProducts(mboId, mode, vendorList)
+    : dbProducts(mboId, mode, vendorList);
 }
 
 // ---- state buckets (mismatch/error/resolved) ----
@@ -278,81 +343,79 @@ export async function workRows(mode = "fresh", vendorList = null, source = 'data
 // removed from the other two — never both/neither. The products row
 // itself is only ever updated here, never touched by this (copy, not move).
 const BUCKET_TABLE = { mismatch: "mismatch", error: "error", matched: "resolved" };
-const BUCKET_COLS = "key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,status,run_id,updated_at";
-export async function syncBucket(run, prow, state, runId = null) {
+const BUCKET_COLS = "mbo_id,key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,status,run_id,updated_at";
+export async function syncBucket(mboId, run, prow, state, runId = null) {
   const target = BUCKET_TABLE[state];
   for (const t of Object.values(BUCKET_TABLE)) {
-    if (t !== target) await run(`DELETE FROM ${t} WHERE key=$1`, [prow.key]);
+    if (t !== target) await run(`DELETE FROM ${t} WHERE mbo_id=$1 AND key=$2`, [mboId, prow.key]);
   }
   if (!target) return;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await run(`INSERT INTO ${target} (${BUCKET_COLS})
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-    ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,platform=excluded.platform,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+    ON CONFLICT(mbo_id,key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,platform=excluded.platform,
       brand=excluded.brand,base_price=excluded.base_price,live_price=excluded.live_price,
       currency=excluded.currency,delta=excluded.delta,status=excluded.status,
       run_id=excluded.run_id,updated_at=excluded.updated_at`,
-    [prow.key, prow.mbo_url || "", prow.url, prow.platform, prow.brand,
+    [mboId, prow.key, prow.mbo_url || "", prow.url, prow.platform, prow.brand,
       prow.base_price, prow.live_price, prow.currency, prow.delta, prow.status, runId, now]);
 }
 // Removes a product's copy from all three bucket tables — called once a
 // row is approved and successfully pushed to Shopify (it now lives
 // permanently in review_history instead), or when the product is deleted
 // or reset back to 'pending'.
-export async function clearBuckets(run, key) {
-  for (const t of Object.values(BUCKET_TABLE)) await run(`DELETE FROM ${t} WHERE key=$1`, [key]);
+export async function clearBuckets(mboId, run, key) {
+  for (const t of Object.values(BUCKET_TABLE)) await run(`DELETE FROM ${t} WHERE mbo_id=$1 AND key=$2`, [mboId, key]);
 }
 
 // ---- pipeline result write (+ history snapshot) ----
-export async function saveResult(prod, status, live, cur, state, runId, extra = {}) {
+export async function saveResult(mboId, prod, status, live, cur, state, runId, extra = {}) {
   const base = prod.base_price;
   const usdBaseline = extra.usdBaseline === true;
   const baseUsd = usdBaseline ? (prod.base_usd != null ? prod.base_usd : live) : null;
   const delta = usdBaseline
     ? ((live != null && baseUsd != null) ? live - baseUsd : null)
-    : ((live != null && base != null) ? (await toInr(live, cur)) - base : null);
+    : ((live != null && base != null) ? (await toInr(mboId, live, cur)) - base : null);
   const baseUsdVal = usdBaseline ? live : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const cleanUrl = canonicalUrl(prod.url);
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price,
+  return withTenant(mboId, async (db) => {
+    await db.client.query(`INSERT INTO products (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price,
         live_price,currency,status,state,delta,decision,decided_at,updated_at,base_usd)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',NULL,$13,$14)
-      ON CONFLICT(key) DO UPDATE SET url=excluded.url,live_price=excluded.live_price,currency=excluded.currency,
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',NULL,$14,$15)
+      ON CONFLICT(mbo_id,key) DO UPDATE SET url=excluded.url,live_price=excluded.live_price,currency=excluded.currency,
         status=excluded.status,state=excluded.state,delta=excluded.delta,
         decision='pending',decided_at=NULL,updated_at=excluded.updated_at,
         base_usd=COALESCE(products.base_usd,excluded.base_usd),review_dismissed_at=NULL`,
-      [prod.key, prod.mbo_url || "", cleanUrl, prod.platform, prod.custom_regex, prod.brand,
+      [mboId, prod.key, prod.mbo_url || "", cleanUrl, prod.platform, prod.custom_regex, prod.brand,
         base, live, cur, status, state, delta, now, baseUsdVal]);
-    await client.query(`INSERT INTO price_history(key,url,brand,base_price,live_price,delta,state,status,run_id)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [prod.key, cleanUrl, prod.brand, base, live, delta, state, status, runId]);
-    await syncBucket(client.query.bind(client),
+    await db.client.query(`INSERT INTO price_history(mbo_id,key,url,brand,base_price,live_price,delta,state,status,run_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [mboId, prod.key, cleanUrl, prod.brand, base, live, delta, state, status, runId]);
+    await syncBucket(mboId, db.client.query.bind(db.client),
       { key: prod.key, mbo_url: prod.mbo_url || "", url: cleanUrl, platform: prod.platform,
         brand: prod.brand, base_price: base, live_price: live, currency: cur, delta, status },
       state, runId);
-    await client.query("COMMIT");
-  } catch (e) { await client.query("ROLLBACK"); throw e; }
-  finally { client.release(); }
-  return delta;
+    return delta;
+  });
 }
 
-export const productByKey = (key) => one("SELECT * FROM products WHERE key=$1", [key]);
+export const productByKey = (mboId, key) => withTenant(mboId,
+  (db) => db.one("SELECT * FROM products WHERE mbo_id=$1 AND key=$2", [mboId, key]));
 
 // ---- review (one or more brands, priority-ordered: mismatch, then error, then matched) ----
 export const STATE_PRIORITY_SQL = "CASE state WHEN 'mismatch' THEN 0 WHEN 'error' THEN 1 ELSE 2 END";
-async function reviewSummaryByBrands(brands) {
+async function reviewSummaryByBrands(mboId, brands) {
   const scoped = brands && brands.length;
-  const where = scoped ? "WHERE brand = ANY($1::text[]) AND" : "WHERE";
-  const r = await one(`SELECT COUNT(*) total,
+  const params = scoped ? [mboId, brands] : [mboId];
+  const brandClause = scoped ? "AND brand = ANY($2::text[]) AND" : "AND";
+  const r = await withTenant(mboId, (db) => db.one(`SELECT COUNT(*) total,
     COUNT(*) FILTER (WHERE state='mismatch') mismatch,
     COUNT(*) FILTER (WHERE state='error') error,
     COUNT(*) FILTER (WHERE state='matched') matched
     FROM products
-    ${where} decision='pending' AND review_dismissed_at IS NULL
-      AND state IN ('mismatch','error','matched')`, scoped ? [brands] : []);
+    WHERE mbo_id=$1 ${brandClause} decision='pending' AND review_dismissed_at IS NULL
+      AND state IN ('mismatch','error','matched')`, params));
   return {
     total: num(r?.total),
     mismatch: num(r?.mismatch),
@@ -361,24 +424,27 @@ async function reviewSummaryByBrands(brands) {
   };
 }
 
-export async function reviewItemsByBrands(brands) {
+export async function reviewItemsByBrands(mboId, brands) {
   const scoped = brands && brands.length;
-  const where = scoped ? "WHERE brand = ANY($1::text[]) AND" : "WHERE";
-  const [items, summary] = await Promise.all([
-    q(`SELECT * FROM products
-    ${where} decision='pending' AND review_dismissed_at IS NULL
+  const params = scoped ? [mboId, brands] : [mboId];
+  const brandClause = scoped ? "AND brand = ANY($2::text[]) AND" : "AND";
+  const [items, summary, c] = await Promise.all([
+    withTenant(mboId, (db) => db.q(`SELECT * FROM products
+    WHERE mbo_id=$1 ${brandClause} decision='pending' AND review_dismissed_at IS NULL
       AND state IN ('mismatch','error','matched')
-    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC`, scoped ? [brands] : []),
-    reviewSummaryByBrands(brands),
+    ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC`, params)),
+    reviewSummaryByBrands(mboId, brands),
+    counts(mboId),
   ]);
-  return { items, counts: await counts(), summary };
+  return { items, counts: c, summary };
 }
 
 // Hides a single row from the review queue -- an UPDATE flag
 // (review_dismissed_at), never a DELETE. Product/price data is
 // untouched; what the Review table's per-row "Clear" button calls.
-export async function dismissRow(id) {
-  return one("UPDATE products SET review_dismissed_at=now() WHERE id=$1 RETURNING key", [id]);
+export async function dismissRow(mboId, id) {
+  return withTenant(mboId, (db) => db.one(
+    "UPDATE products SET review_dismissed_at=now() WHERE mbo_id=$1 AND id=$2 RETURNING key", [mboId, id]));
 }
 
 // Hides every row matching the same scope as reviewItemsByBrands (i.e.
@@ -386,37 +452,41 @@ export async function dismissRow(id) {
 // a DELETE. No brand filter required: an empty/omitted brands list
 // hides across every brand, matching "clear what's on screen right now".
 // What the "Master Clean" button calls.
-export async function dismissReviewByBrands(brands) {
+export async function dismissReviewByBrands(mboId, brands) {
   const scoped = brands && brands.length;
-  const where = scoped ? "WHERE brand = ANY($1::text[]) AND" : "WHERE";
-  const r = await q(`UPDATE products SET review_dismissed_at=now()
-    ${where} decision='pending' AND review_dismissed_at IS NULL
+  const params = scoped ? [mboId, brands] : [mboId];
+  const brandClause = scoped ? "AND brand = ANY($2::text[]) AND" : "AND";
+  const r = await withTenant(mboId, (db) => db.q(`UPDATE products SET review_dismissed_at=now()
+    WHERE mbo_id=$1 ${brandClause} decision='pending' AND review_dismissed_at IS NULL
       AND state IN ('mismatch','error','matched')
-    RETURNING key`, scoped ? [brands] : []);
+    RETURNING key`, params));
   return r.length;
 }
 
 // ---- review ----
-export async function reviewItems(kind, brands) {
+export async function reviewItems(mboId, kind, brands) {
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
-  let where = "state=$1 AND decision='pending' AND review_dismissed_at IS NULL"; const p = [state];
+  let where = "mbo_id=$1 AND state=$2 AND decision='pending' AND review_dismissed_at IS NULL"; const p = [mboId, state];
   if (brands && brands.length) {
-    where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; p.push(...brands);
+    where += ` AND brand IN (${brands.map((_, i) => `$${p.length + i + 1}`).join(",")})`; p.push(...brands);
   }
-  const items = await q(`SELECT * FROM products WHERE ${where}
-    ORDER BY (decision='pending') DESC, ABS(COALESCE(delta,0)) DESC`, p);
-  return { items, counts: await counts() };
+  const [items, c] = await Promise.all([
+    withTenant(mboId, (db) => db.q(`SELECT * FROM products WHERE ${where}
+    ORDER BY (decision='pending') DESC, ABS(COALESCE(delta,0)) DESC`, p)),
+    counts(mboId),
+  ]);
+  return { items, counts: c };
 }
 
 // Persistently hides rows from the review queue (nav badge + tabs) WITHOUT
 // touching price/decision data — an UPDATE flag, never a DELETE. This is
 // what the Review page's "Clear view" button calls.
-export async function dismissView(kind, brands) {
+export async function dismissView(mboId, kind, brands) {
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || null;
-  const cl = ["review_dismissed_at IS NULL"]; const p = [];
+  const cl = ["mbo_id=$1", "review_dismissed_at IS NULL"]; const p = [mboId];
   if (state) { cl.push(`state=$${p.length + 1}`); p.push(state); }
   if (brands && brands.length) { cl.push(`brand IN (${brands.map((_, i) => `$${p.length + i + 1}`).join(",")})`); p.push(...brands); }
-  const r = await q(`UPDATE products SET review_dismissed_at=now() WHERE ${cl.join(" AND ")} RETURNING key`, p);
+  const r = await withTenant(mboId, (db) => db.q(`UPDATE products SET review_dismissed_at=now() WHERE ${cl.join(" AND ")} RETURNING key`, p));
   return r.length;
 }
 
@@ -438,47 +508,60 @@ export function roundFinal(n) {
   return d <= 2 ? tens : d <= 5 ? tens + 5 : tens + 10;
 }
 
-// ---- push currency per brand ----
-let _cadCache = { at: 0, set: null };
 export const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
-export async function cadBrandSet() {
-  if (_cadCache.set && Date.now() - _cadCache.at < 30_000) return _cadCache.set;
-  const raw = await getMeta("push_cad_brands", "");
+
+// ---- per-tenant brand-quirk list caches ----
+// Every set/JSON-object cache below is keyed by mboId so one tenant's
+// brand-quirk config can never leak into or clobber another tenant's.
+const _cadCache = new Map();
+const _usdFetchCache = new Map();
+const _rangeHighCache = new Map();
+const _gentleCache = new Map();
+const _proxyCache = new Map();
+const _localOnlyCache = new Map();
+const _cloudSkipCache = new Map();
+const _wooApiCache = new Map();
+
+// ---- push currency per brand ----
+export async function cadBrandSet(mboId) {
+  const cached = _cadCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "push_cad_brands", "");
   const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
-  _cadCache = { at: Date.now(), set };
+  _cadCache.set(mboId, { at: Date.now(), set });
   return set;
 }
-export async function setCadBrands(list) {
+export async function setCadBrands(mboId, list) {
   const arr = (Array.isArray(list) ? list : String(list || "").split(","))
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
-  await setMeta("push_cad_brands", uniq.join(","));
-  _cadCache = { at: 0, set: null };
+  await setMeta(mboId, "push_cad_brands", uniq.join(","));
+  _cadCache.delete(mboId);
   return uniq;
 }
-export async function pushCurrencyFor(brand) {
-  return (await cadBrandSet()).has(normBrand(brand)) ? "CAD" : "USD";
+export async function pushCurrencyFor(mboId, brand) {
+  return (await cadBrandSet(mboId)).has(normBrand(brand)) ? "CAD" : "USD";
 }
 
 // ---- per-brand FETCH currency ----
-let _usdFetchCache = { at: 0, set: null };
-export async function usdFetchBrandSet() {
-  if (_usdFetchCache.set && Date.now() - _usdFetchCache.at < 30_000) return _usdFetchCache.set;
-  const raw = await getMeta("fetch_usd_brands", "");
+export async function usdFetchBrandSet(mboId) {
+  const cached = _usdFetchCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "fetch_usd_brands", "");
   const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
-  _usdFetchCache = { at: Date.now(), set };
+  _usdFetchCache.set(mboId, { at: Date.now(), set });
   return set;
 }
-export async function setUsdFetchBrands(list) {
+export async function setUsdFetchBrands(mboId, list) {
   const arr = (Array.isArray(list) ? list : String(list || "").split(","))
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
-  await setMeta("fetch_usd_brands", uniq.join(","));
-  _usdFetchCache = { at: 0, set: null };
+  await setMeta(mboId, "fetch_usd_brands", uniq.join(","));
+  _usdFetchCache.delete(mboId);
   return uniq;
 }
-export async function fetchCurrencyFor(brand) {
-  return (await usdFetchBrandSet()).has(normBrand(brand)) ? "USD" : null;
+export async function fetchCurrencyFor(mboId, brand) {
+  return (await usdFetchBrandSet(mboId)).has(normBrand(brand)) ? "USD" : null;
 }
 
 // ---- per-brand RANGE price preference ----
@@ -487,60 +570,63 @@ const DEFAULT_RANGE_HIGH_BRANDS = new Set([
   // Studio East baseline tracks the full/high variant price.
   "houseofmasaba.com",
 ]);
-let _rangeHighCache = { at: 0, set: null };
-export async function rangeHighBrandSet() {
-  if (_rangeHighCache.set && Date.now() - _rangeHighCache.at < 30_000) return _rangeHighCache.set;
-  const raw = await getMeta("range_high_brands", "");
+export async function rangeHighBrandSet(mboId) {
+  const cached = _rangeHighCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "range_high_brands", "");
   const set = new Set([...DEFAULT_RANGE_HIGH_BRANDS, ...String(raw || "").split(",").map(normBrand).filter(Boolean)]);
-  _rangeHighCache = { at: Date.now(), set };
+  _rangeHighCache.set(mboId, { at: Date.now(), set });
   return set;
 }
-export async function setRangeHighBrands(list) {
+export async function setRangeHighBrands(mboId, list) {
   const arr = (Array.isArray(list) ? list : String(list || "").split(","))
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
-  await setMeta("range_high_brands", uniq.join(","));
-  _rangeHighCache = { at: 0, set: null };
+  await setMeta(mboId, "range_high_brands", uniq.join(","));
+  _rangeHighCache.delete(mboId);
   return uniq;
 }
 
 // ---- per-brand GENTLE fetch (bot-protected domains) ----
-let _gentleCache = { at: 0, set: null };
-export async function gentleBrandSet() {
-  if (_gentleCache.set && Date.now() - _gentleCache.at < 30_000) return _gentleCache.set;
-  const raw = await getMeta("gentle_brands", "");
+export async function gentleBrandSet(mboId) {
+  const cached = _gentleCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "gentle_brands", "");
   const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
-  _gentleCache = { at: Date.now(), set };
+  _gentleCache.set(mboId, { at: Date.now(), set });
   return set;
 }
-export async function setGentleBrands(list) {
+export async function setGentleBrands(mboId, list) {
   const arr = (Array.isArray(list) ? list : String(list || "").split(","))
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
-  await setMeta("gentle_brands", uniq.join(","));
-  _gentleCache = { at: 0, set: null };
+  await setMeta(mboId, "gentle_brands", uniq.join(","));
+  _gentleCache.delete(mboId);
   return uniq;
 }
 
 // ---- per-brand PROXY fetch (IP-banned domains; needs FETCH_PROXY_URL) ----
-let _proxyCache = { at: 0, set: null };
-export async function proxyBrandSet() {
-  if (_proxyCache.set && Date.now() - _proxyCache.at < 30_000) return _proxyCache.set;
-  const raw = await getMeta("proxy_brands", "");
+export async function proxyBrandSet(mboId) {
+  const cached = _proxyCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "proxy_brands", "");
   const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
-  _proxyCache = { at: Date.now(), set };
+  _proxyCache.set(mboId, { at: Date.now(), set });
   return set;
 }
-export async function setProxyBrands(list) {
+export async function setProxyBrands(mboId, list) {
   const arr = (Array.isArray(list) ? list : String(list || "").split(","))
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
-  await setMeta("proxy_brands", uniq.join(","));
-  _proxyCache = { at: 0, set: null };
+  await setMeta(mboId, "proxy_brands", uniq.join(","));
+  _proxyCache.delete(mboId);
   return uniq;
 }
 
 // ---- per-brand LOCAL-ONLY fetch (cloud IP banned; refresh from local runs) ----
+// These defaults apply to every tenant equally — they describe a property
+// of the SITE (how it treats non-India request IPs), not tenant preference.
+// A tenant can still add its own additional brands on top via meta.
 const DEFAULT_LOCAL_ONLY_BRANDS = new Set([
   // WOOCS ("FOX") currency switcher geo-converts prices by IP: from the cloud
   // server's foreign IP it serves USD-converted numbers labelled USD (a genuine
@@ -554,20 +640,20 @@ const DEFAULT_LOCAL_ONLY_BRANDS = new Set([
   // exactly. No query param/header override worked; fetch it locally.
   "mymoledro.com",
 ]);
-let _localOnlyCache = { at: 0, set: null };
-export async function localOnlyBrandSet() {
-  if (_localOnlyCache.set && Date.now() - _localOnlyCache.at < 30_000) return _localOnlyCache.set;
-  const raw = await getMeta("local_only_brands", "");
+export async function localOnlyBrandSet(mboId) {
+  const cached = _localOnlyCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "local_only_brands", "");
   const set = new Set([...DEFAULT_LOCAL_ONLY_BRANDS, ...String(raw || "").split(",").map(normBrand).filter(Boolean)]);
-  _localOnlyCache = { at: Date.now(), set };
+  _localOnlyCache.set(mboId, { at: Date.now(), set });
   return set;
 }
-export async function setLocalOnlyBrands(list) {
+export async function setLocalOnlyBrands(mboId, list) {
   const arr = (Array.isArray(list) ? list : String(list || "").split(","))
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
-  await setMeta("local_only_brands", uniq.join(","));
-  _localOnlyCache = { at: 0, set: null };
+  await setMeta(mboId, "local_only_brands", uniq.join(","));
+  _localOnlyCache.delete(mboId);
   return uniq;
 }
 
@@ -576,37 +662,37 @@ export async function setLocalOnlyBrands(list) {
 // HTTP 400 to the relay's Cloudflare IP and USD-converted prices to the Render
 // IP, so a cloud run only clobbers the good India-fetched INR data with errors.
 // These are skipped on cloud runs REGARDLESS of the relay and refreshed solely
-// from a local run (run-label-local.mjs / run-local-only.mjs). Superset-safe:
+// from a local run (scripts/run-local-only.mjs). Superset-safe:
 // they're also in local-only, so local runs still fetch them.
 const DEFAULT_CLOUD_SKIP_BRANDS = new Set(["labelanushree.com", "mymoledro.com"]);
-let _cloudSkipCache = { at: 0, set: null };
-export async function cloudSkipBrandSet() {
-  if (_cloudSkipCache.set && Date.now() - _cloudSkipCache.at < 30_000) return _cloudSkipCache.set;
-  const raw = await getMeta("cloud_skip_brands", "");
+export async function cloudSkipBrandSet(mboId) {
+  const cached = _cloudSkipCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "cloud_skip_brands", "");
   const set = new Set([...DEFAULT_CLOUD_SKIP_BRANDS, ...String(raw || "").split(",").map(normBrand).filter(Boolean)]);
-  _cloudSkipCache = { at: Date.now(), set };
+  _cloudSkipCache.set(mboId, { at: Date.now(), set });
   return set;
 }
 
 // ---- per-brand relay fetch tweaks (only applied when fetching via relay) ----
-let _wooApiCache = { at: 0, set: null };
-export async function wooApiBrandSet() {
-  if (_wooApiCache.set && Date.now() - _wooApiCache.at < 30_000) return _wooApiCache.set;
-  const raw = await getMeta("woo_api_brands", "");
+export async function wooApiBrandSet(mboId) {
+  const cached = _wooApiCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "woo_api_brands", "");
   const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
-  _wooApiCache = { at: Date.now(), set };
+  _wooApiCache.set(mboId, { at: Date.now(), set });
   return set;
 }
-export async function setWooApiBrands(list) {
+export async function setWooApiBrands(mboId, list) {
   const arr = (Array.isArray(list) ? list : String(list || "").split(","))
     .map(normBrand).filter(Boolean);
   const uniq = [...new Set(arr)];
-  await setMeta("woo_api_brands", uniq.join(","));
-  _wooApiCache = { at: 0, set: null };
+  await setMeta(mboId, "woo_api_brands", uniq.join(","));
+  _wooApiCache.delete(mboId);
   return uniq;
 }
-export async function relayAppendParams() {
-  const raw = await getMeta("relay_append_params", "");
+export async function relayAppendParams(mboId) {
+  const raw = await getMeta(mboId, "relay_append_params", "");
   try {
     const obj = JSON.parse(raw || "{}");
     const out = {};
@@ -614,8 +700,8 @@ export async function relayAppendParams() {
     return out;
   } catch { return {}; }
 }
-export async function setRelayAppendParams(obj) {
-  await setMeta("relay_append_params", JSON.stringify(obj || {}));
+export async function setRelayAppendParams(mboId, obj) {
+  await setMeta(mboId, "relay_append_params", JSON.stringify(obj || {}));
   return obj || {};
 }
 
@@ -624,8 +710,8 @@ export async function setRelayAppendParams(obj) {
 // instead of trusting geo-dependent detection, e.g. Shopify Markets serving
 // USD-labeled prices to a foreign-IP fetcher for a shop whose real/base
 // currency is CAD) ----
-export async function nativeCurrencyBrands() {
-  const raw = await getMeta("native_currency_brands", "");
+export async function nativeCurrencyBrands(mboId) {
+  const raw = await getMeta(mboId, "native_currency_brands", "");
   try {
     const obj = JSON.parse(raw || "{}");
     const out = {};
@@ -633,25 +719,25 @@ export async function nativeCurrencyBrands() {
     return out;
   } catch { return {}; }
 }
-export async function setNativeCurrencyBrands(obj) {
+export async function setNativeCurrencyBrands(mboId, obj) {
   const clean = {};
   for (const [b, cur] of Object.entries(obj || {})) {
     const nb = normBrand(b); const nc = String(cur || "").trim().toUpperCase();
     if (nb && nc) clean[nb] = nc;
   }
-  await setMeta("native_currency_brands", JSON.stringify(clean));
+  await setMeta(mboId, "native_currency_brands", JSON.stringify(clean));
   return clean;
 }
 
 // ---- approval archive ----
-const HIST_COLS = `key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
+const HIST_COLS = `mbo_id,key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
-export async function liveBaseValue(prow) {
+export async function liveBaseValue(mboId, prow) {
   if (!prow || prow.live_price == null) return null;
   const curUp = String(prow.currency || "INR").trim().toUpperCase();
-  const nativeCur = (await nativeCurrencyBrands())[normBrand(prow.brand)];
+  const nativeCur = (await nativeCurrencyBrands(mboId))[normBrand(prow.brand)];
   const isNative = !!(nativeCur && curUp === nativeCur);
-  const baseNew = isNative ? Number(prow.live_price) : await toInr(prow.live_price, curUp);
+  const baseNew = isNative ? Number(prow.live_price) : await toInr(mboId, prow.live_price, curUp);
   if (baseNew == null || !Number.isFinite(baseNew) || baseNew <= 0) return null;
   return {
     baseNew,
@@ -660,56 +746,59 @@ export async function liveBaseValue(prow) {
   };
 }
 
-export async function promoteLiveToBase(run, prow) {
+export async function promoteLiveToBase(mboId, run, prow) {
   if (!prow?.key) return null;
-  const next = await liveBaseValue(prow);
+  const next = await liveBaseValue(mboId, prow);
   if (!next) return null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await run(`UPDATE products SET base_price=$1, base_usd=$2, state='matched',
-      status=$3, delta=0, updated_at=$4 WHERE key=$5`,
-    [next.baseNew, next.baseUsd, next.statusLabel, now, prow.key]);
-  await run("UPDATE import_catalog SET base_price=$1 WHERE key=$2", [next.baseNew, prow.key]);
+      status=$3, delta=0, updated_at=$4 WHERE mbo_id=$5 AND key=$6`,
+    [next.baseNew, next.baseUsd, next.statusLabel, now, mboId, prow.key]);
+  await run("UPDATE import_catalog SET base_price=$1 WHERE mbo_id=$2 AND key=$3", [next.baseNew, mboId, prow.key]);
   return { base_price: next.baseNew, base_usd: next.baseUsd, status: next.statusLabel };
 }
 
-export async function archiveApproved(client, prow, final, markup, ref, note, by) {
+export async function archiveApproved(mboId, client, prow, final, markup, ref, note, by) {
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const inserted = await client.query(`INSERT INTO review_history (${HIST_COLS})
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
     RETURNING *`,
-    [prow.key, prow.mbo_url, prow.url, prow.platform, prow.brand, prow.base_price,
+    [mboId, prow.key, prow.mbo_url, prow.url, prow.platform, prow.brand, prow.base_price,
       prow.live_price, prow.currency, prow.delta, prow.status, markup, ref, final, note, by, now]);
   await client.query(`UPDATE products SET decision=$1,markup_pct=$2,ref=$3,
     final_price=$4,note=$5,decided_at=$6,shopify_status=NULL,shopify_at=NULL
-    WHERE id=$7`, ['approved', markup, ref, final, note, now, prow.id]);
+    WHERE mbo_id=$7 AND id=$8`, ['approved', markup, ref, final, note, now, mboId, prow.id]);
   return inserted.rows[0];
 }
 
 // ---- history ----
 const PUSH_SUCCESS = "(shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')";
-export async function historyList(brands, status) {
-  const cl = []; const p = [];
+export async function historyList(mboId, brands, status) {
+  const cl = ["mbo_id=$1"]; const p = [mboId];
   if (brands && brands.length) { p.push(brands); cl.push(`brand = ANY($${p.length}::text[])`); }
   if (status === "pushed") cl.push(PUSH_SUCCESS);
   else if (status === "failed") cl.push(`shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}`);
   else if (status === "not_pushed") cl.push("shopify_status IS NULL");
-  const where = cl.length ? "WHERE " + cl.join(" AND ") : "";
-  const rows = await q(`SELECT * FROM review_history ${where} ORDER BY approved_at DESC`, p);
-  const s = await one(`SELECT COUNT(*) c, COALESCE(SUM(final_price),0) v,
-    COUNT(*) FILTER (WHERE ${PUSH_SUCCESS}) pushed,
-    COUNT(*) FILTER (WHERE shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}) failed,
-    COUNT(*) FILTER (WHERE shopify_status IS NULL) not_pushed FROM review_history`);
-  return { items: rows, count: num(s.c), value: Number(s.v) || 0,
-    pushed: num(s.pushed), failed: num(s.failed), not_pushed: num(s.not_pushed) };
+  const where = "WHERE " + cl.join(" AND ");
+  return withTenant(mboId, async (db) => {
+    const rows = await db.q(`SELECT * FROM review_history ${where} ORDER BY approved_at DESC`, p);
+    const s = await db.one(`SELECT COUNT(*) c, COALESCE(SUM(final_price),0) v,
+      COUNT(*) FILTER (WHERE ${PUSH_SUCCESS}) pushed,
+      COUNT(*) FILTER (WHERE shopify_status IS NOT NULL AND NOT ${PUSH_SUCCESS}) failed,
+      COUNT(*) FILTER (WHERE shopify_status IS NULL) not_pushed FROM review_history WHERE mbo_id=$1`, [mboId]);
+    return { items: rows, count: num(s.c), value: Number(s.v) || 0,
+      pushed: num(s.pushed), failed: num(s.failed), not_pushed: num(s.not_pushed) };
+  });
 }
 
-// ---- integrations (single global store) ----
-export async function getStoreIntegration() {
-  return one("SELECT * FROM integrations WHERE brand=$1", [STORE_KEY]);
+// ---- integrations (one Shopify store per tenant) ----
+export async function getStoreIntegration(mboId) {
+  return withTenant(mboId, (db) => db.one(
+    "SELECT * FROM integrations WHERE mbo_id=$1 AND brand=$2", [mboId, STORE_KEY]));
 }
-export async function integrationBrands() {
-  const brands = await q(`SELECT brand, COUNT(*) c, COUNT(*) FILTER (WHERE state='mismatch') m
-    FROM products WHERE brand<>'' GROUP BY brand ORDER BY c DESC`);
+export async function integrationBrands(mboId) {
+  const brands = await withTenant(mboId, (db) => db.q(`SELECT brand, COUNT(*) c, COUNT(*) FILTER (WHERE state='mismatch') m
+    FROM products WHERE mbo_id=$1 AND brand<>'' GROUP BY brand ORDER BY c DESC`, [mboId]));
   return brands.map((b) => ({ brand: b.brand, products: num(b.c), mismatches: num(b.m) }));
 }
 
@@ -756,7 +845,7 @@ export function parseAddSheet(buf) {
   });
 }
 
-export async function addProducts(rows) {
+export async function addProducts(mboId, rows) {
   const clean = (rows || [])
     .map((r) => ({
       url: String(r.url || "").trim(),
@@ -767,27 +856,23 @@ export async function addProducts(rows) {
     }))
     .filter((r) => r.url && Number.isFinite(r.base_price) && r.base_price > 0);
   if (!clean.length) return { added: 0 };
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    let idx = num((await client.query(
-      "SELECT COALESCE(MAX(split_part(key,'|',1)::int),0) m FROM products"
+  return withTenant(mboId, async (db) => {
+    let idx = num((await db.client.query(
+      "SELECT COALESCE(MAX(split_part(key,'|',1)::int),0) m FROM products WHERE mbo_id=$1", [mboId]
     )).rows[0].m);
     let added = 0;
     for (const r of clean) {
       idx += 1;
       const key = `${String(idx).padStart(5, "0")}|${r.url.slice(0, 280)}`;
-      const result = await client.query(
-        `INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (key) DO NOTHING`,
-        [key, r.mbo_url, r.url, r.platform, r.custom_regex, brandOf(r.url), r.base_price]
+      const result = await db.client.query(
+        `INSERT INTO products (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (mbo_id,key) DO NOTHING`,
+        [mboId, key, r.mbo_url, r.url, r.platform, r.custom_regex, brandOf(r.url), r.base_price]
       );
       added += result.rowCount;
     }
-    await client.query("COMMIT");
     return { added };
-  } catch (e) { await client.query("ROLLBACK"); throw e; }
-  finally { client.release(); }
+  });
 }
 
 export function previewSheet(buf) {
@@ -807,7 +892,7 @@ export function previewSheet(buf) {
   return { rows: total, domains,
     has_results: cols.includes('Live Price') || cols.includes('Status') };
 }
-export async function importSheet(buf, { replace = true, contains = '', domains = [] } = {}) {
+export async function importSheet(mboId, buf, { replace = true, contains = '', domains = [] } = {}) {
   const wb = XLSX.read(buf, { type: "buffer" });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
@@ -819,12 +904,10 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
     (!needle || p.url.toLowerCase().includes(needle)) &&
     (!domainSet.size || domainSet.has(p.brand)));
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  const client = await pool.connect();
-  let n = 0, removed = 0;
-  try {
-    await client.query("BEGIN");
+  const { n, removed } = await withTenant(mboId, async (db) => {
+    let n = 0, removed = 0;
     if (replace) {
-      const r = await client.query("DELETE FROM import_catalog");
+      const r = await db.client.query("DELETE FROM import_catalog WHERE mbo_id=$1", [mboId]);
       removed = r.rowCount;
     }
     const CH = 500;
@@ -832,27 +915,26 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
       const chunk = prods.slice(s, s + CH);
       const importVals = []; const importPh = [];
       chunk.forEach((p, j) => {
-        const b = j * 8;
-        importPh.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`);
-        importVals.push(p.key, p.mbo_url, p.url, p.platform, p.custom_regex,
+        const b = j * 9;
+        importPh.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9})`);
+        importVals.push(mboId, p.key, p.mbo_url, p.url, p.platform, p.custom_regex,
           p.brand, p.base_price, now);
       });
-      await client.query(`INSERT INTO import_catalog
-        (key,mbo_url,url,platform,custom_regex,brand,base_price,imported_at)
+      await db.client.query(`INSERT INTO import_catalog
+        (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price,imported_at)
         VALUES ${importPh.join(',')}
-        ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
+        ON CONFLICT(mbo_id,key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
           platform=excluded.platform,custom_regex=excluded.custom_regex,
           brand=excluded.brand,base_price=excluded.base_price,
           imported_at=excluded.imported_at`, importVals);
       n += chunk.length;
     }
-    await client.query("COMMIT");
-  } catch (e) { await client.query("ROLLBACK"); throw e; }
-  finally { client.release(); }
-  await setMeta("last_import", now);
-  await setMeta("last_import_rows", String(n));
-  await setMeta('last_import_contains', needle);
-  await setMeta('last_import_domains', [...domainSet].join(','));
+    return { n, removed };
+  });
+  await setMeta(mboId, "last_import", now);
+  await setMeta(mboId, "last_import_rows", String(n));
+  await setMeta(mboId, 'last_import_contains', needle);
+  await setMeta(mboId, 'last_import_domains', [...domainSet].join(','));
   return { rows: n, removed, at: now };
 }
 
@@ -860,29 +942,31 @@ export async function importSheet(buf, { replace = true, contains = '', domains 
 // (mbo_url/platform/custom_regex/brand/base_price) on matching keys. It
 // never deletes — a sheet that's missing rows (a partial/test file, a
 // stale export) can no longer wipe out the rest of the products table.
-export async function commitImportToProducts() {
-  const staged = num((await one("SELECT COUNT(*) c FROM import_catalog")).c);
-  if (!staged) return { added: 0, staged: 0, total: num((await one("SELECT COUNT(*) c FROM products")).c), skipped: true };
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const before = num((await client.query("SELECT COUNT(*) c FROM products")).rows[0].c);
+export async function commitImportToProducts(mboId) {
+  const staged = num((await withTenant(mboId, (db) => db.one(
+    "SELECT COUNT(*) c FROM import_catalog WHERE mbo_id=$1", [mboId]))).c);
+  if (!staged) {
+    const total = num((await withTenant(mboId, (db) => db.one(
+      "SELECT COUNT(*) c FROM products WHERE mbo_id=$1", [mboId]))).c);
+    return { added: 0, staged: 0, total, skipped: true };
+  }
+  return withTenant(mboId, async (db) => {
+    const before = num((await db.client.query("SELECT COUNT(*) c FROM products WHERE mbo_id=$1", [mboId])).rows[0].c);
     // COALESCE/NULLIF on platform+custom_regex: a sheet missing those
     // columns (e.g. a quick external test file) must not blank out a
     // scrape-critical field the product already had on file — that's
     // exactly what mislabeled a batch of Shopify products as generic
     // and made them scrape at 100x (cents, undescaled) on 2026-07-14.
-    await client.query(`INSERT INTO products (key,mbo_url,url,platform,custom_regex,brand,base_price)
-      SELECT key,mbo_url,url,platform,custom_regex,brand,base_price FROM import_catalog
-      ON CONFLICT(key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
+    await db.client.query(`INSERT INTO products (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price)
+      SELECT mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price FROM import_catalog
+      WHERE mbo_id=$1
+      ON CONFLICT(mbo_id,key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
         platform=COALESCE(NULLIF(excluded.platform,''), products.platform),
         custom_regex=COALESCE(NULLIF(excluded.custom_regex,''), products.custom_regex),
-        brand=excluded.brand,base_price=excluded.base_price`);
-    const after = num((await client.query("SELECT COUNT(*) c FROM products")).rows[0].c);
-    await client.query("COMMIT");
+        brand=excluded.brand,base_price=excluded.base_price`, [mboId]);
+    const after = num((await db.client.query("SELECT COUNT(*) c FROM products WHERE mbo_id=$1", [mboId])).rows[0].c);
     return { added: after - before, staged, total: after };
-  } catch (e) { await client.query("ROLLBACK"); throw e; }
-  finally { client.release(); }
+  });
 }
 
 // ---- verified-dead link marker ----
@@ -909,29 +993,46 @@ const PERMANENT_ERR_SQL = `(
 // row that is no longer in the error state (it recovered). Read/label only —
 // never deletes, never changes state or price. Returns how many were newly
 // marked dead.
-export async function markVerifiedDead() {
-  // A recovered row (matched/mismatch/pending) is not dead anymore.
-  await q(`UPDATE products SET verified_dead_at = NULL
-    WHERE verified_dead_at IS NOT NULL AND state <> 'error'`);
-  const r = await q(`
-    WITH ranked AS (
-      SELECT key, status,
-        ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) rn
-      FROM price_history
-    ),
-    last2 AS (
-      SELECT key, COUNT(*) n, bool_and(${PERMANENT_ERR_SQL}) both_dead
-      FROM ranked WHERE rn <= 2 GROUP BY key
-    )
-    UPDATE products p SET verified_dead_at = now()
-    FROM last2 l
-    WHERE p.key = l.key AND l.n >= 2 AND l.both_dead
-      AND p.state = 'error' AND p.verified_dead_at IS NULL
-    RETURNING p.key`);
-  return r.length;
+export async function markVerifiedDead(mboId) {
+  return withTenant(mboId, async (db) => {
+    // A recovered row (matched/mismatch/pending) is not dead anymore.
+    await db.q(`UPDATE products SET verified_dead_at = NULL
+      WHERE mbo_id=$1 AND verified_dead_at IS NOT NULL AND state <> 'error'`, [mboId]);
+    const r = await db.q(`
+      WITH ranked AS (
+        SELECT key, status,
+          ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) rn
+        FROM price_history WHERE mbo_id=$1
+      ),
+      last2 AS (
+        SELECT key, COUNT(*) n, bool_and(${PERMANENT_ERR_SQL}) both_dead
+        FROM ranked WHERE rn <= 2 GROUP BY key
+      )
+      UPDATE products p SET verified_dead_at = now()
+      FROM last2 l
+      WHERE p.mbo_id=$1 AND p.key = l.key AND l.n >= 2 AND l.both_dead
+        AND p.state = 'error' AND p.verified_dead_at IS NULL
+      RETURNING p.key`, [mboId]);
+    return r.length;
+  });
 }
-export async function clearVerifiedDead(key) {
-  await q("UPDATE products SET verified_dead_at=NULL WHERE key=$1", [key]);
+export async function clearVerifiedDead(mboId, key) {
+  await withTenant(mboId, (db) => db.q(
+    "UPDATE products SET verified_dead_at=NULL WHERE mbo_id=$1 AND key=$2", [mboId, key]));
+}
+
+// ---- error meter (per-tenant + used by the super-admin cross-tenant view) ----
+// Reuses the `Fetch Error (<cause>)` status-suffix convention already
+// written by pipeline.js's finalizeOne() — groups current error rows by
+// brand and cause so it's visible which site is failing and why.
+export async function errorMeter(mboId, { brand } = {}) {
+  const cl = ["mbo_id=$1", "state='error'"]; const p = [mboId];
+  if (brand) { cl.push(`brand=$${p.length + 1}`); p.push(brand); }
+  return withTenant(mboId, (db) => db.q(`SELECT brand,
+    COALESCE(NULLIF(regexp_replace(status, '^Fetch Error \\(([^)]*)\\).*$', '\\1'), status), 'unknown') AS cause,
+    COUNT(*) c, MAX(updated_at) last_seen
+    FROM products WHERE ${cl.join(" AND ")}
+    GROUP BY brand, cause ORDER BY c DESC`, p));
 }
 
 export { STORE_KEY };
