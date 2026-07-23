@@ -402,7 +402,10 @@ export async function startPipeline(eng, runId) {
     const cdMax = Math.max(cdMin, sec(cfg.cooldown_max, 1200));
     const fetcher = new Fetcher({ timeout: cfg.timeout_ms, cooldown: [cdMin, cdMax] });
     // Email: run started (skip in simulation — those are throwaway dry runs).
-    if (!cfg.simulation) mailLog(eng, sendPipelineStarted({ total: rows.length, runId }), "start");
+    // Goes to the user who started the run (eng.userEmail, set by /api/pipe/start
+    // from their logged-in session) — falls back to ALERT_TO only for engines
+    // built outside the API (one-off local refresh scripts have no session).
+    if (!cfg.simulation) mailLog(eng, sendPipelineStarted({ to: eng.userEmail, total: rows.length, runId }), "start");
     const mainTotal = rows.length;
     let halfSent = false;
     await runPass(eng, rows, Math.min(25, Math.max(1, cfg.concurrency)), fetcher, runId, (r) => {
@@ -410,7 +413,7 @@ export async function startPipeline(eng, runId) {
       // Email: fire once when the main pass crosses the halfway mark.
       if (!halfSent && !cfg.simulation && mainTotal > 0 && st.completed >= mainTotal / 2) {
         halfSent = true;
-        mailLog(eng, sendPipelineProgress({ done: st.completed, total: mainTotal }), "50%");
+        mailLog(eng, sendPipelineProgress({ to: eng.userEmail, done: st.completed, total: mainTotal }), "50%");
       }
     });
     if (!st.abort && cfg.safe_retry) {
@@ -430,7 +433,7 @@ export async function startPipeline(eng, runId) {
       });
       // Email: errors-resolved summary (only when there were errors to retry).
       if (!cfg.simulation && err.length) mailLog(eng, sendErrorsResolved({
-        stats: { retry_total: st.retry_total, retry_recovered: st.retry_recovered } }), "errors-resolved");
+        to: eng.userEmail, stats: { retry_total: st.retry_total, retry_recovered: st.retry_recovered } }), "errors-resolved");
     }
     // Label links that failed as permanent across their last two runs so
     // incremental runs stop re-fetching them (a fresh run still rechecks).
@@ -451,7 +454,8 @@ export async function startPipeline(eng, runId) {
     const stats = { completed: st.completed, matched: st.matched, mismatch: st.mismatch,
       errors: st.errors, recovered: st.retry_recovered,
       elapsed: st.started_at ? Math.floor((Date.now() - st.started_at) / 1000) : null };
-    // Completion email with the two sheets (price updates + full fetch snapshot).
-    await mailLog(eng, sendPipelineComplete({ stats }), "complete");
+    // Completion email with the two sheets (price updates + full fetch snapshot),
+    // sent to whoever started the run — not a fixed owner address.
+    await mailLog(eng, sendPipelineComplete({ to: eng.userEmail, stats }), "complete");
   }
 }

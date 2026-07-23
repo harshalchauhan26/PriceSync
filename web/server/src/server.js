@@ -226,6 +226,8 @@ app.post("/api/pipe/start", wrap(async (req, res) => {
   Object.assign(eng.state, { running: true, abort: false, phase: "main", completed: 0, matched: 0,
     mismatch: 0, errors: 0, retry_total: 0, retry_completed: 0, retry_recovered: 0, started_at: Date.now() });
   eng.log.length = 0; eng.logmeta.offset = 0;
+  // Pipeline lifecycle emails go to whoever started the run, not a fixed address.
+  eng.userEmail = req.session.email;
   const runId = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 13) + "-" + req.session.uid;
   pipe.startPipeline(eng, runId);
   res.json({ ok: true });
