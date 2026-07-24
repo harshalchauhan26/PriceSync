@@ -1229,6 +1229,230 @@ function Settings({me, admin}) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   SUPER ADMIN — cross-tenant platform view (no mbo_id of its own)
+═══════════════════════════════════════════════════════════════ */
+function SuperAdmin({ me }) {
+  const [mbos,setMbos]=useState(null);
+  const [sessions,setSessions]=useState([]);
+  const [selected,setSelected]=useState(null);
+  const [brands,setBrands]=useState(null);
+  const [users,setUsers]=useState(null);
+  const [showNew,setShowNew]=useState(false);
+  const [form,setForm]=useState({slug:"",name:"",ownerEmail:"",ownerPassword:""});
+  const [busy,setBusy]=useState(false);
+  const [renamingMbo,setRenamingMbo]=useState(null);
+  const [mboNameDraft,setMboNameDraft]=useState("");
+  const [renamingBrand,setRenamingBrand]=useState(null);
+  const [brandDraft,setBrandDraft]=useState("");
+  const [showAddUser,setShowAddUser]=useState(false);
+  const [userForm,setUserForm]=useState({email:"",password:"",role:"viewer"});
+
+  const load=()=>{
+    api("/api/superadmin/mbos").then(d=>setMbos(d.mbos||[]));
+    api("/api/superadmin/sessions").then(d=>setSessions(d.sessions||[]));
+  };
+  useEffect(()=>{ load(); const t=setInterval(load,15000); return()=>clearInterval(t); },[]);
+
+  const openMbo=(id)=>{
+    setSelected(id); setBrands(null); setUsers(null);
+    api(`/api/superadmin/mbos/${id}/brands`).then(d=>setBrands(d.brands||[]));
+    api(`/api/superadmin/mbos/${id}/users`).then(d=>setUsers(d.users||[]));
+  };
+
+  const changeRole=async(email,role)=>{
+    const r=await api("/api/superadmin/users/role",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,role})});
+    if(!r.ok){ toast(r.error||"role change failed","err"); return; }
+    toast(`${email} is now ${role}`);
+    if(selected) openMbo(selected);
+  };
+
+  const createMbo=async()=>{
+    setBusy(true);
+    const r=await api("/api/superadmin/mbos",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(form)});
+    setBusy(false);
+    if(!r.ok){ toast(r.error||"failed to create tenant","err"); return; }
+    toast(`Tenant "${r.mbo.name}" created`);
+    setShowNew(false); setForm({slug:"",name:"",ownerEmail:"",ownerPassword:""});
+    load();
+  };
+
+  const patchMbo=async(id,body)=>{
+    const r=await api(`/api/superadmin/mbos/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){ toast(r.error||"update failed","err"); return false; }
+    load(); return true;
+  };
+  const toggleStatus=(m)=>patchMbo(m.id,{status:m.status==="active"?"suspended":"active"})
+    .then(ok=>ok&&toast(`${m.name} ${m.status==="active"?"suspended":"reactivated"}`));
+  const saveRename=async(id)=>{
+    if(!mboNameDraft.trim()) return;
+    const ok=await patchMbo(id,{name:mboNameDraft.trim()});
+    if(ok){ toast("Renamed"); setRenamingMbo(null); }
+  };
+
+  const addUser=async()=>{
+    if(!selected) return;
+    setBusy(true);
+    const r=await api("/api/superadmin/users",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({...userForm,mboId:selected})});
+    setBusy(false);
+    if(!r.ok){ toast(r.error||"failed to add user","err"); return; }
+    toast(`${r.user.email} added as ${r.user.role}`);
+    setShowAddUser(false); setUserForm({email:"",password:"",role:"viewer"});
+    openMbo(selected);
+  };
+  const removeUser=async(email)=>{
+    if(!confirm(`Remove ${email}? They will lose access immediately.`)) return;
+    const r=await api(`/api/superadmin/users/${encodeURIComponent(email)}`,{method:"DELETE"});
+    if(!r.ok){ toast(r.error||"failed to remove user","err"); return; }
+    toast(`${email} removed`);
+    if(selected) openMbo(selected);
+  };
+
+  const renameBrand=async(oldBrand)=>{
+    if(!brandDraft.trim()||!selected) return;
+    const r=await api(`/api/superadmin/mbos/${selected}/brands/${encodeURIComponent(oldBrand)}`,
+      {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({brand:brandDraft.trim()})});
+    if(!r.ok){ toast(r.error||"rename failed","err"); return; }
+    toast(`Renamed ${r.updated} product(s)`);
+    setRenamingBrand(null); openMbo(selected);
+  };
+  const deleteBrand=async(brand)=>{
+    if(!selected) return;
+    if(!confirm(`Delete ALL products for "${brand}" under this MBO? This cannot be undone (price history is kept).`)) return;
+    const r=await api(`/api/superadmin/mbos/${selected}/brands/${encodeURIComponent(brand)}`,{method:"DELETE"});
+    if(!r.ok){ toast(r.error||"delete failed","err"); return; }
+    toast(`Deleted ${r.deleted} product(s)`);
+    openMbo(selected);
+  };
+
+  if(mbos===null) return <div style={{padding:40,color:"var(--on3)"}}>Loading…</div>;
+  const sel=mbos.find(m=>m.id===selected);
+
+  return <div style={{minHeight:"100vh",background:"var(--bg)",padding:"24px 28px",overflow:"auto"}}>
+    <div className="section-head">
+      <div>
+        <div style={{fontWeight:800,fontSize:20,letterSpacing:"-.02em"}}>Super Admin</div>
+        <div className="lbl" style={{marginTop:2}}>Cross-tenant platform view · {me.email}</div>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button className="btn btn-primary btn-sm" onClick={()=>setShowNew(s=>!s)}>+ New MBO</button>
+        <button className="btn btn-ghost btn-sm" onClick={async()=>{await api("/api/logout"); location.reload();}}>Sign out</button>
+      </div>
+    </div>
+
+    {showNew && <div className="card" style={{padding:16,marginBottom:16}}>
+      <div className="lbl" style={{marginBottom:10}}>Create new MBO (tenant)</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        <input className="inp" placeholder="slug (e.g. acme-boutique)" value={form.slug} onChange={e=>setForm(f=>({...f,slug:e.target.value}))}/>
+        <input className="inp" placeholder="Name (e.g. Acme Boutique)" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/>
+        <input className="inp" placeholder="Owner email" value={form.ownerEmail} onChange={e=>setForm(f=>({...f,ownerEmail:e.target.value}))}/>
+        <input className="inp" type="password" placeholder="Owner password (8+ chars)" value={form.ownerPassword} onChange={e=>setForm(f=>({...f,ownerPassword:e.target.value}))}/>
+      </div>
+      <button className="btn btn-success btn-sm" disabled={busy} onClick={createMbo}>Create tenant</button>
+    </div>}
+
+    <div style={{display:"grid",gridTemplateColumns:"1.3fr 1fr",gap:16}}>
+      <div className="card" style={{padding:16}}>
+        <div className="lbl" style={{marginBottom:10}}>MBOs ({mbos.length})</div>
+        <table className="tbl">
+          <thead><tr><th>Name</th><th>Slug</th><th>Status</th><th>Products</th><th>Mismatch</th><th>Errors</th><th>Users</th><th></th></tr></thead>
+          <tbody>
+            {mbos.map(m=><tr key={m.id} style={{background:selected===m.id?"var(--card2)":undefined}}>
+              <td onClick={()=>openMbo(m.id)} style={{cursor:"pointer"}}>
+                {renamingMbo===m.id
+                  ? <div style={{display:"flex",gap:6}} onClick={e=>e.stopPropagation()}>
+                      <input className="inp" style={{padding:"3px 6px"}} autoFocus value={mboNameDraft}
+                        onChange={e=>setMboNameDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveRename(m.id)}/>
+                      <button className="btn btn-success btn-sm" onClick={()=>saveRename(m.id)}>Save</button>
+                      <button className="btn btn-ghost btn-sm" onClick={()=>setRenamingMbo(null)}>✕</button>
+                    </div>
+                  : m.name}
+              </td>
+              <td className="mono" onClick={()=>openMbo(m.id)} style={{cursor:"pointer"}}>{m.slug}</td>
+              <td><span className="badge" style={{background:m.status==="active"?"rgba(34,197,94,.15)":"rgba(239,68,68,.15)",color:m.status==="active"?"var(--green)":"var(--red)"}}>{m.status}</span></td>
+              <td onClick={()=>openMbo(m.id)} style={{cursor:"pointer"}}>{m.product_count}</td>
+              <td onClick={()=>openMbo(m.id)} style={{cursor:"pointer",color:Number(m.mismatch_count)>0?"var(--amber)":undefined}}>{m.mismatch_count}</td>
+              <td onClick={()=>openMbo(m.id)} style={{cursor:"pointer",color:Number(m.error_count)>0?"var(--red)":undefined}}>{m.error_count}</td>
+              <td onClick={()=>openMbo(m.id)} style={{cursor:"pointer"}}>{m.user_count}</td>
+              <td>
+                <div style={{display:"flex",gap:4}}>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>{setRenamingMbo(m.id); setMboNameDraft(m.name);}}>Rename</button>
+                  <button className={`btn btn-sm ${m.status==="active"?"btn-danger":"btn-success"}`} onClick={()=>toggleStatus(m)}>{m.status==="active"?"Suspend":"Activate"}</button>
+                </div>
+              </td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card" style={{padding:16}}>
+        <div className="lbl" style={{marginBottom:10}}>Sessions ({sessions.filter(s=>s.active).length} online now)</div>
+        {sessions.length===0 && <div style={{color:"var(--on3)",fontSize:12}}>No sessions yet.</div>}
+        {sessions.map(s=><div key={s.sid} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid var(--border)",fontSize:12}}>
+          <div>
+            <div style={{fontWeight:600}}>{s.email}</div>
+            <div className="lbl">{s.role} · mbo {s.mbo_id ?? "—"}</div>
+          </div>
+          <span className="badge" style={{background:s.active?"rgba(34,197,94,.15)":"rgba(0,0,0,.06)",color:s.active?"var(--green)":"var(--on3)"}}>
+            {s.active?"online":`idle ${s.idle_s}s`}
+          </span>
+        </div>)}
+      </div>
+    </div>
+
+    {sel && <div className="card" style={{padding:16,marginTop:16}}>
+      <div className="lbl" style={{marginBottom:10}}>Brands under {sel.name}</div>
+      {brands===null ? <div style={{color:"var(--on3)",fontSize:12}}>Loading…</div> : brands.length===0 ? <div style={{color:"var(--on3)",fontSize:12,marginBottom:16}}>No products yet.</div> :
+        <table className="tbl" style={{marginBottom:20}}>
+          <thead><tr><th>Brand</th><th>Products</th><th>Matched</th><th>Mismatch</th><th>Errors</th><th></th></tr></thead>
+          <tbody>{brands.map(b=><tr key={b.brand}>
+            <td>{renamingBrand===b.brand
+              ? <div style={{display:"flex",gap:6}}>
+                  <input className="inp" style={{padding:"3px 6px"}} autoFocus value={brandDraft}
+                    onChange={e=>setBrandDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&renameBrand(b.brand)}/>
+                  <button className="btn btn-success btn-sm" onClick={()=>renameBrand(b.brand)}>Save</button>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>setRenamingBrand(null)}>✕</button>
+                </div>
+              : b.brand}</td>
+            <td>{b.product_count}</td>
+            <td style={{color:"var(--green)"}}>{b.matched_count}</td>
+            <td style={{color:"var(--amber)"}}>{b.mismatch_count}</td>
+            <td style={{color:"var(--red)"}}>{b.error_count}</td>
+            <td><div style={{display:"flex",gap:4}}>
+              <button className="btn btn-ghost btn-sm" onClick={()=>{setRenamingBrand(b.brand); setBrandDraft(b.brand);}}>Rename</button>
+              <button className="btn btn-danger btn-sm" onClick={()=>deleteBrand(b.brand)}>Delete</button>
+            </div></td>
+          </tr>)}</tbody>
+        </table>}
+
+      <div className="section-head" style={{marginBottom:10}}>
+        <div className="lbl">Users under this MBO</div>
+        <button className="btn btn-ghost btn-sm" onClick={()=>setShowAddUser(s=>!s)}>+ Add user</button>
+      </div>
+      {showAddUser && <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+        <input className="inp" placeholder="email" value={userForm.email} onChange={e=>setUserForm(f=>({...f,email:e.target.value}))}/>
+        <input className="inp" type="password" placeholder="password (8+ chars)" value={userForm.password} onChange={e=>setUserForm(f=>({...f,password:e.target.value}))}/>
+        <select className="inp" value={userForm.role} onChange={e=>setUserForm(f=>({...f,role:e.target.value}))}>
+          <option value="viewer">viewer</option><option value="admin">admin</option><option value="owner">owner</option>
+        </select>
+        <button className="btn btn-success btn-sm" disabled={busy} onClick={addUser}>Add</button>
+      </div>}
+      {users===null ? <div style={{color:"var(--on3)",fontSize:12}}>Loading…</div> :
+        <table className="tbl">
+          <thead><tr><th>Email</th><th>Role</th><th>Created</th><th></th></tr></thead>
+          <tbody>{users.map(u=><tr key={u.id}><td>{u.email}</td>
+            <td><select className="inp" style={{padding:"3px 6px"}} value={u.role} onChange={e=>changeRole(u.email,e.target.value)}>
+              <option value="viewer">viewer</option><option value="admin">admin</option><option value="owner">owner</option>
+            </select></td>
+            <td className="lbl">{String(u.created_at).slice(0,10)}</td>
+            <td><button className="btn btn-danger btn-sm" onClick={()=>removeUser(u.email)}>Remove</button></td>
+          </tr>)}</tbody>
+        </table>}
+    </div>}
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
    SHELL
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
@@ -1241,6 +1465,7 @@ export default function App() {
 
   if(me===undefined) return <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--on3)"}}>Loading…</div>;
   if(!me) return <><Toaster/><Auth onIn={d=>setMe(d)}/></>;
+  if(me.role==="super_admin") return <><Toaster/><SuperAdmin me={me}/></>;
 
   const admin=me.role==="admin"||me.role==="owner";
   const nav=[

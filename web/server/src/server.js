@@ -75,15 +75,16 @@ app.post("/api/login", wrap(async (req, res) => {
   const ip = sec.ipOf(req);
   if (sec.isLocked(ip)) return res.status(429).json({ ok: false, error: "too many attempts" });
   const brandSlug = String(req.body.brand || "").trim();
-  if (!brandSlug) return res.status(400).json({ ok: false, error: "brand ID required" });
   const u = await sec.verify(req.body.email, req.body.password);
   if (!u) { sec.registerFail(ip); return res.status(401).json({ ok: false, error: "invalid brand ID, email, or password" }); }
   if (u.role !== "super_admin") {
+    if (!brandSlug) return res.status(400).json({ ok: false, error: "brand ID required" });
     const mbo = await store.mboBySlug(brandSlug);
     if (!mbo || mbo.id !== u.mbo_id) {
       sec.registerFail(ip);
       return res.status(401).json({ ok: false, error: "invalid brand ID, email, or password" });
     }
+    if (mbo.status !== "active") return res.status(403).json({ ok: false, error: "this MBO has been suspended" });
   }
   sec.clearFails(ip); sec.loginUser(req, u);
   res.json({ ok: true, email: u.email, role: u.role });
@@ -121,6 +122,7 @@ app.post("/api/auth/google", wrap(async (req, res) => {
     if (!mbo || mbo.id !== u.mbo_id) {
       return res.status(401).json({ ok: false, error: "brand ID doesn't match this Google account's MBO" });
     }
+    if (mbo.status !== "active") return res.status(403).json({ ok: false, error: "this MBO has been suspended" });
   }
   sec.loginUser(req, u);
   res.json({ ok: true, email: u.email, role: u.role });
@@ -833,7 +835,122 @@ superRouter.get("/mbos/:id/users", wrap(async (req, res) => {
   if (!Number.isInteger(mboId)) return res.status(400).json({ ok: false, error: "invalid mbo id" });
   res.json({ users: (await sec.listUsers(mboId)).map((u) => ({ ...u, created_at: String(u.created_at) })) });
 }));
+superRouter.get("/mbos/:id/brands", wrap(async (req, res) => {
+  const mboId = Number(req.params.id);
+  if (!Number.isInteger(mboId)) return res.status(400).json({ ok: false, error: "invalid mbo id" });
+  const rows = await q(`SELECT brand,
+      COUNT(*) product_count,
+      COUNT(*) FILTER (WHERE state='matched') matched_count,
+      COUNT(*) FILTER (WHERE state='mismatch') mismatch_count,
+      COUNT(*) FILTER (WHERE state='error') error_count
+    FROM products WHERE mbo_id=$1 GROUP BY brand ORDER BY product_count DESC`, [mboId]);
+  res.json({ brands: rows });
+}));
 superRouter.get("/sessions", (req, res) => res.json({ sessions: sec.superAdminActiveSessions() }));
+// Role changes stay scoped to the ordinary tenant roles (viewer/admin/owner)
+// even from this cross-tenant view — promoting to super_admin is a deliberately
+// higher-friction, CLI-only action (seedSuperAdmin), not a button click here.
+superRouter.patch("/users/role", wrap(async (req, res) => {
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const role = String(req.body.role || "").trim();
+  if (!email || !sec.ROLES.has(role)) return res.status(400).json({ ok: false, error: "email and a valid role (viewer/admin/owner) are required" });
+  const u = await sec.getUser(email);
+  if (!u || u.mbo_id == null) return res.status(404).json({ ok: false, error: "no tenant user with that email" });
+  await sec.superAdminSetRole(email, role);
+  res.json({ ok: true });
+}));
+superRouter.post("/mbos", wrap(async (req, res) => {
+  const slug = String(req.body.slug || "").trim().toLowerCase();
+  const name = String(req.body.name || "").trim();
+  const ownerEmail = String(req.body.ownerEmail || "").trim().toLowerCase();
+  const ownerPassword = String(req.body.ownerPassword || "");
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) return res.status(400).json({ ok: false, error: "slug must be lowercase letters/digits/hyphens" });
+  if (!name) return res.status(400).json({ ok: false, error: "name is required" });
+  if (!ownerEmail) return res.status(400).json({ ok: false, error: "ownerEmail is required" });
+  if (ownerPassword.length < 8) return res.status(400).json({ ok: false, error: "ownerPassword must be at least 8 characters" });
+  if (await sec.getUser(ownerEmail)) return res.status(409).json({ ok: false, error: `a user with email ${ownerEmail} already exists` });
+  const existing = await q("SELECT id FROM mbo WHERE slug=$1", [slug]);
+  if (existing.length) return res.status(409).json({ ok: false, error: `a tenant with slug '${slug}' already exists` });
+  const [mbo] = await q("INSERT INTO mbo (slug, name) VALUES ($1,$2) RETURNING id, slug, name, created_at", [slug, name]);
+  const owner = await sec.createUser(ownerEmail, ownerPassword, "owner", mbo.id);
+  res.json({ ok: true, mbo, owner: { email: owner.email, role: owner.role } });
+}));
+// Rename and/or suspend a tenant. Suspended is enforced at login (both
+// /api/login and /api/auth/google) and as defense-in-depth in resolveTenant
+// for any session issued before the suspension — no hard delete here on
+// purpose: wiping a tenant's data is not a one-click dashboard action.
+superRouter.patch("/mbos/:id", wrap(async (req, res) => {
+  const mboId = Number(req.params.id);
+  if (!Number.isInteger(mboId)) return res.status(400).json({ ok: false, error: "invalid mbo id" });
+  const sets = []; const params = []; let i = 1;
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) return res.status(400).json({ ok: false, error: "name cannot be empty" });
+    sets.push(`name=$${i++}`); params.push(name);
+  }
+  if (req.body.status !== undefined) {
+    const status = String(req.body.status).trim();
+    if (!["active", "suspended"].includes(status)) return res.status(400).json({ ok: false, error: "status must be active or suspended" });
+    sets.push(`status=$${i++}`); params.push(status);
+  }
+  if (!sets.length) return res.status(400).json({ ok: false, error: "nothing to update" });
+  params.push(mboId);
+  const rows = await q(`UPDATE mbo SET ${sets.join(",")} WHERE id=$${i} RETURNING id, slug, name, status, created_at`, params);
+  if (!rows.length) return res.status(404).json({ ok: false, error: "mbo not found" });
+  if (req.body.status !== undefined) tenant.clearStatusCache();
+  res.json({ ok: true, mbo: rows[0] });
+}));
+// Create a user under any MBO (beyond the owner created alongside the MBO
+// itself) — e.g. adding an admin/viewer without going through that tenant's
+// own owner console.
+superRouter.post("/users", wrap(async (req, res) => {
+  const mboId = Number(req.body.mboId);
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+  const role = String(req.body.role || "viewer");
+  if (!Number.isInteger(mboId)) return res.status(400).json({ ok: false, error: "a valid mboId is required" });
+  if (!email) return res.status(400).json({ ok: false, error: "email is required" });
+  if (password.length < 8) return res.status(400).json({ ok: false, error: "password must be at least 8 characters" });
+  if (!sec.ROLES.has(role)) return res.status(400).json({ ok: false, error: "role must be viewer/admin/owner" });
+  if (await sec.getUser(email)) return res.status(409).json({ ok: false, error: `a user with email ${email} already exists` });
+  const mbo = await q("SELECT id FROM mbo WHERE id=$1", [mboId]);
+  if (!mbo.length) return res.status(404).json({ ok: false, error: "mbo not found" });
+  const u = await sec.createUser(email, password, role, mboId);
+  res.json({ ok: true, user: { id: u.id, email: u.email, role: u.role, mbo_id: u.mbo_id } });
+}));
+superRouter.delete("/users/:email", wrap(async (req, res) => {
+  const email = String(req.params.email || "").trim().toLowerCase();
+  const u = await sec.getUser(email);
+  if (!u || u.mbo_id == null) return res.status(404).json({ ok: false, error: "no tenant user with that email" });
+  await sec.superAdminDeleteUser(email);
+  res.json({ ok: true });
+}));
+// Brands aren't a table of their own — just a column on products — so
+// "managing" one means a bulk rename, or removing that brand's current
+// tracking data (matched/mismatch/error rows + its bucket-table copies).
+// price_history/review_history are left alone as an audit trail.
+superRouter.patch("/mbos/:id/brands/:brand", wrap(async (req, res) => {
+  const mboId = Number(req.params.id);
+  const oldBrand = decodeURIComponent(req.params.brand);
+  const newBrand = String(req.body.brand || "").trim();
+  if (!Number.isInteger(mboId)) return res.status(400).json({ ok: false, error: "invalid mbo id" });
+  if (!newBrand) return res.status(400).json({ ok: false, error: "new brand name is required" });
+  const rows = await q(`UPDATE products SET brand=$1 WHERE mbo_id=$2 AND brand=$3 RETURNING id`, [newBrand, mboId, oldBrand]);
+  for (const t of ["mismatch", "error", "resolved"]) {
+    await q(`UPDATE ${t} SET brand=$1 WHERE mbo_id=$2 AND brand=$3`, [newBrand, mboId, oldBrand]);
+  }
+  res.json({ ok: true, updated: rows.length });
+}));
+superRouter.delete("/mbos/:id/brands/:brand", wrap(async (req, res) => {
+  const mboId = Number(req.params.id);
+  const brand = decodeURIComponent(req.params.brand);
+  if (!Number.isInteger(mboId)) return res.status(400).json({ ok: false, error: "invalid mbo id" });
+  const rows = await q(`DELETE FROM products WHERE mbo_id=$1 AND brand=$2 RETURNING key`, [mboId, brand]);
+  for (const t of ["mismatch", "error", "resolved"]) {
+    await q(`DELETE FROM ${t} WHERE mbo_id=$1 AND brand=$2`, [mboId, brand]);
+  }
+  res.json({ ok: true, deleted: rows.length });
+}));
 app.use("/api/superadmin", superRouter);
 
 app.use("/api", tenantRouter);
