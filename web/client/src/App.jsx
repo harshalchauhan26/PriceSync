@@ -30,6 +30,7 @@ const PATHS = {
   alerts:"M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a2 2 0 0 0 3.4 0",
   plug:"M9 2v6M15 2v6M7 8h10v3a5 5 0 0 1-10 0V8ZM12 16v6",
   gear:"M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.6 1.6 0 0 0 .3 1.8M4.6 9a1.6 1.6 0 0 0-.3-1.8",
+  shield:"M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6z",
   home:"M3 11l9-8 9 8M5 10v10h14V10",
   play:"M8 5v14l11-7z",
   refresh:"M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5",
@@ -1477,6 +1478,12 @@ export default function App() {
     ["history","History","clock"],
     ["integrations","Integrations","plug"],
   ];
+  // Additive only — everything above is untouched. This is the ONLY
+  // account-gated addition: a tenant owner/admin flagged isPlatformAdmin
+  // keeps their normal Pipeline/Review/etc AND gets one extra button for
+  // the cross-tenant super-admin view (unlike the standalone role==
+  // "super_admin" account above, which has no tenant and no nav at all).
+  if(me.isPlatformAdmin) nav.push(["superadmin","Super Admin","shield"]);
 
   return <div style={{display:"flex",height:"100vh",overflow:"hidden"}}>
     <Toaster/>
@@ -1540,6 +1547,7 @@ export default function App() {
         {view==="integrations"&& <Integrations admin={admin}/>}
         {view==="home"        && <Home        go={setView} admin={admin}/>}
         {view==="settings"    && <Settings    me={me} admin={admin}/>}
+        {view==="superadmin"  && me.isPlatformAdmin && <SuperAdmin me={me}/>}
       </div>
     </div>
   </div>;

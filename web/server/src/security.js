@@ -17,16 +17,17 @@ export const SESSIONS = new Map();
 const ACTIVE_WINDOW = 300_000;
 const FAILS = new Map(); const MAX_FAILS = 5; const LOCK_WINDOW = 600_000;
 
-// Caches BOTH role and tenant assignment together (never just role) — a
-// user reassigned off a tenant or demoted must lose access on their very
-// next request, not just see a stale role with a stale mbo_id.
+// Caches role, tenant assignment, AND the platform-admin flag together — a
+// user reassigned off a tenant, demoted, or un-flagged must lose access on
+// their very next request, not just see stale identity for up to the TTL.
 const IDENTITY_CACHE = new Map();
 const IDENTITY_TTL = 10_000;
 export async function liveIdentity(uid) {
   const c = IDENTITY_CACHE.get(uid);
   if (c && c.exp > Date.now()) return c;
-  const u = await one("SELECT role, mbo_id FROM users WHERE id=$1", [uid]);
-  const entry = { role: u ? u.role : null, mboId: u ? u.mbo_id : null, exp: Date.now() + IDENTITY_TTL };
+  const u = await one("SELECT role, mbo_id, is_platform_admin FROM users WHERE id=$1", [uid]);
+  const entry = { role: u ? u.role : null, mboId: u ? u.mbo_id : null,
+    isPlatformAdmin: u ? !!u.is_platform_admin : false, exp: Date.now() + IDENTITY_TTL };
   IDENTITY_CACHE.set(uid, entry);
   return entry;
 }
@@ -47,7 +48,15 @@ export async function ensureUsers() {
   // tenant — that clobbered the super-admin conversion back to mbo_id=1 on
   // every restart until this exclusion was added (2026-07-23 incident).
   await q(`UPDATE users SET mbo_id=1 WHERE mbo_id IS NULL AND role <> 'super_admin'`);
+  // A SEPARATE, additive path onto the platform super-admin surface: a
+  // regular tenant owner/admin can be flagged here to gain the
+  // /api/superadmin/* view AS WELL AS their own tenant's normal Pipeline/
+  // Review/etc — unlike the 'super_admin' role above, which has no tenant
+  // at all and therefore no Pipeline to see. superAdminOnly accepts EITHER.
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_platform_admin BOOLEAN NOT NULL DEFAULT false`);
 }
+export const setPlatformAdmin = (email, flag) => q(
+  "UPDATE users SET is_platform_admin=$1 WHERE email=$2", [!!flag, email.toLowerCase().trim()]);
 // Global-by-email lookup — deliberately NOT tenant-scoped. Used for login,
 // where the tenant isn't known yet (that's exactly what this discovers).
 // Safe today because RLS isn't enabled until Phase D; once it is, this
@@ -187,6 +196,7 @@ export function loginUser(req, user) {
   const sid = Math.random().toString(16).slice(2) + Date.now().toString(16);
   req.session.uid = user.id; req.session.email = user.email; req.session.role = user.role;
   req.session.mboId = user.mbo_id; req.session.sid = sid;
+  req.session.isPlatformAdmin = !!user.is_platform_admin;
   SESSIONS.set(sid, { uid: user.id, email: user.email, role: user.role, mbo_id: user.mbo_id, ip: ipOf(req),
     ua: String(req.headers["user-agent"] || "").slice(0, 120), login_at: Date.now(), last_seen: Date.now() });
 }
@@ -210,10 +220,15 @@ export function activeSessions(mboId) {
   return activeSessionsUnfiltered().filter((s) => s.mbo_id === mboId);
 }
 export const currentUser = (req) => req.session.uid
-  ? { id: req.session.uid, email: req.session.email, role: req.session.role, mboId: req.session.mboId ?? null } : null;
+  ? { id: req.session.uid, email: req.session.email, role: req.session.role, mboId: req.session.mboId ?? null,
+      isPlatformAdmin: !!req.session.isPlatformAdmin } : null;
 export const isAdmin = (req) => ADMIN_ROLES.has(req.session.role);
 export const isOwner = (req) => req.session.role === "owner";
 export const isSuperAdmin = (req) => req.session.role === "super_admin";
+// True for either the platform-role account (no tenant) OR a regular tenant
+// owner/admin flagged is_platform_admin (keeps their own Pipeline/Review AND
+// gains the cross-tenant view) — superAdminOnly accepts either.
+export const isPlatformAdmin = (req) => isSuperAdmin(req) || !!req.session.isPlatformAdmin;
 
 // ---- middleware ----
 export async function guard(req, res, next) {
@@ -225,6 +240,7 @@ export async function guard(req, res, next) {
     if (identity.role == null) { logoutUser(req); return res.status(401).json({ error: "authentication required" }); }
     if (req.session.role !== identity.role) req.session.role = identity.role;
     if (req.session.mboId !== identity.mboId) req.session.mboId = identity.mboId;
+    if (req.session.isPlatformAdmin !== identity.isPlatformAdmin) req.session.isPlatformAdmin = identity.isPlatformAdmin;
   } catch (e) { return res.status(500).json({ error: "auth check failed" }); }
   touch(req);
   if (WRITE.has(req.method) && !isAdmin(req) && !isSuperAdmin(req)) return res.status(403).json({ error: "admin role required" });
@@ -238,7 +254,9 @@ export function ownerOnly(req, res, next) {
 // write-gating — a super_admin has no mbo_id/tenant role at all, so it
 // isn't "an admin" in the tenant sense and must never fall through to
 // ordinary tenant routes (see tenant.js's resolveTenant, which 403s those).
+// Accepts a flagged tenant owner/admin too (isPlatformAdmin), not just the
+// role=='super_admin' account.
 export function superAdminOnly(req, res, next) {
-  if (!isSuperAdmin(req)) return res.status(403).json({ error: "super_admin role required" });
+  if (!isPlatformAdmin(req)) return res.status(403).json({ error: "super_admin access required" });
   next();
 }
