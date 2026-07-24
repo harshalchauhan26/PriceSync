@@ -66,11 +66,25 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
 });
 
 // ---------- auth (public) ----------
+// Login requires the tenant's Brand ID alongside email/password — an
+// explicit, typed-in confirmation of which MBO you're signing into, and a
+// defense-in-depth check that the account actually belongs to that brand
+// (a platform super_admin has no brand and is exempt from this check; it
+// has no client UI anyway and is reached via /api/superadmin/* directly).
 app.post("/api/login", wrap(async (req, res) => {
   const ip = sec.ipOf(req);
   if (sec.isLocked(ip)) return res.status(429).json({ ok: false, error: "too many attempts" });
+  const brandSlug = String(req.body.brand || "").trim();
+  if (!brandSlug) return res.status(400).json({ ok: false, error: "brand ID required" });
   const u = await sec.verify(req.body.email, req.body.password);
-  if (!u) { sec.registerFail(ip); return res.status(401).json({ ok: false, error: "invalid email or password" }); }
+  if (!u) { sec.registerFail(ip); return res.status(401).json({ ok: false, error: "invalid brand ID, email, or password" }); }
+  if (u.role !== "super_admin") {
+    const mbo = await store.mboBySlug(brandSlug);
+    if (!mbo || mbo.id !== u.mbo_id) {
+      sec.registerFail(ip);
+      return res.status(401).json({ ok: false, error: "invalid brand ID, email, or password" });
+    }
+  }
   sec.clearFails(ip); sec.loginUser(req, u);
   res.json({ ok: true, email: u.email, role: u.role });
 }));
@@ -101,6 +115,13 @@ app.post("/api/auth/google", wrap(async (req, res) => {
   // sign-in now only authenticates an ALREADY admin-provisioned account; it
   // no longer auto-creates a tenant-less viewer for any verified email.
   if (!u) return res.status(403).json({ ok: false, error: "no account found for this Google email — ask your MBO's owner or the platform admin to create your account" });
+  if (u.role !== "super_admin") {
+    const brandSlug = String(req.body.brand || "").trim();
+    const mbo = brandSlug ? await store.mboBySlug(brandSlug) : null;
+    if (!mbo || mbo.id !== u.mbo_id) {
+      return res.status(401).json({ ok: false, error: "brand ID doesn't match this Google account's MBO" });
+    }
+  }
   sec.loginUser(req, u);
   res.json({ ok: true, email: u.email, role: u.role });
 }));

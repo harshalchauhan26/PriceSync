@@ -17,6 +17,16 @@ export function canonicalUrl(url) {
   } catch { return s; }
 }
 
+// Tenant-directory lookup — NOT tenant-scoped (the `mbo` table itself is the
+// list of tenants), so this queries the plain pool directly rather than
+// going through withTenant. Used at login to confirm the "Brand ID" the
+// user typed actually matches the account they're signing into.
+export async function mboBySlug(slug) {
+  const r = await pool.query("SELECT id, slug, name, status FROM mbo WHERE slug=$1",
+    [String(slug || "").trim().toLowerCase()]);
+  return r.rows[0] || null;
+}
+
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS products (' +
     'id BIGSERIAL PRIMARY KEY, key TEXT UNIQUE, mbo_url TEXT, url TEXT,' +

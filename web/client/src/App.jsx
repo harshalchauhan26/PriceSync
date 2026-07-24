@@ -17,7 +17,7 @@ function Toaster() {
   const [xs, setXs] = useState([]);
   _toast = (text, kind) => { const id = Math.random(); setXs(a=>[...a,{id,text,kind}]); setTimeout(()=>setXs(a=>a.filter(i=>i.id!==id)),3500); };
   return <div style={{ position:"fixed", top:16, right:16, zIndex:9999, display:"flex", flexDirection:"column", gap:8 }}>
-    {xs.map(t=><div key={t.id} className="toastin card2" style={{ padding:"10px 16px", fontSize:12.5, fontWeight:600, border:"1px solid "+(t.kind==="err"?"rgba(239,68,68,.4)":"rgba(34,197,94,.35)"), color: t.kind==="err"?"#ef4444":"var(--on)", minWidth:280, maxWidth:380, boxShadow:"0 8px 32px rgba(0,0,0,.18)" }}>{t.text}</div>)}
+    {xs.map(t=><div key={t.id} className="toastin card2" style={{ padding:"10px 16px", fontSize:12.5, fontWeight:600, border:"1px solid "+(t.kind==="err"?"rgba(239,68,68,.4)":"rgba(34,197,94,.35)"), color: t.kind==="err"?"#ef4444":"#e2e0ee", minWidth:280, maxWidth:380, boxShadow:"0 8px 32px rgba(0,0,0,.6)" }}>{t.text}</div>)}
   </div>;
 }
 const toast = (t, k="ok") => _toast(t, k);
@@ -58,8 +58,8 @@ const Icon = ({n,s=15,c="currentColor"}) =>
 /* ─── Toggle ───────────────────────────────────────────────── */
 function Toggle({on, onChange}) {
   return <button onClick={()=>onChange(!on)} className="tog-wrap"
-    style={{ background: on?"#22c55e":"rgba(0,0,0,.12)" }}>
-    <span className="tog-knob" style={{ left: on?20:3, background: on?"#03120a":"#9995a5" }} />
+    style={{ background: on?"#22c55e":"rgba(255,255,255,.08)" }}>
+    <span className="tog-knob" style={{ left: on?20:3, background: on?"#03120a":"#5c5a72" }} />
   </button>;
 }
 
@@ -179,10 +179,10 @@ function ChartBox({type,labels,datasets,options,h=200}) {
     if(!ref.current) return; if(inst.current) inst.current.destroy();
     inst.current=new Chart(ref.current.getContext("2d"),{type,data:{labels,datasets},
       options:Object.assign({responsive:true,maintainAspectRatio:false,animation:false,
-        plugins:{legend:{labels:{color:"#9995a5",font:{size:10}}}},
+        plugins:{legend:{labels:{color:"#5c5a72",font:{size:10}}}},
         scales:(type==="doughnut")?{}:{
-          x:{ticks:{color:"#9995a5",font:{size:10}},grid:{color:"rgba(0,0,0,.05)"}},
-          y:{ticks:{color:"#9995a5",font:{size:10}},grid:{color:"rgba(0,0,0,.05)"}}}},options||{})});
+          x:{ticks:{color:"#5c5a72",font:{size:10}},grid:{color:"rgba(255,255,255,.04)"}},
+          y:{ticks:{color:"#5c5a72",font:{size:10}},grid:{color:"rgba(255,255,255,.04)"}}}},options||{})});
     return()=>inst.current&&inst.current.destroy();
   },[sig,h]);
   return <div style={{height:h}}><canvas ref={ref}/></div>;
@@ -219,16 +219,19 @@ function PageBar({title, subtitle, brands, setBrands, brandScope, onClear, extra
    AUTH
 ═══════════════════════════════════════════════════════════════ */
 function Auth({onIn}) {
-  const [mode,setMode]=useState("login"); const [email,setE]=useState(""); const [pw,setPw]=useState(""); const [err,setErr]=useState(""); const [busy,setBusy]=useState(false);
+  // Self-serve signup is closed platform-wide — every MBO (brand) is
+  // provisioned by the platform admin, and its users by that MBO's own
+  // owner console. This form is login-only.
+  const [brand,setBrand]=useState(""); const [email,setE]=useState(""); const [pw,setPw]=useState(""); const [err,setErr]=useState(""); const [busy,setBusy]=useState(false);
   const gRef=useRef(null); const [gReady,setGReady]=useState(false);
-  const submit=async(e)=>{ e.preventDefault(); setBusy(true); setErr(""); const d=await aj(mode==="login"?"/api/login":"/api/register",{email,password:pw}); setBusy(false); if(d.ok) onIn(d); else setErr(d.error||"Failed"); };
+  const submit=async(e)=>{ e.preventDefault(); setBusy(true); setErr(""); const d=await aj("/api/login",{brand,email,password:pw}); setBusy(false); if(d.ok) onIn(d); else setErr(d.error||"Failed"); };
   useEffect(()=>{
     let dead=false;
     api("/api/auth/google/config").then(cfg=>{
       if(dead||!cfg.client_id) return;
       const init=()=>{ if(dead||!gRef.current) return;
         window.google.accounts.id.initialize({client_id:cfg.client_id,callback:async(resp)=>{
-          const d=await aj("/api/auth/google",{credential:resp.credential});
+          const d=await aj("/api/auth/google",{credential:resp.credential,brand});
           d.ok?onIn(d):setErr(d.error||"Google sign-in failed");
         }});
         window.google.accounts.id.renderButton(gRef.current,{theme:"outline",size:"large",width:286});
@@ -248,12 +251,14 @@ function Auth({onIn}) {
           <div className="lbl">Terminal v2.4</div>
         </div>
       </div>
+      <div className="lbl" style={{marginBottom:4}}>Brand ID</div>
+      <input className="inp" style={{width:"100%",marginBottom:12}} type="text" value={brand} onChange={e=>setBrand(e.target.value)} placeholder="e.g. studio-east" autoFocus required/>
       <div className="lbl" style={{marginBottom:4}}>Email</div>
-      <input className="inp" style={{width:"100%",marginBottom:12}} type="email" value={email} onChange={e=>setE(e.target.value)} autoFocus required/>
+      <input className="inp" style={{width:"100%",marginBottom:12}} type="email" value={email} onChange={e=>setE(e.target.value)} required/>
       <div className="lbl" style={{marginBottom:4}}>Password</div>
       <input className="inp" style={{width:"100%"}} type="password" value={pw} onChange={e=>setPw(e.target.value)} required/>
       <button disabled={busy} style={{width:"100%",marginTop:20,padding:"11px 0",borderRadius:8,background:"#3b82f6",color:"#fff",fontWeight:700,fontSize:14,border:"none",cursor:"pointer"}}>
-        {busy?"…":(mode==="login"?"Sign in":"Create account")}
+        {busy?"…":"Sign in"}
       </button>
       <div style={{marginTop:14}}>
         {gReady&&<div style={{display:"flex",alignItems:"center",gap:8,color:"var(--on3)",fontSize:11,marginBottom:10}}>
@@ -263,9 +268,7 @@ function Auth({onIn}) {
       </div>
       <div style={{marginTop:10,fontSize:12,color:"#ef4444",minHeight:16}}>{err}</div>
       <div style={{fontSize:12,color:"var(--on3)"}}>
-        {mode==="login"
-          ? <>No account? <span onClick={()=>setMode("register")} style={{color:"#3b82f6",cursor:"pointer"}}>Create one</span></>
-          : <>Have an account? <span onClick={()=>setMode("login")} style={{color:"#3b82f6",cursor:"pointer"}}>Sign in</span></>}
+        No account? Ask your brand's owner or the platform admin to create one.
       </div>
     </form>
   </div>;
@@ -297,7 +300,7 @@ function Home({go, admin}) {
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
       <div className="card" style={{padding:16}}>
         <div className="lbl" style={{marginBottom:12}}>Catalog Status</div>
-        <ChartBox type="doughnut" h={200} labels={["Matched","Mismatch","Error","Pending"]} datasets={[{data:[c.matched,c.mismatch,c.error,c.pending],backgroundColor:["#22c55e","#f59e0b","#ef4444","#b8b2a0"],borderWidth:0}]} options={{plugins:{legend:{position:"bottom"}},cutout:"60%"}}/>
+        <ChartBox type="doughnut" h={200} labels={["Matched","Mismatch","Error","Pending"]} datasets={[{data:[c.matched,c.mismatch,c.error,c.pending],backgroundColor:["#22c55e","#f59e0b","#ef4444","#27273a"],borderWidth:0}]} options={{plugins:{legend:{position:"bottom"}},cutout:"60%"}}/>
       </div>
       <div className="card" style={{padding:16}}>
         <div className="lbl" style={{marginBottom:12}}>Top Vendors by Mismatch</div>
