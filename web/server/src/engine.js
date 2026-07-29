@@ -335,15 +335,26 @@ export async function extractWordpress(fetcher, url, preferHigh = false) {
 // fetching via the relay: bot rules that redirect /product/ pages off
 // datacenter IPs typically leave /wp-json/ alone, and the JSON carries
 // explicit currency + minor-unit scaling.
-export function wooApiUrl(url) {
+// The incoming url may already carry a currency selection (extractRow appends
+// it via withCurrencyParam). CARRY IT OVER: the Store API is NOT immune to the
+// multi-currency plugin — /wp-json/wc/store honours ?wmc-currency= and, when
+// it's absent, falls back to geo-IP. Rebuilding this URL from scratch dropped
+// the param, so cloud runs silently got the egress country's currency:
+// saakshakinni.com returned GBP 298 for a ₹34,000 product, which then failed
+// against the INR baseline. Only the currency param is carried, not the whole
+// query string — the API takes its own params and slug must not be shadowed.
+export function wooApiUrl(url, currencyParam = "wmc-currency") {
   const u = new URL(url);
   const segs = u.pathname.replace(/\/+$/, "").split("/").filter(Boolean);
   const slug = segs[segs.length - 1] || "";
-  return `${u.origin}/wp-json/wc/store/v1/products?slug=${encodeURIComponent(slug)}`;
+  let out = `${u.origin}/wp-json/wc/store/v1/products?slug=${encodeURIComponent(slug)}`;
+  const cur = currencyParam ? u.searchParams.get(currencyParam) : null;
+  if (cur) out += `&${encodeURIComponent(currencyParam)}=${encodeURIComponent(cur)}`;
+  return out;
 }
 
-export async function extractWooApi(fetcher, url, preferHigh = false) {
-  const resp = await fetcher.get(wooApiUrl(url));
+export async function extractWooApi(fetcher, url, preferHigh = false, currencyParam = "wmc-currency") {
+  const resp = await fetcher.get(wooApiUrl(url, currencyParam));
   let arr;
   try { arr = JSON.parse(resp.data); } catch { return [null, null]; }
   const p = Array.isArray(arr) ? arr[0]?.prices : null;
@@ -401,7 +412,10 @@ export async function extractRow(fetcher, url, platform, customRegex, opts = {})
   const hi = opts.preferHighPrice === true;
   let res;
   if (p === "shopify") res = await extractShopify(fetcher, u, hi);
-  else if (opts.wooApi) res = await extractWooApi(fetcher, u, hi); // relay path: JSON API instead of bot-blocked /product/ HTML
+  // JSON API instead of bot-blocked /product/ HTML. `u` already carries the
+  // currency param, and wooApiUrl carries it onto the API URL — without that the
+  // API geo-falls-back and returns the egress country's currency.
+  else if (opts.wooApi) res = await extractWooApi(fetcher, u, hi, opts.currencyParam || "wmc-currency");
   else if (customRegex) res = await extractCustom(fetcher, u, customRegex, hi); // regex wins for wordpress/custom/unknown
   // Unknown/blank platform (e.g. a row imported from an external sheet with
   // no Platform Type column) — route through extractShopify anyway: it

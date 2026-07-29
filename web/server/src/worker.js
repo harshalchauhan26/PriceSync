@@ -49,8 +49,9 @@ await Promise.all(rows.map((prod) => limit(async () => {
         // fetch can hit the same geo-redirect a foreign relay IP does.
         appendParams: (relayParams && relayParams[brand]) || undefined,
         // NOT gated on viaRelay — see pipeline.js processOne for why. The Store
-        // API returns base-currency (INR) prices on any egress; relay-gating it
-        // let a missing FETCH_RELAY_URL silently fall back to geo-priced HTML.
+        // API still needs the currency param carried onto it (wooApiUrl does
+        // that); relay-gating this let a missing FETCH_RELAY_URL silently fall
+        // back to geo-priced HTML.
         wooApi: wooApiSet.has(brand) || undefined,
       }
     );

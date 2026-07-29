@@ -115,6 +115,25 @@ test("withCurrencyParam / wooApiUrl build URLs correctly", () => {
   assert.equal(wooApiUrl("https://x.com/product/my-saree/"), "https://x.com/wp-json/wc/store/v1/products?slug=my-saree");
 });
 
+test("INCIDENT: wooApiUrl carries the currency param onto the Store API URL", () => {
+  // /wp-json/wc/store is NOT geo-immune — it honours ?wmc-currency= and falls
+  // back to the egress country's currency without it. Rebuilding the API URL
+  // from scratch dropped the param, so cloud runs read saakshakinni.com as
+  // GBP 298 for a ₹34,000 product and every row failed against its INR baseline.
+  assert.equal(
+    wooApiUrl("https://x.com/product/my-saree/?wmc-currency=INR"),
+    "https://x.com/wp-json/wc/store/v1/products?slug=my-saree&wmc-currency=INR");
+  // No currency selected -> unchanged, so non-multi-currency brands are untouched.
+  assert.equal(
+    wooApiUrl("https://x.com/product/my-saree/"),
+    "https://x.com/wp-json/wc/store/v1/products?slug=my-saree");
+  // A non-currency query param must NOT be forwarded — the API has its own
+  // params and `slug` must never be shadowed.
+  assert.equal(
+    wooApiUrl("https://x.com/product/my-saree/?slug=evil&switch=true"),
+    "https://x.com/wp-json/wc/store/v1/products?slug=my-saree");
+});
+
 test("roundFinal rounds to the nearest 0/5/10 bucket", () => {
   assert.equal(roundFinal(1002), 1000);
   assert.equal(roundFinal(1003), 1005);
