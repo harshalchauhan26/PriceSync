@@ -63,3 +63,30 @@ test("no requested currency means no guard — shopify and native brands are exe
 test("STRICT_FETCH_CURRENCY=0 restores convert-and-compare", () => {
   assert.equal(rejects("INR", "GBP", false), false);
 });
+
+// brandSetFrom — meta lists used to UNION the code defaults, so a hard-coded
+// default could never be removed by configuration. That is why labelanushree /
+// mymoledro could not join the normal cloud pool without a code edit.
+const { brandSetFrom } = await import("../src/store.js");
+
+test("brandSetFrom: a plain entry adds (existing behaviour unchanged)", () => {
+  const s = brandSetFrom(new Set(["a.com"]), "b.com, c.com");
+  assert.deepEqual([...s].sort(), ["a.com", "b.com", "c.com"]);
+});
+
+test("brandSetFrom: a '-' entry removes, including a hard-coded default", () => {
+  const s = brandSetFrom(new Set(["labelanushree.com", "mymoledro.com"]),
+    "-labelanushree.com,-mymoledro.com");
+  assert.deepEqual([...s], []);
+});
+
+test("brandSetFrom: add and remove compose, and www./case are normalised", () => {
+  const s = brandSetFrom(new Set(["a.com", "b.com"]), "-www.A.com, C.com");
+  assert.deepEqual([...s].sort(), ["b.com", "c.com"]);
+});
+
+test("brandSetFrom: empty/blank meta leaves the defaults intact", () => {
+  for (const raw of ["", "  ", ",,", null, undefined]) {
+    assert.deepEqual([...brandSetFrom(new Set(["a.com"]), raw)], ["a.com"]);
+  }
+});

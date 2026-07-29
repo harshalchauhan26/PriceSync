@@ -650,11 +650,29 @@ const DEFAULT_LOCAL_ONLY_BRANDS = new Set([
   // exactly. No query param/header override worked; fetch it locally.
   "mymoledro.com",
 ]);
+// These meta lists UNION the code defaults, so a hard-coded default could not be
+// removed by configuration at all — labelanushree/mymoledro could never be
+// brought into the normal cloud pool without editing source. An entry prefixed
+// "-" now REMOVES a brand, including a default, so the behaviour is adjustable
+// in both directions and revertible without a deploy. Plain entries still add,
+// so every existing value keeps its current meaning.
+//   e.g. "-mymoledro.com"  -> drop that brand from the set
+//        "acme.com"        -> add it (unchanged)
+export function brandSetFrom(defaults, raw) {
+  const set = new Set(defaults);
+  for (const tok of String(raw || "").split(",")) {
+    const t = tok.trim();
+    if (!t) continue;
+    if (t.startsWith("-")) set.delete(normBrand(t.slice(1)));
+    else { const b = normBrand(t); if (b) set.add(b); }
+  }
+  return set;
+}
 export async function localOnlyBrandSet(mboId) {
   const cached = _localOnlyCache.get(mboId);
   if (cached && Date.now() - cached.at < 30_000) return cached.set;
   const raw = await getMeta(mboId, "local_only_brands", "");
-  const set = new Set([...DEFAULT_LOCAL_ONLY_BRANDS, ...String(raw || "").split(",").map(normBrand).filter(Boolean)]);
+  const set = brandSetFrom(DEFAULT_LOCAL_ONLY_BRANDS, raw);
   _localOnlyCache.set(mboId, { at: Date.now(), set });
   return set;
 }
@@ -679,7 +697,8 @@ export async function cloudSkipBrandSet(mboId) {
   const cached = _cloudSkipCache.get(mboId);
   if (cached && Date.now() - cached.at < 30_000) return cached.set;
   const raw = await getMeta(mboId, "cloud_skip_brands", "");
-  const set = new Set([...DEFAULT_CLOUD_SKIP_BRANDS, ...String(raw || "").split(",").map(normBrand).filter(Boolean)]);
+  // "-brand.com" removes, including these defaults — see brandSetFrom.
+  const set = brandSetFrom(DEFAULT_CLOUD_SKIP_BRANDS, raw);
   _cloudSkipCache.set(mboId, { at: Date.now(), set });
   return set;
 }
