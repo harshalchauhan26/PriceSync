@@ -72,6 +72,11 @@ export const config = {
   // checked first; prefix scanning is only the fallback.
   //   Brevo: xkeysib-…   Resend: re_…   SendGrid: SG.…
   mail: mailKeys(e),
+  // Product count at or above which a run ALSO sends the "started" and "50%"
+  // notices. Below it, a run sends only the completion mail (which carries the
+  // sheets) — a small run finishes quickly enough that progress mail is noise,
+  // and on a free plan capped per day those sends are better spent elsewhere.
+  mailProgressMin: Math.max(0, parseInt(e.MAIL_PROGRESS_MIN || "2000", 10) || 2000),
 };
 
 function mailKeys(e) {

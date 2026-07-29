@@ -357,19 +357,32 @@ export async function sendErrorsResolved({ mboId, to, stats } = {}) {
 //      (approved in Review and confirmed updated) = "latest price updates".
 //   2. price_fetch_all — every product the pipeline holds, with a state column
 //      (matched / mismatch / error) so it filters in Excel = "latest fetch".
-export async function sendPipelineComplete({ mboId, to, stats } = {}) {
+export async function sendPipelineComplete({ mboId, to, stats, runId } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
 
+  // Scoped to THIS RUN, not the whole catalogue. products.run_id is stamped by
+  // saveResult for every row the run touched, so filtering on it yields exactly
+  // the products that ran — nothing more, nothing less. A 95-product run used to
+  // attach a sheet of all 8,900+ rows in the tenant, which made the attachment
+  // useless for seeing what the run actually did.
+  // runId is absent only for engines built outside the API (local refresh
+  // scripts); those keep the old whole-tenant snapshot.
+  const scoped = !!runId;
+  const params = scoped ? [mboId, runId] : [mboId];
   const updated = await q(
-    `SELECT brand, url, base_price, final_price, currency, status, shopify_status, approved_at
-       FROM review_history
-      WHERE mbo_id=$1 AND (shopify_status LIKE 'updated%' OR shopify_status LIKE 'DRY RUN%')
-        AND approved_at >= now() - interval '24 hours'
-      ORDER BY approved_at DESC`, [mboId]).catch(() => []);
+    `SELECT rh.brand, rh.url, rh.base_price, rh.final_price, rh.currency, rh.status,
+            rh.shopify_status, rh.approved_at
+       FROM review_history rh
+      WHERE rh.mbo_id=$1 AND (rh.shopify_status LIKE 'updated%' OR rh.shopify_status LIKE 'DRY RUN%')
+        AND rh.approved_at >= now() - interval '24 hours'` +
+    (scoped ? ` AND EXISTS (SELECT 1 FROM products p
+        WHERE p.mbo_id=rh.mbo_id AND p.key=rh.key AND p.run_id=$2)` : ``) +
+    ` ORDER BY rh.approved_at DESC`, params).catch(() => []);
   const allRows = await q(
     `SELECT brand, url, base_price, live_price, currency, state, status, delta
-       FROM products WHERE mbo_id=$1 ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, [mboId]).catch(() => []);
+       FROM products WHERE mbo_id=$1${scoped ? " AND run_id=$2" : ""}
+      ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, params).catch(() => []);
 
   const wbUpdated = new ExcelJS.Workbook();
   flatSheet(wbUpdated, "Price Updates", [
@@ -393,17 +406,19 @@ export async function sendPipelineComplete({ mboId, to, stats } = {}) {
     `${stats.mismatch ?? 0} mismatched, ${stats.errors ?? 0} error(s)` +
     (stats.recovered ? ` (${stats.recovered} recovered on retry)` : "") +
     (stats.elapsed != null ? ` in ${stats.elapsed}s` : ""));
-  parts.push(`${updated.length} price update(s) pushed to Shopify in the last 24h`);
-  parts.push(`${allRows.length} product(s) in the latest fetch snapshot`);
+  parts.push(`${allRows.length} product(s) in this run — the attached sheets cover exactly these`);
+  parts.push(`${updated.length} of them had a price pushed to Shopify in the last 24h`);
 
   await deliver({
     from, to: g.to,
-    subject: `MBO Tracker — pipeline finished: ${stats ? `${stats.completed ?? 0} checked, ` : ""}${stats?.mismatch ?? 0} mismatch, ${stats?.errors ?? 0} error (${today()})`,
+    subject: `MBO Tracker — pipeline finished: ${allRows.length} product(s), ` +
+      `${stats?.mismatch ?? 0} mismatch, ${stats?.errors ?? 0} error (${today()})`,
     text: `A pricing pipeline run just finished.\n\n` +
       parts.map((p) => `• ${p}`).join("\n") + `\n\n` +
-      `Two sheets are attached:\n` +
-      `  1. price_updates — products whose price was updated (pushed to Shopify, last 24h).\n` +
-      `  2. price_fetch_all — every product from the latest fetch; filter the "state" ` +
+      `Two sheets are attached, both covering ONLY the ${allRows.length} product(s) ` +
+      `in this run:\n` +
+      `  1. price_updates — those whose price was pushed to Shopify (last 24h).\n` +
+      `  2. price_fetch_all — every product this run fetched; filter the "state" ` +
       `column into matched / mismatch / error.\n\n` +
       `Mismatches are PENDING APPROVAL — nothing is pushed automatically.\n\n— MBO Tracker`,
     attachments: [

@@ -410,17 +410,31 @@ export async function startPipeline(eng, runId) {
     const cdMin = sec(cfg.cooldown_min, 400);
     const cdMax = Math.max(cdMin, sec(cfg.cooldown_max, 1200));
     const fetcher = new Fetcher({ timeout: cfg.timeout_ms, cooldown: [cdMin, cdMax] });
+    const mainTotal = rows.length;
+    // Only a BIG run gets progress mail. A small run sends one email — the
+    // completion report with its sheets — because it finishes quickly and the
+    // start/50% notices are pure noise that eat a capped daily send quota.
+    // Threshold is MAIL_PROGRESS_MIN (default 2000 products).
+    const progressMail = mainTotal >= config.mailProgressMin;
     // Email: run started (skip in simulation — those are throwaway dry runs).
     // Goes to the user who started the run (eng.userEmail, set by /api/pipe/start
     // from their logged-in session) — falls back to ALERT_TO only for engines
     // built outside the API (one-off local refresh scripts have no session).
-    if (!cfg.simulation) mailLog(eng, sendPipelineStarted({ mboId, to: eng.userEmail, total: rows.length, runId }), "start");
-    const mainTotal = rows.length;
+    if (!cfg.simulation && progressMail) {
+      mailLog(eng, sendPipelineStarted({ mboId, to: eng.userEmail, total: mainTotal, runId }), "start");
+    } else if (!cfg.simulation) {
+      // Say so in the run log, so "why no start email?" is answerable without
+      // reading the source.
+      log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-", status: "Email",
+        msg: `start/50% skipped — ${mainTotal} product(s) is under the ${config.mailProgressMin} threshold; ` +
+          `the completion report with sheets still sends` });
+    }
     let halfSent = false;
     await runPass(eng, rows, Math.min(25, Math.max(1, cfg.concurrency)), fetcher, runId, (r) => {
       st.completed++; st[r === "matched" ? "matched" : r === "mismatch" ? "mismatch" : "errors"]++;
-      // Email: fire once when the main pass crosses the halfway mark.
-      if (!halfSent && !cfg.simulation && mainTotal > 0 && st.completed >= mainTotal / 2) {
+      // Email: fire once when the main pass crosses the halfway mark — big runs
+      // only (see progressMail above).
+      if (!halfSent && !cfg.simulation && progressMail && mainTotal > 0 && st.completed >= mainTotal / 2) {
         halfSent = true;
         mailLog(eng, sendPipelineProgress({ to: eng.userEmail, done: st.completed, total: mainTotal }), "50%");
       }
@@ -440,8 +454,11 @@ export async function startPipeline(eng, runId) {
         if (r !== "error") { st.retry_recovered++; st.errors = Math.max(0, st.errors - 1);
           if (r === "matched") st.matched++; else if (r === "mismatch") st.mismatch++; }
       });
-      // Email: errors-resolved summary (only when there were errors to retry).
-      if (!cfg.simulation && err.length) mailLog(eng, sendErrorsResolved({
+      // Email: errors-resolved summary — only when there were errors to retry,
+      // and only on a big run. On a small run this is folded into the completion
+      // report: its price_fetch_all sheet carries every row's state, errors
+      // included, so suppressing it loses no information.
+      if (!cfg.simulation && progressMail && err.length) mailLog(eng, sendErrorsResolved({
         mboId, to: eng.userEmail, stats: { retry_total: st.retry_total, retry_recovered: st.retry_recovered } }), "errors-resolved");
     }
     // Label links that failed as permanent across their last two runs so
@@ -465,6 +482,7 @@ export async function startPipeline(eng, runId) {
       elapsed: st.started_at ? Math.floor((Date.now() - st.started_at) / 1000) : null };
     // Completion email with the two sheets (price updates + full fetch snapshot),
     // sent to whoever started the run — not a fixed owner address.
-    await mailLog(eng, sendPipelineComplete({ mboId, to: eng.userEmail, stats }), "complete");
+    // runId scopes the attached sheets to exactly the products this run touched.
+    await mailLog(eng, sendPipelineComplete({ mboId, to: eng.userEmail, stats, runId }), "complete");
   }
 }

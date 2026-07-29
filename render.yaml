@@ -87,6 +87,13 @@ services:
         sync: false
       - key: ALERT_TO
         sync: false              # where the pipeline reports go
+      # How many mails a run sends. The completion report (with both sheets)
+      # ALWAYS sends. The "started" and "50%" notices only send when the run has
+      # at least this many products — a small run finishes fast enough that they
+      # are noise, and free mail plans are capped per DAY. Lower it to get
+      # progress mail on smaller runs; "0" sends everything on every run.
+      - key: MAIL_PROGRESS_MIN
+        value: "2000"
       # --- fetch relay (lets cloud runs reach IP-banned brands; optional) ---
       - key: FETCH_RELAY_URL
         sync: false
