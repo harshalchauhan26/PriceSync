@@ -66,10 +66,14 @@ const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").tri
 
 // Fire-and-forget an email and record the outcome in the run log. Never throws
 // — a mail failure must not abort or fail the pipeline run.
+// Logs the FULL recipient list (not just "sent"), plus any addresses dropped as
+// undeliverable: mail going to an unexpected inbox is otherwise invisible here,
+// which is what let a week of pipeline reports land on the wrong person.
 function mailLog(eng, promise, label) {
   return Promise.resolve(promise)
     .then((r) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-",
-      status: "Email", msg: `${label}: ${r?.ok ? `sent to ${r.to}` : `not sent (${r?.error || "unknown"})`}` }))
+      status: "Email", msg: `${label}: ${r?.ok ? `sent to ${r.to}` : `not sent (${r?.error || "unknown"})`}` +
+        (r?.dropped?.length ? ` · dropped undeliverable: ${r.dropped.join(", ")}` : "") }))
     .catch((e) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-",
       status: "Email", msg: `${label}: send failed — ${e.message}` }));
 }

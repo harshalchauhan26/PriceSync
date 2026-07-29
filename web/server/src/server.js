@@ -96,7 +96,17 @@ app.post("/api/login", wrap(async (req, res) => {
 app.post("/api/register", wrap(async (req, res) => {
   res.status(403).json({ ok: false, error: "self sign-up is not open — ask your MBO's owner or the platform admin to create your account" });
 }));
-app.get("/api/health", (req, res) => { const active = pipe.runningCount(); res.json({ ok: true, running: active > 0, active_runs: active }); });
+// Public — booleans only, never the addresses or credentials themselves.
+// email_configured answers "can this instance send mail at all?" without a
+// dashboard login: on Render the SMTP_* vars are sync:false (entered by hand),
+// so a deploy that silently lacks them sends nothing and looks identical to a
+// working one from the outside.
+app.get("/api/health", (req, res) => {
+  const active = pipe.runningCount();
+  const { user, pass, to } = config.smtp;
+  res.json({ ok: true, running: active > 0, active_runs: active,
+    email_configured: !!(user && pass), alert_to_set: !!to });
+});
 app.get("/api/auth/google/config", (req, res) => res.json({ client_id: config.googleClientId }));
 app.post("/api/auth/google", wrap(async (req, res) => {
   if (!config.googleClientId) {
@@ -111,12 +121,25 @@ app.post("/api/auth/google", wrap(async (req, res) => {
   if (String(info.email_verified) !== "true") return res.status(401).json({ ok: false, error: "Google email not verified" });
   const email = String(info.email || "").toLowerCase().trim();
   if (!email.includes("@")) return res.status(400).json({ ok: false, error: "no email in Google account" });
-  const u = await sec.getUser(email);
-  // Self-serve signup is closed platform-wide (see decision #3) — Google
-  // sign-in now only authenticates an ALREADY admin-provisioned account; it
-  // no longer auto-creates a tenant-less viewer for any verified email.
-  if (!u) return res.status(403).json({ ok: false, error: "no account found for this Google email — ask your MBO's owner or the platform admin to create your account" });
-  if (u.role !== "super_admin") {
+  let u = await sec.getUser(email);
+  if (!u) {
+    // Self-serve signup via Google is open to anyone — but a brand-new
+    // account starts unapproved (no tenant data access at all, see
+    // tenant.js's resolveTenant) until the tenant owner approves it. It
+    // lands on Tenant #1 since a first-time signup has no Brand ID context
+    // to resolve to any other MBO. The random password is never used —
+    // this account only ever signs in via Google.
+    const studioEast = await q("SELECT status FROM mbo WHERE id=1");
+    if (!studioEast.length || studioEast[0].status !== "active") {
+      return res.status(403).json({ ok: false, error: "sign-up is not available right now" });
+    }
+    u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer", 1, false);
+    // Notify the owner that someone is waiting for approval — an unapproved
+    // account can't do anything until a human acts, so a silent signup just
+    // strands the user. Fire-and-forget: a mail failure must never block the
+    // sign-in itself.
+    sendNewSignup({ email }).catch((e) => console.error("[MBO] signup notify failed:", e.message));
+  } else if (u.role !== "super_admin") {
     const brandSlug = String(req.body.brand || "").trim();
     const mbo = brandSlug ? await store.mboBySlug(brandSlug) : null;
     if (!mbo || mbo.id !== u.mbo_id) {
@@ -125,7 +148,7 @@ app.post("/api/auth/google", wrap(async (req, res) => {
     if (mbo.status !== "active") return res.status(403).json({ ok: false, error: "this MBO has been suspended" });
   }
   sec.loginUser(req, u);
-  res.json({ ok: true, email: u.email, role: u.role });
+  res.json({ ok: true, email: u.email, role: u.role, approved: u.approved !== false });
 }));
 
 app.use("/api", sec.guard);
@@ -764,30 +787,42 @@ async function sendXlsx(res, name, rows) {
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   await wb.xlsx.write(res); res.end();
 }
-tenantRouter.get("/export", wrap(async (req, res) => {
-  const mboId = req.mboId;
+// Builds the row query AND a matching COUNT for the same filter, so the total
+// previewed on the Export page can never drift from what the download holds
+// (one WHERE, two uses — not two hand-kept-in-sync queries).
+const EXPORT_COLS = "id,brand,platform,url,base_price,live_price,currency,status,state,delta,decision,markup_pct,final_price";
+function exportQuery(req) {
   const kind = req.query.kind || "all";
   const stateWhere = { all: "1=1", mismatch: "state='mismatch'", error: "state='error'", approved: "decision='approved'" }[kind] || "1=1";
   const brands = (req.query.brands || "").split(",").map((b) => b.trim()).filter(Boolean);
-  const params = [mboId];
-  const cols = "id,brand,platform,url,base_price,live_price,currency,status,state,delta,decision,markup_pct,final_price";
-  let rows, suffix;
+  const params = [req.mboId];
   if (req.query.source === "imported") {
     // "Sheet products" runs are scoped to whatever's staged in
     // import_catalog, not a brand filter — join to it so the export is
     // exactly the rows that ran, regardless of how many brands they span.
     let where = "p.mbo_id=$1 AND " + stateWhere.replace(/^(state|decision)/, "p.$1");
     if (brands.length) { where += ` AND p.brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; params.push(...brands); }
-    rows = await q(`SELECT ${cols.split(",").map((c) => "p." + c).join(",")}
-      FROM products p JOIN import_catalog c ON c.key = p.key AND c.mbo_id = p.mbo_id WHERE ${where} ORDER BY p.brand, p.id`, params);
-    suffix = "_sheet";
-  } else {
-    let where = "mbo_id=$1 AND " + stateWhere;
-    if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; params.push(...brands); }
-    rows = await q(`SELECT ${cols} FROM products WHERE ${where} ORDER BY brand, id`, params);
-    suffix = brands.length ? `_${brands.length}brands` : "";
+    const from = `FROM products p JOIN import_catalog c ON c.key = p.key AND c.mbo_id = p.mbo_id WHERE ${where}`;
+    return { params, name: `mbo_${kind}_sheet`,
+      rowsSql: `SELECT ${EXPORT_COLS.split(",").map((c) => "p." + c).join(",")} ${from} ORDER BY p.brand, p.id`,
+      countSql: `SELECT COUNT(*)::int n ${from}` };
   }
-  await sendXlsx(res, `mbo_${kind}${suffix}`, rows);
+  let where = "mbo_id=$1 AND " + stateWhere;
+  if (brands.length) { where += ` AND brand IN (${brands.map((_, i) => `$${i + 2}`).join(",")})`; params.push(...brands); }
+  return { params, name: `mbo_${kind}${brands.length ? `_${brands.length}brands` : ""}`,
+    rowsSql: `SELECT ${EXPORT_COLS} FROM products WHERE ${where} ORDER BY brand, id`,
+    countSql: `SELECT COUNT(*)::int n FROM products WHERE ${where}` };
+}
+tenantRouter.get("/export", wrap(async (req, res) => {
+  const e = exportQuery(req);
+  await sendXlsx(res, e.name, await q(e.rowsSql, e.params));
+}));
+// How many rows the CURRENT filter would export, plus the filename it would
+// produce — lets the Export page show a live total before committing to a
+// download. Not shadowed by /export above: Express matches exact paths.
+tenantRouter.get("/export/count", wrap(async (req, res) => {
+  const e = exportQuery(req);
+  res.json({ total: (await q(e.countSql, e.params))[0].n, filename: e.name + ".xlsx" });
 }));
 
 // ---------- owner console (tenant-scoped) ----------
@@ -806,6 +841,13 @@ tenantRouter.post("/admin/users/delete", sec.ownerOnly, wrap(async (req, res) =>
   sec.clearRoleCache();
   res.json({ ok: true });
 }));
+// Approves a pending self-serve signup (see /api/auth/google) — grants
+// whatever role they already have (viewer by default) real tenant access.
+tenantRouter.post("/admin/users/approve", sec.ownerOnly, wrap(async (req, res) => {
+  await sec.approveUser(req.mboId, req.body.email);
+  sec.clearRoleCache();
+  res.json({ ok: true });
+}));
 
 // ---------- platform super-admin (cross-tenant, no req.mboId) ----------
 // Mounted at the MORE SPECIFIC path "/api/superadmin" and registered BEFORE
@@ -816,6 +858,31 @@ tenantRouter.post("/admin/users/delete", sec.ownerOnly, wrap(async (req, res) =>
 // reached superRouter's own sec.superAdminOnly gate.
 const superRouter = express.Router();
 superRouter.use(sec.superAdminOnly);
+// Enter (or leave) a tenant as the platform operator: sets session.actingMboId
+// so the ORDINARY app routes resolve to that tenant for this session only
+// (see tenant.js/resolveTenant for why this is session state and never
+// users.mbo_id). Body { mboId: <id> } to enter, { mboId: null } to leave.
+// Only meaningful for a role=='super_admin' account — a flagged tenant
+// owner/admin already has its own mbo_id and needs none of this.
+superRouter.post("/act-as", wrap(async (req, res) => {
+  const raw = req.body.mboId;
+  if (raw == null || raw === "") {
+    req.session.actingMboId = null; req.session.actingMboName = null; req.session.actingMboSlug = null;
+    return res.json({ ok: true, acting: null });
+  }
+  if (req.session.role !== "super_admin") {
+    return res.status(400).json({ ok: false, error: "only a super_admin needs to enter a tenant — your account already has one" });
+  }
+  const mboId = Number(raw);
+  if (!Number.isInteger(mboId)) return res.status(400).json({ ok: false, error: "invalid mbo id" });
+  const [mbo] = await q("SELECT id, slug, name, status FROM mbo WHERE id=$1", [mboId]);
+  if (!mbo) return res.status(404).json({ ok: false, error: "no such MBO" });
+  if (mbo.status !== "active") return res.status(403).json({ ok: false, error: "this MBO has been suspended" });
+  req.session.actingMboId = mbo.id;
+  req.session.actingMboName = mbo.name;
+  req.session.actingMboSlug = mbo.slug;
+  res.json({ ok: true, acting: { id: mbo.id, slug: mbo.slug, name: mbo.name } });
+}));
 superRouter.get("/mbos", wrap(async (req, res) => {
   const rows = await q(`SELECT m.id, m.slug, m.name, m.status, m.created_at,
       (SELECT COUNT(*) FROM products p WHERE p.mbo_id=m.id) product_count,

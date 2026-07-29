@@ -103,19 +103,59 @@ function transport() {
   return nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass } });
 }
 
-function recipient(to) {
-  return (to || config.smtp.to || "").trim();
+// Domains that can never actually receive mail. This guard exists because
+// Gmail's SMTP answers "250 OK" for a .local recipient and then blackholes
+// the message — so an undeliverable address looks like a SUCCESSFUL send in
+// the run log and is never received. Two real accounts sit on such domains
+// (admin@pricesync.local, admin@datapricesync.local), so without this a run
+// started by either would silently report "sent" forever.
+const UNROUTABLE_DOMAIN = /\.(local|localhost|localdomain|internal|intranet|invalid|test|example|home|lan)$/i;
+const ADDR_RE = /^[^\s@,;]+@[^\s@,;]+\.[a-z]{2,}$/i;
+
+// Normalises one address; returns null when it could never be delivered.
+function deliverable(addr) {
+  const a = String(addr || "").trim().toLowerCase();
+  if (!a || !ADDR_RE.test(a)) return null;
+  if (UNROUTABLE_DOMAIN.test(a.split("@")[1] || "")) return null;
+  return a;
+}
+
+// Every pipeline/report mail goes to the UNION of:
+//   • the user who started the run (so the operator gets their own report), and
+//   • ALERT_TO (so the account owner sees every run regardless of who ran it).
+// Both matter: addressing the initiator ALONE is what hid a week of pipeline
+// mail — the admin who clicks "Run" each morning received all of it while the
+// owner watching ALERT_TO received none and assumed email was broken.
+// Deduped, order-stable (initiator first), undeliverable addresses dropped.
+function recipients(to) {
+  const seen = new Set(), keep = [], dropped = [];
+  const consider = [
+    ...String(to || "").split(/[,;]/),
+    ...String(config.smtp.to || "").split(/[,;]/),
+  ];
+  for (const raw of consider) {
+    if (!String(raw || "").trim()) continue;
+    const ok = deliverable(raw);
+    if (!ok) { dropped.push(String(raw).trim()); continue; }
+    if (seen.has(ok)) continue;
+    seen.add(ok); keep.push(ok);
+  }
+  return { to: keep.join(", "), list: keep, dropped };
 }
 
 // Shared guard for every mail entry point: returns { ok:false, error } when
-// email can't be sent (unconfigured SMTP / no recipient) so callers can log
-// and move on without throwing inside the pipeline.
+// email can't be sent (unconfigured SMTP / no deliverable recipient) so
+// callers can log and move on without throwing inside the pipeline.
 function mailGuard(to) {
   const { user, pass } = config.smtp;
-  to = recipient(to);
+  const r = recipients(to);
   if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
-  if (!to) return { ok: false, error: "no recipient (ALERT_TO)" };
-  return { ok: true, to };
+  if (!r.list.length) {
+    return { ok: false, error: r.dropped.length
+      ? `no deliverable recipient — dropped undeliverable ${r.dropped.join(", ")} (set ALERT_TO to a real address)`
+      : "no recipient (ALERT_TO)" };
+  }
+  return { ok: true, to: r.to, list: r.list, dropped: r.dropped };
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -264,21 +304,24 @@ const OWNER_NOTIFY_TO = "harshal.growify@gmail.com";
 export async function sendNewSignup({ email } = {}) {
   const { user, pass, from } = config.smtp;
   if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
+  const to = deliverable(OWNER_NOTIFY_TO);
+  if (!to) return { ok: false, error: `owner notify address undeliverable (${OWNER_NOTIFY_TO})` };
   await transport().sendMail({
-    from, to: OWNER_NOTIFY_TO,
-    subject: `MBO Tracker — new sign-up: ${email}`,
-    text: `${email} just signed in with Google and was created as a "viewer" ` +
-      `(read-only) account.\n\nOpen the Integrations page's owner console to ` +
-      `promote them to admin/owner if needed.\n\n— MBO Tracker`,
+    from, to,
+    subject: `MBO Tracker — new sign-up awaiting approval: ${email}`,
+    text: `${email} just signed in with Google and a "viewer" account was ` +
+      `created for them — but it is PENDING APPROVAL and currently has no ` +
+      `access to any tenant data.\n\nOpen Settings → Users to approve them ` +
+      `(and change their role if needed). Until you do, they'll only see an ` +
+      `"Awaiting approval" screen.\n\n— MBO Tracker`,
   });
-  return { ok: true, to: OWNER_NOTIFY_TO };
+  return { ok: true, to };
 }
 
 export async function sendMismatchReport(mboId, to, brands) {
-  const { user, pass, from } = config.smtp;
-  to = recipient(to);
-  if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
-  if (!to) return { ok: false, error: "no recipient (ALERT_TO)" };
+  const g = mailGuard(to); if (!g.ok) return g;
+  const { from } = config.smtp;
+  to = g.to;
   const rows = await mismatchRows(mboId, brands);
   const wb = buildWorkbook(rows, []);
   const today = new Date().toISOString().slice(0, 10);
@@ -296,10 +339,9 @@ export async function sendMismatchReport(mboId, to, brands) {
 // Always sends after a pipeline run (any number of products). Attaches a
 // per-brand workbook covering mismatches AND fetch errors when any exist.
 export async function sendPipelineReport({ mboId, to, threshold = 5, stats = null } = {}) {
-  const { user, pass, from } = config.smtp;
-  to = recipient(to);
-  if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
-  if (!to) return { ok: false, error: "no recipient (ALERT_TO)" };
+  const g = mailGuard(to); if (!g.ok) return g;
+  const { from } = config.smtp;
+  to = g.to;
   const [rows, alerts] = await Promise.all([stateRows(mboId, ["mismatch", "error"]), alertRows(mboId, threshold)]);
   const mism = rows.filter((r) => r.state === "mismatch").length;
   const errs = rows.filter((r) => r.state === "error").length;

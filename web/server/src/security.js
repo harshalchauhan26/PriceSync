@@ -25,9 +25,10 @@ const IDENTITY_TTL = 10_000;
 export async function liveIdentity(uid) {
   const c = IDENTITY_CACHE.get(uid);
   if (c && c.exp > Date.now()) return c;
-  const u = await one("SELECT role, mbo_id, is_platform_admin FROM users WHERE id=$1", [uid]);
+  const u = await one("SELECT role, mbo_id, is_platform_admin, approved FROM users WHERE id=$1", [uid]);
   const entry = { role: u ? u.role : null, mboId: u ? u.mbo_id : null,
-    isPlatformAdmin: u ? !!u.is_platform_admin : false, exp: Date.now() + IDENTITY_TTL };
+    isPlatformAdmin: u ? !!u.is_platform_admin : false, approved: u ? u.approved !== false : false,
+    exp: Date.now() + IDENTITY_TTL };
   IDENTITY_CACHE.set(uid, entry);
   return entry;
 }
@@ -54,6 +55,11 @@ export async function ensureUsers() {
   // Review/etc — unlike the 'super_admin' role above, which has no tenant
   // at all and therefore no Pipeline to see. superAdminOnly accepts EITHER.
   await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_platform_admin BOOLEAN NOT NULL DEFAULT false`);
+  // Self-serve Google sign-up (see /api/auth/google) creates an account with
+  // approved=false — authenticated, but resolveTenant blocks every tenant
+  // data route until the tenant owner approves them. Existing/admin-created
+  // users all default to true so nobody already in the system is affected.
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS approved BOOLEAN NOT NULL DEFAULT true`);
 }
 export const setPlatformAdmin = (email, flag) => q(
   "UPDATE users SET is_platform_admin=$1 WHERE email=$2", [!!flag, email.toLowerCase().trim()]);
@@ -63,10 +69,10 @@ export const setPlatformAdmin = (email, flag) => q(
 // should be replaced with a call to the auth_lookup_user() SECURITY DEFINER
 // function instead of punching a hole in the users RLS policy.
 export const getUser = (email) => one("SELECT * FROM users WHERE email=$1", [String(email || "").toLowerCase().trim()]);
-export async function createUser(email, password, role = "viewer", mboId = null) {
+export async function createUser(email, password, role = "viewer", mboId = null, approved = true) {
   const hash = await bcrypt.hash(password, 10);
-  await q("INSERT INTO users(email,password_hash,role,mbo_id) VALUES($1,$2,$3,$4) ON CONFLICT(email) DO NOTHING",
-    [email.toLowerCase().trim(), hash, role, mboId]);
+  await q("INSERT INTO users(email,password_hash,role,mbo_id,approved) VALUES($1,$2,$3,$4,$5) ON CONFLICT(email) DO NOTHING",
+    [email.toLowerCase().trim(), hash, role, mboId, approved]);
   return getUser(email);
 }
 // Tenant-scoped: the caller (a tenant owner) can only ever affect a user
@@ -77,8 +83,10 @@ export const setRole = (mboId, email, role) => q(
   "UPDATE users SET role=$1 WHERE email=$2 AND mbo_id=$3", [role, email.toLowerCase().trim(), mboId]);
 export const deleteUser = (mboId, email) => q(
   "DELETE FROM users WHERE email=$1 AND mbo_id=$2", [email.toLowerCase().trim(), mboId]);
+export const approveUser = (mboId, email) => q(
+  "UPDATE users SET approved=true WHERE email=$1 AND mbo_id=$2", [email.toLowerCase().trim(), mboId]);
 export const listUsers = (mboId) => q(
-  "SELECT id,email,role,created_at FROM users WHERE mbo_id=$1 ORDER BY id", [mboId]);
+  "SELECT id,email,role,approved,created_at FROM users WHERE mbo_id=$1 ORDER BY id", [mboId]);
 export async function countUsers(mboId) {
   return Number((await one("SELECT COUNT(*) c FROM users WHERE mbo_id=$1", [mboId])).c);
 }
@@ -197,6 +205,11 @@ export function loginUser(req, user) {
   req.session.uid = user.id; req.session.email = user.email; req.session.role = user.role;
   req.session.mboId = user.mbo_id; req.session.sid = sid;
   req.session.isPlatformAdmin = !!user.is_platform_admin;
+  req.session.approved = user.approved !== false;
+  // A fresh login never inherits a previous session's entered tenant.
+  req.session.actingMboId = null;
+  req.session.actingMboName = null;
+  req.session.actingMboSlug = null;
   SESSIONS.set(sid, { uid: user.id, email: user.email, role: user.role, mbo_id: user.mbo_id, ip: ipOf(req),
     ua: String(req.headers["user-agent"] || "").slice(0, 120), login_at: Date.now(), last_seen: Date.now() });
 }
@@ -221,7 +234,17 @@ export function activeSessions(mboId) {
 }
 export const currentUser = (req) => req.session.uid
   ? { id: req.session.uid, email: req.session.email, role: req.session.role, mboId: req.session.mboId ?? null,
-      isPlatformAdmin: !!req.session.isPlatformAdmin } : null;
+      // Mirrors the isPlatformAdmin(req) gate below (role=='super_admin' OR the
+      // flag) so "can reach the Super Admin console" means the same thing on
+      // the client as it does on the server.
+      isPlatformAdmin: !!req.session.isPlatformAdmin || req.session.role === "super_admin",
+      approved: req.session.approved !== false,
+      // Set only for a super_admin that has entered a tenant (see
+      // tenant.js/resolveTenant) — the client uses it to decide whether to
+      // show the ordinary app shell instead of the Super Admin console.
+      actingMboId: req.session.actingMboId ?? null,
+      actingMboName: req.session.actingMboName ?? null,
+      actingMboSlug: req.session.actingMboSlug ?? null } : null;
 export const isAdmin = (req) => ADMIN_ROLES.has(req.session.role);
 export const isOwner = (req) => req.session.role === "owner";
 export const isSuperAdmin = (req) => req.session.role === "super_admin";
@@ -241,13 +264,22 @@ export async function guard(req, res, next) {
     if (req.session.role !== identity.role) req.session.role = identity.role;
     if (req.session.mboId !== identity.mboId) req.session.mboId = identity.mboId;
     if (req.session.isPlatformAdmin !== identity.isPlatformAdmin) req.session.isPlatformAdmin = identity.isPlatformAdmin;
+    if (req.session.approved !== identity.approved) req.session.approved = identity.approved;
   } catch (e) { return res.status(500).json({ error: "auth check failed" }); }
   touch(req);
   if (WRITE.has(req.method) && !isAdmin(req) && !isSuperAdmin(req)) return res.status(403).json({ error: "admin role required" });
   next();
 }
+// Owner-gated tenant routes (the in-app Users/Sessions console). A super_admin
+// that has explicitly entered a tenant (resolveTenant set req.mboId from
+// session.actingMboId) counts as that tenant's owner here — otherwise "use the
+// app as the operator" would still 403 on half of Settings. Still tenant-
+// scoped: every ownerOnly route filters by req.mboId, so this grants no
+// cross-tenant reach beyond the tenant that was entered.
 export function ownerOnly(req, res, next) {
-  if (!isOwner(req)) return res.status(403).json({ error: "owner role required" });
+  if (!isOwner(req) && !(isSuperAdmin(req) && req.mboId != null)) {
+    return res.status(403).json({ error: "owner role required" });
+  }
   next();
 }
 // Gates the /api/superadmin/* routes. Deliberately separate from guard()'s

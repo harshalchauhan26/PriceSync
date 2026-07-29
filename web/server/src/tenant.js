@@ -27,11 +27,40 @@ export const clearStatusCache = () => STATUS_CACHE.clear();
 // (unlike the route handlers, which go through the wrap() helper) this
 // middleware catches its own DB error.
 export async function resolveTenant(req, res, next) {
+  // A super_admin owns no tenant (users.mbo_id is NULL by construction), but
+  // it can ENTER one for the duration of its session to use the ordinary app
+  // as a support/operator view — POST /api/superadmin/act-as sets
+  // session.actingMboId. This is deliberately a SESSION-only field and never
+  // written to users.mbo_id: the 2026-07-23 incident (see config.js) was
+  // caused by a super-admin row acquiring a real tenant, which made
+  // ensureUsers()'s backfill and seedSuperAdmin fight over its role on every
+  // restart. Keeping the choice in the session means the row stays NULL, the
+  // role never flaps, and signing out drops the elevated view entirely.
   if (req.session.role === "super_admin") {
-    return res.status(403).json({ error: "super_admin has no tenant — use /api/superadmin/*" });
+    const acting = req.session.actingMboId;
+    if (acting == null) {
+      return res.status(403).json({ error: "no_tenant_selected", detail: "pick a tenant first (POST /api/superadmin/act-as)" });
+    }
+    try {
+      if ((await liveStatus(acting)) !== "active") {
+        return res.status(403).json({ error: "this MBO has been suspended" });
+      }
+    } catch (e) {
+      return res.status(500).json({ error: "tenant status check failed" });
+    }
+    req.mboId = acting;
+    req.actingAsTenant = true;
+    return next();
   }
   if (req.session.mboId == null) {
     return res.status(401).json({ error: "no tenant assigned to this account" });
+  }
+  // Self-serve Google sign-up creates an authenticated but unapproved
+  // account (security.js's createUser approved=false) — it can log in and
+  // hit /api/me, but every actual tenant data route 403s with this specific
+  // code until the tenant owner approves it (POST /admin/users/approve).
+  if (req.session.approved === false) {
+    return res.status(403).json({ error: "pending_approval" });
   }
   try {
     // Defense-in-depth: a session issued before a super-admin suspends this

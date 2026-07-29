@@ -45,9 +45,12 @@ services:
         sync: false
       - key: SUPERADMIN_PASSWORD
         sync: false
-      # --- self-registration is closed platform-wide: MBOs (tenants) are provisioned
-      # via `node scripts/create-tenant.mjs`; users within a tenant are created from
-      # that tenant's own owner console. ---
+      # --- registration: MBOs (tenants) are provisioned via
+      # `node scripts/create-tenant.mjs`. Password self-signup (/api/register)
+      # stays closed, but Google sign-in DOES self-serve — a new email gets a
+      # viewer account on tenant #1 with approved=false, which has no access to
+      # any tenant data until that tenant's owner approves it in Settings →
+      # Users. Requires GOOGLE_CLIENT_ID below; leave it unset to disable. ---
       # --- email reports (start / 50% / complete+2 sheets / errors-resolved) ---
       - key: SMTP_HOST
         value: smtp.gmail.com

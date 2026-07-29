@@ -269,7 +269,7 @@ function Auth({onIn}) {
       </div>
       <div style={{marginTop:10,fontSize:12,color:"#ef4444",minHeight:16}}>{err}</div>
       <div style={{fontSize:12,color:"var(--on3)"}}>
-        No account? Ask your brand's owner or the platform admin to create one.
+        No account? Sign in with Google above to create one — it'll need the owner's approval before you get access.
       </div>
     </form>
   </div>;
@@ -1180,11 +1180,16 @@ function Integrations({admin}) {
 ═══════════════════════════════════════════════════════════════ */
 function Settings({me, admin}) {
   const [sessions,setSessions]=useState([]); const [users,setUsers]=useState([]);
-  const owner=me.role==="owner";
+  // A super_admin operating inside a tenant gets that tenant's owner console
+  // too (server side, sec.ownerOnly accepts it) — otherwise half of Settings
+  // would 403 while "using the app" as the operator.
+  const owner=me.role==="owner"||(me.role==="super_admin"&&me.actingMboId!=null);
   const load=()=>{ if(!owner) return; api("/api/admin/sessions").then(d=>setSessions(d.sessions||[])); api("/api/admin/users").then(d=>setUsers(d.users||[])); };
   useEffect(()=>{ load(); if(owner){ const t=setInterval(()=>api("/api/admin/sessions").then(d=>setSessions(d.sessions||[])),5000); return()=>clearInterval(t); } },[owner]);
   const setRole=async(email,role)=>{ await aj("/api/admin/users/role",{email,role}); toast("Role updated","ok"); load(); };
   const del=async(email)=>{ if(!confirm("Delete "+email+"?")) return; const r=await aj("/api/admin/users/delete",{email}); r.ok?toast("Deleted","ok"):toast(r.error,"err"); load(); };
+  const approve=async(email)=>{ const r=await aj("/api/admin/users/approve",{email}); r.ok?toast(`${email} approved`,"ok"):toast(r.error,"err"); load(); };
+  const pendingCount=users.filter(u=>u.approved===false).length;
 
   if(!owner) return <div className="card" style={{padding:24,maxWidth:400}}>
     <div className="lbl" style={{marginBottom:8}}>Account</div>
@@ -1212,15 +1217,23 @@ function Settings({me, admin}) {
       </div>
     </div>
     <div>
-      <div className="lbl" style={{marginBottom:8}}>Users</div>
+      <div className="lbl" style={{marginBottom:8}}>
+        Users{pendingCount>0&&<span className="badge" style={{marginLeft:8,background:"rgba(245,158,11,.15)",color:"var(--amber)"}}>{pendingCount} awaiting approval</span>}
+      </div>
       <div className="card" style={{overflow:"auto"}}>
         <table className="tbl">
-          <thead><tr>{["Email","Role",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+          <thead><tr>{["Email","Role","Status",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
           <tbody>
             {users.map(u=><tr key={u.id}>
               <td>{u.email}</td>
               <td><select className="inp mono" value={u.role} onChange={e=>setRole(u.email,e.target.value)} disabled={u.email===me.email}><option>owner</option><option>admin</option><option>viewer</option></select></td>
-              <td>{u.email!==me.email&&<button onClick={()=>del(u.email)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}}><Icon n="x" s={14}/></button>}</td>
+              <td>{u.approved===false
+                ? <span className="badge" style={{background:"rgba(245,158,11,.15)",color:"var(--amber)"}}>pending</span>
+                : <span className="badge" style={{background:"rgba(34,197,94,.15)",color:"var(--green)"}}>approved</span>}</td>
+              <td style={{display:"flex",gap:8}}>
+                {u.approved===false&&<button className="btn btn-success btn-sm" onClick={()=>approve(u.email)}>Approve</button>}
+                {u.email!==me.email&&<button onClick={()=>del(u.email)} style={{color:"var(--red)",background:"none",border:"none",cursor:"pointer"}}><Icon n="x" s={14}/></button>}
+              </td>
             </tr>)}
           </tbody>
         </table>
@@ -1258,6 +1271,15 @@ function SuperAdmin({ me }) {
     setSelected(id); setBrands(null); setUsers(null);
     api(`/api/superadmin/mbos/${id}/brands`).then(d=>setBrands(d.brands||[]));
     api(`/api/superadmin/mbos/${id}/users`).then(d=>setUsers(d.users||[]));
+  };
+
+  // Enter a tenant and use the ordinary app inside it. The server pins the
+  // choice to this session; reloading lets App re-read /api/me, see
+  // actingMboId, and render the normal shell instead of this console.
+  const enterMbo=async(m)=>{
+    const r=await aj("/api/superadmin/act-as",{mboId:m.id});
+    if(!r.ok){ toast(r.error||"couldn't enter tenant","err"); return; }
+    location.reload();
   };
 
   const changeRole=async(email,role)=>{
@@ -1377,6 +1399,10 @@ function SuperAdmin({ me }) {
               <td onClick={()=>openMbo(m.id)} style={{cursor:"pointer"}}>{m.user_count}</td>
               <td>
                 <div style={{display:"flex",gap:4}}>
+                  {/* Enter this tenant and use the ordinary app inside it. */}
+                  <button className="btn btn-primary btn-sm" disabled={m.status!=="active"}
+                    title={m.status==="active"?`Use the app as ${m.name}`:"Suspended tenants can't be entered"}
+                    onClick={()=>enterMbo(m)}>Open app</button>
                   <button className="btn btn-ghost btn-sm" onClick={()=>{setRenamingMbo(m.id); setMboNameDraft(m.name);}}>Rename</button>
                   <button className={`btn btn-sm ${m.status==="active"?"btn-danger":"btn-success"}`} onClick={()=>toggleStatus(m)}>{m.status==="active"?"Suspend":"Activate"}</button>
                 </div>
@@ -1454,6 +1480,128 @@ function SuperAdmin({ me }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   PENDING APPROVAL — authenticated but not yet approved by the tenant owner
+═══════════════════════════════════════════════════════════════ */
+function PendingApproval({ me }) {
+  return <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)"}}>
+    <div className="card" style={{width:380,padding:36,textAlign:"center"}}>
+      <div style={{width:44,height:44,borderRadius:12,background:"rgba(245,158,11,.15)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 16px"}}>
+        <Icon n="clock" s={20}/>
+      </div>
+      <div style={{fontWeight:700,fontSize:16,marginBottom:8}}>Awaiting approval</div>
+      <div style={{fontSize:13,color:"var(--on2)",marginBottom:20,lineHeight:1.5}}>
+        Your account ({me.email}) is signed in, but your MBO's owner hasn't approved you yet.
+        You'll get access as soon as they do — no need to sign up again.
+      </div>
+      <button className="btn btn-ghost btn-sm" onClick={async()=>{ await api("/api/logout"); location.reload(); }}>Sign out</button>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   EXPORT — pick brands + what data, see the exact count, download.
+   Standalone on purpose: the Pipeline page's Export is tied to that run's
+   scope, so it can't be used to just pull one brand's sheet on demand.
+═══════════════════════════════════════════════════════════════ */
+const EXPORT_KINDS = [
+  ["all",      "All rows",        "Every product in the catalogue, whatever its state"],
+  ["mismatch", "Mismatches only", "Live price differs from the baseline"],
+  ["error",    "Errors only",     "The fetcher couldn't read a price"],
+  ["approved", "Approved only",   "Approved in Review, with a final price set"],
+];
+
+function ExportData() {
+  const [vs,setVs]     = useState([]);
+  const [sel,setSel]   = useState([]);
+  const [kind,setKind] = useState("all");
+  const [find,setFind] = useState("");
+  const [info,setInfo] = useState(null);   // null while counting
+
+  useEffect(()=>{ api("/api/vendors").then(d=>setVs(d.vendors||[])); },[]);
+
+  // Brands sorted so re-picking the same set in a different order doesn't refetch.
+  const qs = `?kind=${kind}${sel.length?`&brands=${encodeURIComponent([...sel].sort().join(","))}`:""}`;
+
+  // The count comes from the SAME filter the download runs, so the number on
+  // the button is what actually lands in the file — never a client estimate.
+  useEffect(()=>{
+    let dead=false; setInfo(null);
+    const t=setTimeout(()=>{ api("/api/export/count"+qs).then(d=>{ if(!dead) setInfo(d||{}); }); },150);
+    return()=>{ dead=true; clearTimeout(t); };
+  },[qs]);
+
+  const shown  = vs.filter(v=>!find||v.vendor.toLowerCase().includes(find.toLowerCase()));
+  const selSet = new Set(sel);
+  const toggle = (v)=> setSel(p=>p.includes(v)?p.filter(x=>x!==v):[...p,v]);
+  const total  = info?.total;
+
+  return <div>
+    <div style={{marginBottom:16}}>
+      <div style={{fontWeight:800,fontSize:18,letterSpacing:"-.02em"}}>Export Data</div>
+      <div style={{fontSize:12.5,color:"var(--on2)",marginTop:3}}>
+        Pick the brands you want, choose what data, and download it as a sheet.
+      </div>
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 320px",gap:16,alignItems:"start"}}>
+      {/* Brands */}
+      <div className="card" style={{padding:14}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+          <span className="lbl">Brands</span>
+          <span style={{fontSize:11,display:"flex",gap:10}}>
+            <span style={{color:"var(--blue)",cursor:"pointer"}} onClick={()=>setSel([...new Set([...sel,...shown.map(v=>v.vendor)])])}>Select all</span>
+            <span style={{color:"var(--on3)",cursor:"pointer"}} onClick={()=>setSel([])}>Clear</span>
+          </span>
+        </div>
+        <input className="inp" style={{width:"100%",marginBottom:8}} placeholder="Search brands…" value={find} onChange={e=>setFind(e.target.value)} />
+        <div style={{maxHeight:420,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+          {shown.map(v=><label key={v.vendor} className="vendor-row">
+            <input type="checkbox" checked={selSet.has(v.vendor)} onChange={()=>toggle(v.vendor)} />
+            <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.vendor.replace(/^www\./,"")}</span>
+            <span style={{color:"var(--on3)",fontSize:11}}>{fmtInt(v.count)}</span>
+          </label>)}
+          {!shown.length&&<div style={{textAlign:"center",padding:"14px 0",color:"var(--on3)",fontSize:12}}>No brands</div>}
+        </div>
+        <div style={{fontSize:11,color:"var(--on3)",marginTop:8,paddingTop:8,borderTop:"1px solid var(--border)"}}>
+          {sel.length?`${sel.length} of ${vs.length} brand(s) selected`:`Nothing selected — exports all ${vs.length} brands`}
+        </div>
+      </div>
+
+      {/* What data + download */}
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        <div className="card" style={{padding:14}}>
+          <div className="lbl" style={{marginBottom:10}}>Data</div>
+          <div style={{display:"flex",flexDirection:"column",gap:2}}>
+            {EXPORT_KINDS.map(([k,label,help])=>
+              <label key={k} className="vendor-row" style={{alignItems:"flex-start",padding:"7px 8px"}}>
+                <input type="radio" name="exportkind" checked={kind===k} onChange={()=>setKind(k)} style={{marginTop:2}}/>
+                <span style={{flex:1}}>
+                  <span style={{display:"block",fontSize:12.5,fontWeight:600}}>{label}</span>
+                  <span style={{display:"block",fontSize:11,color:"var(--on3)",marginTop:1,lineHeight:1.35}}>{help}</span>
+                </span>
+              </label>)}
+          </div>
+        </div>
+
+        <div className="card" style={{padding:14}}>
+          <div className="lbl" style={{marginBottom:8}}>Download</div>
+          <div style={{fontSize:22,fontWeight:800,letterSpacing:"-.02em",lineHeight:1.1}}>
+            {info===null?<span style={{color:"var(--on3)",fontSize:14,fontWeight:600}}>Counting…</span>:fmtInt(total)}
+          </div>
+          <div style={{fontSize:11,color:"var(--on3)",marginTop:2}}>row{total===1?"":"s"} in this export</div>
+          {info?.filename&&<div className="mono" style={{fontSize:10.5,color:"var(--on3)",marginTop:8,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{info.filename}</div>}
+          <button className="btn btn-primary" style={{width:"100%",justifyContent:"center",marginTop:12}}
+            disabled={info===null||!total}
+            onClick={()=>{ window.location=`/api/export${qs}`; toast(`Downloading ${fmtInt(total)} row(s)`,"ok"); }}>
+            <Icon n="dl" s={13}/>{info===null?"Counting…":total?"Download .xlsx":"Nothing to export"}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════
    SHELL
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
@@ -1461,14 +1609,20 @@ export default function App() {
   useEffect(()=>{ api("/api/me").then(d=>setMe(d&&d.email?d:null)); },[]);
   useEffect(()=>{ if(!me) return; const f=()=>{
     api("/api/meta").then(d=>d.counts&&setMeta(m=>JSON.stringify(m)===JSON.stringify(d)?m:d));
-    api("/api/me").then(d=>{ if(!d||!d.email) setMe(null); else setMe(m=>m&&m.role===d.role?m:d); });
+    api("/api/me").then(d=>{ if(!d||!d.email) setMe(null); else setMe(m=>m&&m.role===d.role&&m.approved===d.approved&&m.actingMboId===d.actingMboId?m:d); });
   }; f(); const t=setInterval(f,15000); return()=>clearInterval(t); },[me]);
 
   if(me===undefined) return <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--on3)"}}>Loading…</div>;
   if(!me) return <><Toaster/><Auth onIn={d=>setMe(d)}/></>;
-  if(me.role==="super_admin") return <><Toaster/><SuperAdmin me={me}/></>;
+  // A super_admin owns no tenant, so by default it only gets the cross-tenant
+  // console. Once it ENTERS a tenant (Super Admin → Open app, which sets
+  // session.actingMboId server-side) it drops into the ordinary app shell
+  // below, scoped to that tenant, with a banner and a way back out.
+  const acting = me.role==="super_admin" && me.actingMboId!=null;
+  if(me.role==="super_admin" && !acting) return <><Toaster/><SuperAdmin me={me}/></>;
+  if(me.approved===false) return <><Toaster/><PendingApproval me={me}/></>;
 
-  const admin=me.role==="admin"||me.role==="owner";
+  const admin=me.role==="admin"||me.role==="owner"||acting;
   const nav=[
     ["home","Insights","home"],
     ["pipeline","Pipeline","pipeline"],
@@ -1476,13 +1630,14 @@ export default function App() {
     ["review","Review","review"],
     ["alerts","Alerts","alerts"],
     ["history","History","clock"],
+    ["export","Export","dl"],
     ["integrations","Integrations","plug"],
   ];
-  // Additive only — everything above is untouched. This is the ONLY
-  // account-gated addition: a tenant owner/admin flagged isPlatformAdmin
-  // keeps their normal Pipeline/Review/etc AND gets one extra button for
-  // the cross-tenant super-admin view (unlike the standalone role==
-  // "super_admin" account above, which has no tenant and no nav at all).
+  // Additive only — everything above is untouched. A tenant owner/admin
+  // flagged isPlatformAdmin keeps their normal Pipeline/Review/etc AND gets
+  // one extra button for the cross-tenant super-admin view. A role==
+  // "super_admin" that has entered a tenant also lands here (isPlatformAdmin
+  // is true for it too), so this button is its way back to the console.
   if(me.isPlatformAdmin) nav.push(["superadmin","Super Admin","shield"]);
 
   return <div style={{display:"flex",height:"100vh",overflow:"hidden"}}>
@@ -1515,7 +1670,14 @@ export default function App() {
           <span style={{width:6,height:6,borderRadius:"50%",background:"var(--green)",display:"inline-block"}}/>
           Supabase · live
         </div>
-        <div style={{padding:"4px 10px",fontSize:11,color:"var(--on3)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{me.email}</div>
+        {/* Who you're signed in as — full address, wrapped rather than cut off
+            with an ellipsis. This is the identity every action is attributed to
+            (and, for a pipeline run, the inbox its reports are sent to), so it
+            reads at full brightness instead of muted 11px. */}
+        <div style={{padding:"6px 10px 2px"}}>
+          <div style={{fontSize:12.5,fontWeight:700,color:"var(--on)",lineHeight:1.3,wordBreak:"break-all"}}>{me.email}</div>
+          <div className="lbl" style={{marginTop:2,color:me.role==="owner"?"var(--green)":"var(--on3)"}}>{me.role}</div>
+        </div>
         <button onClick={async()=>{ await api("/api/logout"); setMe(null); }} className="nav-item" style={{color:"var(--red)"}}>
           <Icon n="logout" s={16}/>Sign out
         </button>
@@ -1525,13 +1687,26 @@ export default function App() {
     {/* ── Main area ── */}
     <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
       {/* Topbar — the Brand filter now lives in each page's own toolbar, next to Refresh */}
-      <div style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"10px 20px",display:"flex",alignItems:"center",justifyContent:"flex-end",flexShrink:0}}>
-        <div style={{display:"flex",alignItems:"center",gap:12}}>
+      <div style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"10px 20px",display:"flex",alignItems:"center",justifyContent:acting?"space-between":"flex-end",gap:12,flexShrink:0}}>
+        {/* Operating inside someone else's tenant is never implicit — say so,
+            and keep the way out one click away. */}
+        {acting&&<div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
+          <span className="badge" style={{background:"rgba(245,158,11,.15)",color:"var(--amber)",flexShrink:0}}>PLATFORM ADMIN</span>
+          <span style={{fontSize:12.5,color:"var(--on2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            Operating in <b style={{color:"var(--on)"}}>{me.actingMboName||`MBO ${me.actingMboId}`}</b>
+            {me.actingMboSlug?<span className="mono" style={{color:"var(--on3)"}}> ({me.actingMboSlug})</span>:null}
+          </span>
+          <button className="btn btn-ghost btn-sm" style={{flexShrink:0}}
+            onClick={async()=>{ await aj("/api/superadmin/act-as",{mboId:null}); const d=await api("/api/me"); setMe(d); setView("pipeline"); }}>
+            Exit tenant
+          </button>
+        </div>}
+        <div style={{display:"flex",alignItems:"center",gap:12,flexShrink:0}}>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:12,fontWeight:600}}>{me.email}</div>
+            <div style={{fontSize:14,fontWeight:700,color:"var(--on)",letterSpacing:"-.01em"}}>{me.email}</div>
             <div className="lbl" style={{color:me.role==="owner"?"var(--green)":"var(--on3)"}}>{me.role}</div>
           </div>
-          <div style={{width:30,height:30,borderRadius:"50%",background:"var(--blue)",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:13}}>
+          <div style={{width:34,height:34,borderRadius:"50%",background:"var(--blue)",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:15,flexShrink:0}}>
             {me.email[0].toUpperCase()}
           </div>
         </div>
@@ -1544,6 +1719,7 @@ export default function App() {
         {view==="review"      && <Review      admin={admin}/>}
         {view==="history"     && <History     admin={admin}/>}
         {view==="alerts"      && <Alerts      admin={admin}/>}
+        {view==="export"      && <ExportData  />}
         {view==="integrations"&& <Integrations admin={admin}/>}
         {view==="home"        && <Home        go={setView} admin={admin}/>}
         {view==="settings"    && <Settings    me={me} admin={admin}/>}
