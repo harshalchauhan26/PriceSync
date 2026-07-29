@@ -1570,6 +1570,18 @@ function SuperAdmin({ me }) {
           </div>);
         })()}
       </div>
+      {/* Relay — a missing FETCH_RELAY_URL changes how relay brands are fetched
+          and was previously invisible from the app. */}
+      {diag?.relay&&<div style={{fontSize:11.5,marginBottom:8,display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{color:"var(--on3)"}}>Fetch relay</span>
+        <span className="badge mono" style={{background:diag.relay.configured?"rgba(34,197,94,.15)":"rgba(245,158,11,.15)",
+          color:diag.relay.configured?"var(--green)":"var(--amber)"}}>
+          {diag.relay.configured?diag.relay.host:"not configured"}
+        </span>
+        {diag.relay.configured&&!diag.relay.secret_set&&<span style={{color:"var(--red)"}}>secret missing</span>}
+        {!diag.relay.configured&&<span style={{color:"var(--on3)"}}>relay brands fall back to a direct fetch</span>}
+        <span style={{color:"var(--on3)"}}>· strict currency {diag.relay.strict_currency?"on":"OFF"}</span>
+      </div>}
       <div style={{fontSize:11.5,color:"var(--on3)",marginBottom:8}}>
         From <span className="mono">{diag?.email?.from||"— MAIL_FROM not set"}</span>
         {" · "}ALERT_TO <span className="mono">{diag?.email?.alert_to||"— not set"}</span>

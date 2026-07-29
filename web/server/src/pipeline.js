@@ -225,7 +225,16 @@ async function processOne(eng, fetcher, prod, runId) {
         // applies on every fetch path, not just via the relay -- a direct/local
         // fetch can hit the same geo-redirect a foreign relay IP does.
         appendParams: (eng.relayParams && eng.relayParams[nb]) || undefined,
-        ...(viaRelay ? { wooApi: (eng.wooApiBrands && eng.wooApiBrands.has(nb)) || undefined } : {}),
+        // NOT gated on viaRelay. The Woo Store API is the correct SOURCE for
+        // these brands on every path, because /wp-json/wc/store returns the
+        // store's BASE currency (INR) and its explicit price_range, immune to
+        // the multi-currency plugin's geo-IP switching that rewrites the HTML.
+        // While this was relay-only, an unset/broken FETCH_RELAY_URL silently
+        // downgraded the brand to HTML scraping and the prices came back in
+        // whatever currency the egress IP resolved to — GBP, compared against
+        // INR baselines. Losing the relay must change where we fetch from,
+        // never what we parse.
+        wooApi: (eng.wooApiBrands && eng.wooApiBrands.has(nb)) || undefined,
       });
   } catch (e) { errMsg = e.message; }
   return finalizeOne(eng, prod, live, currency, errMsg, runId);

@@ -925,6 +925,16 @@ superRouter.get("/diagnostics", wrap(async (req, res) => {
     email: { provider: mailProvider(), from: from || null, alert_to: to || null,
       key_source: config.mail.keySource || null },
     mail_env: mailEnv,
+    // Relay state. An unset FETCH_RELAY_URL used to be completely invisible
+    // while silently changing how relay brands are fetched, so it is reported
+    // here: host only, never the secret.
+    relay: {
+      configured: !!config.fetchRelayUrl,
+      host: config.fetchRelayUrl ? (() => { try { return new URL(config.fetchRelayUrl).host; } catch { return "invalid URL"; } })() : null,
+      secret_set: !!config.fetchRelaySecret,
+      is_cloud: config.isCloud,
+      strict_currency: config.strictFetchCurrency,
+    },
     db: { status: db, ms: dbMs },
     pipeline: { active_runs: pipe.runningCount() },
     node: process.version, uptime_s: Math.round(process.uptime()) });
