@@ -52,6 +52,29 @@ services:
       # any tenant data until that tenant's owner approves it in Settings →
       # Users. Requires GOOGLE_CLIENT_ID below; leave it unset to disable. ---
       # --- email reports (start / 50% / complete+2 sheets / errors-resolved) ---
+      #
+      # ⚠ SMTP DOES NOT WORK ON THE FREE PLAN. Render blocks outbound traffic to
+      # ports 25/465/587 on free web services (policy change 2025-09-26), so
+      # nodemailer can never reach smtp.gmail.com and every send dies with
+      # "Connection timeout" even though the credentials are valid. Port 25 is
+      # blocked on ALL plans; 465/587 work only on a PAID instance.
+      #
+      # Two ways to get mail working:
+      #   1. Upgrade this service to a paid instance -> the SMTP_* vars below
+      #      start working as-is, no code or config change. (Also fixes the
+      #      free-plan spin-down that loses in-memory pipeline state mid-run.)
+      #   2. Stay on free and set ONE HTTPS provider key below. These send over
+      #      443, which is not blocked, and support the .xlsx attachments.
+      #      GET /api/health reports which transport is live as email_provider.
+      - key: RESEND_API_KEY
+        sync: false              # resend.com — needs a verified domain to send to arbitrary inboxes
+      - key: BREVO_API_KEY
+        sync: false              # brevo.com — 300/day free, single verified sender is enough
+      - key: SENDGRID_API_KEY
+        sync: false              # sendgrid.com — 100/day free, single verified sender is enough
+      - key: MAIL_FROM
+        sync: false              # REQUIRED with an HTTPS provider (no SMTP_USER to fall back on).
+                                 # Must be an address that provider has verified.
       - key: SMTP_HOST
         value: smtp.gmail.com
       - key: SMTP_PORT

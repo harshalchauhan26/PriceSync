@@ -100,7 +100,89 @@ function buildWorkbook(rows, alerts) {
 
 function transport() {
   const { host, port, user, pass } = config.smtp;
-  return nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass } });
+  return nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass },
+    // Fail fast instead of hanging ~2 minutes per send. On a blocked-SMTP host
+    // every attempt times out, and the pipeline fires 3-4 mails per run — with
+    // nodemailer's defaults that stalled the run log for minutes with no clue why.
+    connectionTimeout: 15_000, greetingTimeout: 10_000, socketTimeout: 20_000 });
+}
+
+// Which transport is in play. Named so /api/health can report it: "why did no
+// mail arrive" is otherwise invisible from outside the box.
+export function mailProvider() {
+  const m = config.mail;
+  if (m.resendKey) return "resend";
+  if (m.brevoKey) return "brevo";
+  if (m.sendgridKey) return "sendgrid";
+  const { user, pass } = config.smtp;
+  return user && pass ? "smtp" : "none";
+}
+
+// "Name <a@b.com>" / "a@b.com" -> { email, name }. Providers want the address
+// structured; nodemailer accepted either, so existing callers pass whatever
+// SMTP_FROM holds.
+function parseFrom(from) {
+  const s = String(from || "").trim();
+  const m = s.match(/^\s*(.*?)\s*<([^>]+)>\s*$/);
+  if (m) return { email: m[2].trim(), name: m[1].replace(/^"|"$/g, "").trim() || undefined };
+  return { email: s, name: undefined };
+}
+const toList = (to) => String(to || "").split(/[,;]/).map((x) => x.trim()).filter(Boolean);
+const b64 = (c) => Buffer.isBuffer(c) ? c.toString("base64") : Buffer.from(String(c)).toString("base64");
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+// POST helper with an explicit timeout — a hung provider must not wedge a run.
+async function postJson(url, headers, body) {
+  const res = await fetch(url, {
+    method: "POST", headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(25_000),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 300)}` : ""}`);
+  }
+  return res;
+}
+
+// Single send path for every mail in this module. Takes the nodemailer message
+// shape the callers already build ({ from, to, subject, text, attachments }) and
+// routes it over the configured provider's HTTPS API, falling back to SMTP.
+// Keeping ONE function means a provider swap never has to touch a call site.
+async function deliver(msg) {
+  const provider = mailProvider();
+  const from = parseFrom(msg.from);
+  const rcpt = toList(msg.to);
+  const atts = msg.attachments || [];
+  if (!rcpt.length) throw new Error("no recipient");
+
+  if (provider === "resend") {
+    await postJson("https://api.resend.com/emails",
+      { authorization: `Bearer ${config.mail.resendKey}` },
+      { from: from.name ? `${from.name} <${from.email}>` : from.email, to: rcpt,
+        subject: msg.subject, text: msg.text,
+        ...(atts.length ? { attachments: atts.map((a) => ({ filename: a.filename, content: b64(a.content) })) } : {}) });
+    return;
+  }
+  if (provider === "brevo") {
+    await postJson("https://api.brevo.com/v3/smtp/email",
+      { "api-key": config.mail.brevoKey, accept: "application/json" },
+      { sender: { email: from.email, ...(from.name ? { name: from.name } : {}) },
+        to: rcpt.map((email) => ({ email })), subject: msg.subject, textContent: msg.text,
+        ...(atts.length ? { attachment: atts.map((a) => ({ name: a.filename, content: b64(a.content) })) } : {}) });
+    return;
+  }
+  if (provider === "sendgrid") {
+    await postJson("https://api.sendgrid.com/v3/mail/send",
+      { authorization: `Bearer ${config.mail.sendgridKey}` },
+      { personalizations: [{ to: rcpt.map((email) => ({ email })) }],
+        from: { email: from.email, ...(from.name ? { name: from.name } : {}) },
+        subject: msg.subject, content: [{ type: "text/plain", value: msg.text }],
+        ...(atts.length ? { attachments: atts.map((a) => ({ filename: a.filename,
+          content: b64(a.content), type: XLSX_MIME, disposition: "attachment" })) } : {}) });
+    return;
+  }
+  // SMTP. Works locally and on paid Render; blocked on Render's free plan.
+  await transport().sendMail(msg);
 }
 
 // Domains that can never actually receive mail. This guard exists because
@@ -144,12 +226,17 @@ function recipients(to) {
 }
 
 // Shared guard for every mail entry point: returns { ok:false, error } when
-// email can't be sent (unconfigured SMTP / no deliverable recipient) so
+// email can't be sent (no transport / no sender / no deliverable recipient) so
 // callers can log and move on without throwing inside the pipeline.
 function mailGuard(to) {
-  const { user, pass } = config.smtp;
   const r = recipients(to);
-  if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
+  // Any configured transport counts — an HTTPS provider needs no SMTP_USER/PASS.
+  if (mailProvider() === "none") {
+    return { ok: false, error: "email not configured (set RESEND_API_KEY / BREVO_API_KEY / SENDGRID_API_KEY, or SMTP_USER+SMTP_PASS)" };
+  }
+  // The HTTPS APIs reject a send with no From, and SMTP_FROM defaults off
+  // SMTP_USER — which is absent when only an API key is set.
+  if (!config.smtp.from) return { ok: false, error: "no sender address (set MAIL_FROM)" };
   if (!r.list.length) {
     return { ok: false, error: r.dropped.length
       ? `no deliverable recipient — dropped undeliverable ${r.dropped.join(", ")} (set ALERT_TO to a real address)`
@@ -182,7 +269,7 @@ function flatSheet(wb, sheetName, columns, rows) {
 export async function sendPipelineStarted({ to, total, runId } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
-  await transport().sendMail({
+  await deliver({
     from, to: g.to,
     subject: `MBO Tracker — pipeline started: ${total ?? "?"} product(s) (${today()})`,
     text: `A pricing pipeline run just started.\n\n` +
@@ -198,7 +285,7 @@ export async function sendPipelineProgress({ to, done, total } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
   const pct = total ? Math.round((done / total) * 100) : 50;
-  await transport().sendMail({
+  await deliver({
     from, to: g.to,
     subject: `MBO Tracker — pipeline ${pct}% done (${done}/${total}) (${today()})`,
     text: `The pricing pipeline run is about halfway.\n\n` +
@@ -223,7 +310,7 @@ export async function sendErrorsResolved({ mboId, to, stats } = {}) {
   const attach = rows.length
     ? [{ filename: `remaining_errors_${today()}.xlsx`, content: Buffer.from(await wb.xlsx.writeBuffer()) }]
     : [];
-  await transport().sendMail({
+  await deliver({
     from, to: g.to,
     subject: `MBO Tracker — error retry done: ${recovered}/${total} recovered, ${remaining} remain (${today()})`,
     text: `The safe-retry pass finished re-checking fetch errors.\n\n` +
@@ -279,7 +366,7 @@ export async function sendPipelineComplete({ mboId, to, stats } = {}) {
   parts.push(`${updated.length} price update(s) pushed to Shopify in the last 24h`);
   parts.push(`${allRows.length} product(s) in the latest fetch snapshot`);
 
-  await transport().sendMail({
+  await deliver({
     from, to: g.to,
     subject: `MBO Tracker — pipeline finished: ${stats ? `${stats.completed ?? 0} checked, ` : ""}${stats?.mismatch ?? 0} mismatch, ${stats?.errors ?? 0} error (${today()})`,
     text: `A pricing pipeline run just finished.\n\n` +
@@ -302,15 +389,16 @@ export async function sendPipelineComplete({ mboId, to, stats } = {}) {
 // missed just because someone changes the alert recipient.
 const OWNER_NOTIFY_TO = "harshal.growify@gmail.com";
 export async function sendNewSignup({ email, brand } = {}) {
-  const { user, pass, from } = config.smtp;
-  if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
+  const { from } = config.smtp;
+  if (mailProvider() === "none") return { ok: false, error: "email not configured" };
+  if (!from) return { ok: false, error: "no sender address (set MAIL_FROM)" };
   const to = deliverable(OWNER_NOTIFY_TO);
   if (!to) return { ok: false, error: `owner notify address undeliverable (${OWNER_NOTIFY_TO})` };
   // The brand matters now that a signup joins whichever brand the user picked
   // on the login page — without it there's no way to tell which Settings →
   // Users list the pending account is actually sitting in.
   const where = brand ? ` for ${brand}` : "";
-  await transport().sendMail({
+  await deliver({
     from, to,
     subject: `MBO Tracker — new sign-up awaiting approval${where}: ${email}`,
     text: `${email} just signed in with Google and a "viewer" account was ` +
@@ -330,7 +418,7 @@ export async function sendMismatchReport(mboId, to, brands) {
   const wb = buildWorkbook(rows, []);
   const today = new Date().toISOString().slice(0, 10);
   const scope = brands && brands.length ? ` for ${brands.length} brand(s)` : "";
-  await transport().sendMail({
+  await deliver({
     from, to, subject: `MBO Tracker — ${rows.length} price mismatches${scope} (${today})`,
     text: `MBO Tracker detected ${rows.length} price mismatch(es)${scope} awaiting review.\n\n` +
       `The attached workbook has one sheet per brand (plus a Summary tab). These are ` +
@@ -365,7 +453,7 @@ export async function sendPipelineReport({ mboId, to, threshold = 5, stats = nul
     ? [{ filename: `pipeline_report_${today}.xlsx`,
         content: Buffer.from(await buildWorkbook(rows, alerts).xlsx.writeBuffer()) }]
     : [];
-  await transport().sendMail({
+  await deliver({
     from, to,
     subject: `MBO Tracker — pipeline finished: ${stats ? `${stats.completed ?? 0} checked, ` : ""}${mism} mismatch, ${errs} error (${today})`,
     text: `A pricing pipeline run just finished.\n\n` +

@@ -49,8 +49,26 @@ export const config = {
     port: parseInt(e.SMTP_PORT || "587", 10),
     user: e.SMTP_USER || "",
     pass: e.SMTP_PASS || "",
-    from: e.SMTP_FROM || e.SMTP_USER || "",
+    // MAIL_FROM first: with an HTTPS provider there's no SMTP_USER to fall back
+    // on, and every provider rejects a send with an empty From.
+    from: e.MAIL_FROM || e.SMTP_FROM || e.SMTP_USER || "",
     to: e.ALERT_TO || "",
+  },
+  // HTTPS email APIs, used INSTEAD of SMTP when a key is present.
+  //
+  // Why this exists: Render's FREE plan blocks all outbound traffic to SMTP
+  // ports 25/465/587 (policy change 2025-09-26), so nodemailer can never
+  // connect to smtp.gmail.com there — every send died with "Connection
+  // timeout" while the credentials were perfectly valid. These providers send
+  // over HTTPS/443, which is not blocked, so mail works on the free plan.
+  // Upgrading Render to any paid instance also fixes SMTP (port 25 stays
+  // blocked on every plan; 465/587 open up on paid) — then leave these unset.
+  //
+  // Set exactly ONE key. Precedence if several are set: Resend, Brevo, SendGrid.
+  mail: {
+    resendKey: e.RESEND_API_KEY || "",
+    brevoKey: e.BREVO_API_KEY || "",
+    sendgridKey: e.SENDGRID_API_KEY || "",
   },
 };
 

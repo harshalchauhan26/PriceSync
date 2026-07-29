@@ -6,7 +6,23 @@ const fmt   = (n) => (n == null || n === "") ? "—" : Number(n).toLocaleString(
 const fmtInt= (n) => (n == null ? "0" : Number(n).toLocaleString());
 const inr   = (n) => n == null ? "—" : "₹" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 const roundFinal = (n) => { const v = Number(n); if (n == null || !Number.isFinite(v)) return n; const r = Math.round(v); const t = Math.floor(r/10)*10; const d = r-t; return d<=2?t:d<=5?t+5:t+10; };
-const trunc = (u, n=44) => { if (!u) return "—"; let l = u.replace(/^https?:\/\//,""); return l.length>n ? l.slice(0,n-1)+"…":l; };
+// Full URL, never cut off — only the https:// prefix is dropped, since the
+// path is the part that identifies the product. The old helper clipped to ~30-50
+// chars, which hid exactly the tail (the product slug) people needed to read.
+// Long ones wrap via URL_WRAP rather than being ellipsised.
+const fullUrl = (u) => (u ? String(u).replace(/^https?:\/\//,"") : "—");
+const URL_WRAP = {wordBreak:"break-all",whiteSpace:"normal",lineHeight:1.35};
+// The product name lives in the URL slug (there is no name column), so a
+// keyword search matches the slug + brand: "steel grey" finds
+// /products/steel-grey-glen-check-blazer. Hyphens/underscores/slashes all
+// count as spaces so typing natural words works.
+const searchable = (it) => `${it.url||""} ${it.brand||""}`.toLowerCase().replace(/[-_/.]+/g," ");
+const matchesQuery = (it, query) => {
+  const terms = query.toLowerCase().replace(/[-_/.]+/g," ").split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const hay = searchable(it);
+  return terms.every((t) => hay.includes(t));   // every term must appear
+};
 const elapsed = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}m ${String(s%60).padStart(2,"0")}s`;
 async function api(path, opts) { const r = await fetch(path, opts); try { return await r.json(); } catch { return {}; } }
 const aj = (path, body) => api(path, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{}) });
@@ -154,7 +170,7 @@ function PushJobPanel({job:initial, onDone, onClose}) {
             {b.items.map((it,i)=>{ const [dot,dc]=itemDot(it.status); return <div key={i} style={{display:"flex",gap:8,alignItems:"center",fontSize:11.5,paddingLeft:14}}>
               <span className="mono" style={{width:10,textAlign:"center",color:dc}}>{dot}</span>
               <span className="mono" style={{color:"var(--on3)",minWidth:100,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(it.brand||"").replace(/^www\./,"")}</span>
-              <span style={{color:"var(--on2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:300}}>{trunc(it.url,44)}</span>
+              <span style={{color:"var(--on2)",maxWidth:420,...URL_WRAP}}>{fullUrl(it.url)}</span>
               <span className="mono" style={{color:"var(--green)"}}>{fmt(it.price)}</span>
               <span style={{color:it.status==="failed"?"var(--red)":"var(--on3)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{it.message}</span>
             </div>;})}
@@ -588,8 +604,8 @@ function Pipeline({admin}) {
         {st.entries.map((e,i)=><div key={i} className="console-row fadeup">
           <span style={{color:"var(--on3)"}}>{e.t}</span>
           <span style={{color:"var(--blue)",fontWeight:600}}>[{(e.domain||"?").replace(/^www\./,"").toUpperCase().slice(0,11)}]</span>
-          <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--on2)"}}>
-            {e.url?<a href={e.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(e.url,48)}</a>:"Invoking engine task :: "+e.msg}
+          <span style={{color:"var(--on2)",minWidth:0,...URL_WRAP}}>
+            {e.url?<a href={e.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{fullUrl(e.url)}</a>:"Invoking engine task :: "+e.msg}
           </span>
           <span className={getTagClass(e.status)} style={{justifySelf:"end"}}>{getTagLabel(e.status)}</span>
         </div>)}
@@ -703,7 +719,7 @@ function AddProducts({admin}) {
             <tbody>
               {preview.map((r,i)=><tr key={i} style={r._error?{opacity:.5}:{}}>
                 <td style={{fontSize:11}}>{r.brand||"—"}</td>
-                <td style={{fontSize:11}}>{trunc(r.url,50)}</td>
+                <td style={{fontSize:11,...URL_WRAP}}>{fullUrl(r.url)}</td>
                 <td style={{fontSize:11}}>{r.platform||"—"}</td>
                 <td className="mono">{fmt(r.base_price)}</td>
                 <td>{r._error?<span style={{color:"var(--red)",fontSize:11}}>{r._error}</span>:<span style={{color:"var(--green)"}}>✓</span>}</td>
@@ -735,6 +751,7 @@ function Review({admin}) {
   const [pushBusy,setPushBusy]=useState(false); const [pushJob,setPushJob]=useState(null);
   const [onlyMismatch,setOnlyMismatch]=useState(false);
   const [stateFilter,setStateFilter]=useState("all");
+  const [search,setSearch]=useState("");
   const [page,setPage]=useState(0); const PAGE_SIZE=500;
   const [cleanBusy,setCleanBusy]=useState(false);
   const [retryBusy,setRetryBusy]=useState(false); const [retryProgress,setRetryProgress]=useState(null);
@@ -755,7 +772,7 @@ function Review({admin}) {
   useEffect(()=>{ load(); },[load]);
   // Reset to the first page only when the view scope changes — NOT on every
   // items change (row edits replace the items array and must not jump the page).
-  useEffect(()=>{ setPage(0); },[stateFilter,brands]);
+  useEffect(()=>{ setPage(0); },[stateFilter,brands,search]);
   useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); setCad(d.overrides?.CAD??""); }); },[]);
 
   const liveInr=(it)=>{ if(it.live_price==null) return null; const c=(it.currency||"INR").toUpperCase(); if(c==="INR") return it.live_price; return it.live_price*(fxr[c]||1); };
@@ -839,6 +856,14 @@ function Review({admin}) {
         <div className="pill-group">
           {F.map(([k,l,n])=><button key={k} className={`pill${stateFilter===k?" active":""}`} onClick={()=>setStateFilter(k)}>{l} ({n})</button>)}
         </div>
+        <div className="toolbar-sep"/>
+        {/* Search by product name. Matches the URL slug + brand, since the
+            product name only exists inside the slug. Runs over the whole
+            loaded queue, not just the current page. */}
+        <span className="lbl">Search</span>
+        <input className="inp" style={{width:240}} value={search} onChange={e=>setSearch(e.target.value)}
+          placeholder="product name, e.g. steel grey blazer"/>
+        {search&&<button className="btn btn-ghost btn-sm" onClick={()=>setSearch("")}>Clear</button>}
       </div>;})()}
 
     {/* Global pricing strip */}
@@ -864,14 +889,25 @@ function Review({admin}) {
         painting after a couple thousand. Filtering/actions still act on the
         full items array, not just the visible page. */}
     {(()=>{
-      const shown=stateFilter==="all"?items:items.filter(it=>it.state===stateFilter);
+      const byState=stateFilter==="all"?items:items.filter(it=>it.state===stateFilter);
+      const shown=search.trim()?byState.filter(it=>matchesQuery(it,search)):byState;
       const pageCount=Math.max(1,Math.ceil(shown.length/PAGE_SIZE));
       const safePage=Math.min(page,pageCount-1);
       const from=safePage*PAGE_SIZE, to=Math.min(shown.length,from+PAGE_SIZE);
       const pageRows=shown.slice(from,to);
       return <>
+      {/* Always show the tally while searching, even under one page — otherwise
+          a search that matches 3 of 8,000 rows gives no feedback that it ran. */}
+      {search.trim()&&shown.length<=PAGE_SIZE&&<div className="card" style={{padding:"8px 16px",marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:12,color:"var(--on2)"}}>
+          <b>{fmtInt(shown.length)}</b> match{shown.length===1?"":"es"} for “{search.trim()}”
+          {byState.length?<span style={{color:"var(--on3)"}}> of {fmtInt(byState.length)}</span>:null}
+        </span>
+        <div style={{flex:1}}/>
+        <button className="btn btn-ghost btn-sm" onClick={()=>setSearch("")}>Clear search</button>
+      </div>}
       {shown.length>PAGE_SIZE&&<div className="card" style={{padding:"8px 16px",marginBottom:8,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-        <span style={{fontSize:12,color:"var(--on2)"}}>Showing <b>{fmtInt(from+1)}–{fmtInt(to)}</b> of <b>{fmtInt(shown.length)}</b></span>
+        <span style={{fontSize:12,color:"var(--on2)"}}>Showing <b>{fmtInt(from+1)}–{fmtInt(to)}</b> of <b>{fmtInt(shown.length)}</b>{search.trim()?` matching “${search.trim()}”`:""}</span>
         <div style={{flex:1}}/>
         <button className="btn btn-ghost btn-sm" onClick={()=>setPage(0)} disabled={safePage<=0}>« First</button>
         <button className="btn btn-ghost btn-sm" onClick={()=>setPage(p=>Math.max(0,p-1))} disabled={safePage<=0}>‹ Prev</button>
@@ -884,7 +920,7 @@ function Review({admin}) {
         <thead><tr>{["Product","State","Base","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
           {pageRows.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; return <tr key={it.id}>
-            <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,32)}</a>
+            <td style={{maxWidth:420}}><a href={it.url} target="_blank" rel="noopener" title={it.url} style={{color:"var(--blue)",...URL_WRAP}}>{fullUrl(it.url)}</a>
               <div className="mono" style={{fontSize:10,color:"var(--on3)"}}>{(it.brand||"").replace(/^www\./,"")}</div></td>
             <td><span className="mono" style={{fontSize:11,fontWeight:700,color:pc}}>{pl}</span></td>
             <td className="mono" style={{textAlign:"right"}}>{fmt(it.base_price)}</td>
@@ -987,7 +1023,7 @@ function History({admin}) {
         <tbody>
           {d.items.map(it=><tr key={it.id}>
             <td className="mono" style={{fontSize:11}}>{(it.brand||"").replace(/^www\./,"")}</td>
-            <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,30)}</a></td>
+            <td style={{maxWidth:420}}><a href={it.url} target="_blank" rel="noopener" title={it.url} style={{color:"var(--blue)",...URL_WRAP}}>{fullUrl(it.url)}</a></td>
             <td className="mono" style={{textAlign:"right"}}>{fmt(it.base_price)}</td>
             <td className="mono" style={{textAlign:"right",color:"var(--green)"}}>{fmt(it.final_price)}</td>
             <td className="mono" style={{textAlign:"right"}}>{it.markup_pct!=null?(+it.markup_pct).toFixed(2):"—"}</td>
@@ -1041,7 +1077,7 @@ function Alerts({admin}) {
         <thead><tr>{["Product","Brand","Direction","Prev Price","Now","Delta","Change %","When"].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
           {d.items.map((it,i)=>{ const up=it.direction==="spike",c=up?"var(--red)":"var(--green)"; return <tr key={i}>
-            <td><a href={it.url} target="_blank" rel="noopener" style={{color:"var(--blue)"}}>{trunc(it.url,30)}</a></td>
+            <td style={{maxWidth:420}}><a href={it.url} target="_blank" rel="noopener" title={it.url} style={{color:"var(--blue)",...URL_WRAP}}>{fullUrl(it.url)}</a></td>
             <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(it.brand||"").replace(/^www\./,"")}</td>
             <td><span style={{display:"inline-flex",alignItems:"center",gap:4,fontWeight:700,fontSize:11,color:c}}><Icon n={up?"up":"down"} s={13} c={c}/>{up?"SPIKE":"DROP"}</span></td>
             <td className="mono" style={{textAlign:"right"}}>{fmt(it.prev)}</td>

@@ -17,7 +17,7 @@ import { encrypt } from "./crypto.js";
 import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
 import * as tenant from "./tenant.js";
-import { sendMismatchReport, sendNewSignup } from "./mailer.js";
+import { sendMismatchReport, sendNewSignup, mailProvider } from "./mailer.js";
 import { pushPrice, verifyStore, invalidateShopifyCfg } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
 import { startPushJob, getPushJob, runningPushJob, startReviewPushJob } from './push-job.js';
@@ -103,9 +103,15 @@ app.post("/api/register", wrap(async (req, res) => {
 // working one from the outside.
 app.get("/api/health", (req, res) => {
   const active = pipe.runningCount();
-  const { user, pass, to } = config.smtp;
+  const { to, from } = config.smtp;
+  // email_provider names the transport ("resend"/"brevo"/"sendgrid"/"smtp"/
+  // "none") without leaking the key. "smtp" on Render's FREE plan cannot work —
+  // outbound 25/465/587 are blocked there — so seeing "smtp" in production is
+  // itself the diagnosis for silent mail.
+  const provider = mailProvider();
   res.json({ ok: true, running: active > 0, active_runs: active,
-    email_configured: !!(user && pass), alert_to_set: !!to });
+    email_configured: provider !== "none" && !!from, email_provider: provider,
+    mail_from_set: !!from, alert_to_set: !!to });
 });
 app.get("/api/auth/google/config", (req, res) => res.json({ client_id: config.googleClientId }));
 // Public brand picker for the login/sign-up page. Deliberately narrow: slug +
