@@ -77,6 +77,12 @@ export const config = {
   // sheets) — a small run finishes quickly enough that progress mail is noise,
   // and on a free plan capped per day those sends are better spent elsewhere.
   mailProgressMin: Math.max(0, parseInt(e.MAIL_PROGRESS_MIN || "2000", 10) || 2000),
+  // Reject a fetched price whose currency isn't the one the fetch requested,
+  // instead of converting it and comparing anyway (see pipeline.js finalizeOne).
+  // ON by default: a wrong-currency comparison is silent and looks exactly like
+  // real price drift. Set STRICT_FETCH_CURRENCY=0 to fall back to the old
+  // convert-and-compare behaviour if a brand ever needs it.
+  strictFetchCurrency: e.STRICT_FETCH_CURRENCY !== "0",
 };
 
 function mailKeys(e) {

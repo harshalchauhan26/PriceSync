@@ -94,6 +94,15 @@ services:
       # progress mail on smaller runs; "0" sends everything on every run.
       - key: MAIL_PROGRESS_MIN
         value: "2000"
+      # Reject a fetched price whose currency isn't the one the fetch asked for,
+      # rather than converting it and comparing anyway. ON unless set to "0".
+      # A site's geo logic can ignore the ?wmc-currency= parameter and serve its
+      # own currency — saakshakinni.com returned GBP to a request for another
+      # currency from the relay's foreign IP, and comparing that against an INR
+      # baseline left 159 rows sitting as "mismatch" for weeks, indistinguishable
+      # from real price drift. Only set "0" to restore the old behaviour.
+      - key: STRICT_FETCH_CURRENCY
+        value: "1"
       # --- fetch relay (lets cloud runs reach IP-banned brands; optional) ---
       - key: FETCH_RELAY_URL
         sync: false

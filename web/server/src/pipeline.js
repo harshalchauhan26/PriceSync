@@ -1,5 +1,5 @@
 import pLimit from "p-limit";
-import { Fetcher, extractRow } from "./engine.js";
+import { Fetcher, extractRow, requestedCurrency } from "./engine.js";
 import { toInr } from "./fx.js";
 import { config } from "./config.js";
 import * as store from "./store.js";
@@ -86,8 +86,15 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   const url = (prod.url || "").trim();
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
-  const fetchCur = eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD" : null;
   const nativeCur = eng.nativeCurrency && eng.nativeCurrency[normBrand(brand)];
+  // The currency this row's fetch ASKED for — same helper the fetch itself uses,
+  // so the request and the check can never drift apart.
+  const wantCur = requestedCurrency({
+    isNativeCurrency: !!nativeCur,
+    isUsdBrand: !!(eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand))),
+    platform: (prod.platform || "").trim().toLowerCase(),
+  });
+  const fetchCur = wantCur === "USD" ? "USD" : null;
   // Force the label for native-currency brands regardless of what extraction
   // detected — geo-dependent stores (Shopify Markets etc.) can mislabel the
   // same untouched number under a different currency depending on the
@@ -106,6 +113,22 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   if (base == null) {
     log(eng, { row: tag, domain: brand, url, currency: cur, price: String(live), status: "Fetch Error", msg: "baseline unreadable" });
     await store.saveResult(mboId, prod, "Fetch Error (baseline unreadable)", live, cur, "error", runId);
+    return "error";
+  }
+  // CURRENCY GUARD — never compare a price denominated in a currency we did not
+  // ask for. A site's geo logic can ignore the currency parameter and serve its
+  // own: saakshakinni.com returned GBP 560 to a USD request from the relay's
+  // foreign IP, and that got quietly converted and compared against a ₹64,000
+  // baseline, so all 159 rows sat as "mismatch" for weeks looking like real
+  // price drift. An explicit error is recoverable; a plausible wrong number is
+  // not. UNKNOWN is allowed through — detection failing to identify a currency
+  // is not evidence of the wrong one, and rejecting it would strand every page
+  // that simply has no currency marker.
+  if (config.strictFetchCurrency && wantCur && cur !== "UNKNOWN" && cur !== wantCur) {
+    const detail = `currency mismatch: asked ${wantCur}, page served ${cur}`;
+    log(eng, { row: tag, domain: brand, url, currency: cur, price: String(live),
+      status: "Fetch Error", msg: detail });
+    await store.saveResult(mboId, prod, `Fetch Error (${detail})`, live, cur, "error", runId);
     return "error";
   }
   if (fetchCur === "USD" && cur === "USD") {
@@ -153,13 +176,15 @@ async function processOne(eng, fetcher, prod, runId) {
   const base = prod.base_price, brand = prod.brand;
   const tag = prod.key || url;
   const platformKind = (prod.platform || "").trim().toLowerCase();
-  const isNativeCur = !!(eng.nativeCurrency && eng.nativeCurrency[normBrand(brand)]);
   // Pin non-USD wordpress/custom fetches to INR so geo-detecting currency
   // plugins (wmc) can't serve foreign prices when the server runs abroad.
   // Native-currency brands are exempt — their own currency IS the baseline.
-  const fetchCur = isNativeCur ? undefined
-    : eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand)) ? "USD"
-    : (platformKind !== "shopify" ? "INR" : null);
+  // Shared with worker.js and finalizeOne's guard via requestedCurrency().
+  const fetchCur = requestedCurrency({
+    isNativeCurrency: !!(eng.nativeCurrency && eng.nativeCurrency[normBrand(brand)]),
+    isUsdBrand: !!(eng.usdFetchBrands && eng.usdFetchBrands.has(normBrand(brand))),
+    platform: platformKind,
+  });
   const preferHigh = eng.rangeHighBrands ? eng.rangeHighBrands.has(normBrand(brand)) : false;
   let live, currency;
   if (cfg.simulation) {

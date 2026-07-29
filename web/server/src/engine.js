@@ -364,6 +364,22 @@ export async function extractCustom(fetcher, url, customRegex, preferHigh = fals
   return [extractPriceFromHtml(html, customRegex, preferHigh), detectCurrency(html)];
 }
 
+// The currency a fetch will REQUEST for a row — the single source of truth for
+// that decision. It lived in three places (pipeline.js processOne, worker.js,
+// and finalizeOne) and the finalizeOne copy was missing the INR pin, so the
+// comparison stage believed nothing had been requested for wordpress brands and
+// silently accepted whatever currency came back. That is how saakshakinni.com
+// compared GBP 560 against a ₹64,000 baseline across 159 rows.
+//   native-currency brand -> null (no param; the label is forced to nativeCur later)
+//   USD-flagged brand     -> "USD"
+//   any non-shopify brand -> "INR" (pins geo-detecting currency plugins)
+//   shopify               -> null (not currency-parameterised)
+export function requestedCurrency({ isNativeCurrency, isUsdBrand, platform } = {}) {
+  if (isNativeCurrency) return null;
+  if (isUsdBrand) return "USD";
+  return String(platform || "").trim().toLowerCase() !== "shopify" ? "INR" : null;
+}
+
 export function withCurrencyParam(url, param, currency) {
   if (!currency || !param) return url;
   try { const u = new URL(url); u.searchParams.set(param, currency); return u.toString(); }

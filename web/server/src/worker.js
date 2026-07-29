@@ -3,7 +3,7 @@
 // finalizes (compare + save + log) so per-brand rules and writes stay in one place.
 import { workerData, parentPort } from "node:worker_threads";
 import pLimit from "p-limit";
-import { Fetcher, extractRow } from "./engine.js";
+import { Fetcher, extractRow, requestedCurrency } from "./engine.js";
 
 const { rows, fetch: fopts, usdFetch, rangeHigh, proxyBrands, proxyUrl, localOnly, relay,
   wooApi, relayParams, nativeCurrency } = workerData;
@@ -29,9 +29,10 @@ await Promise.all(rows.map((prod) => limit(async () => {
   if (aborted) return;
   const brand = normBrand(prod.brand);
   const platformKind = (prod.platform || "").trim().toLowerCase();
-  // Same INR pin as pipeline.js processOne — keep the two in sync.
-  const fetchCur = nativeCur[brand] ? undefined
-    : usdSet.has(brand) ? "USD" : (platformKind !== "shopify" ? "INR" : null);
+  // Shared with pipeline.js (processOne + finalizeOne's guard) so the currency
+  // that was requested and the currency that is enforced can never disagree.
+  const fetchCur = requestedCurrency({
+    isNativeCurrency: !!nativeCur[brand], isUsdBrand: usdSet.has(brand), platform: platformKind });
   const preferHigh = rangeSet.has(brand);
   const viaRelay = !!(relay && localOnlySet.has(brand));
   const f = viaRelay ? fetcher.relayed(relay.url, relay.secret)
