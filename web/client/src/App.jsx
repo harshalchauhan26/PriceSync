@@ -1250,6 +1250,18 @@ function Settings({me, admin}) {
   const del=async(email)=>{ if(!confirm("Delete "+email+"?")) return; const r=await aj("/api/admin/users/delete",{email}); r.ok?toast("Deleted","ok"):toast(r.error,"err"); load(); };
   const approve=async(email)=>{ const r=await aj("/api/admin/users/approve",{email}); r.ok?toast(`${email} approved`,"ok"):toast(r.error,"err"); load(); };
   const pendingCount=users.filter(u=>u.approved===false).length;
+  // Mail check. /api/health is public and reports the transport, so the panel
+  // can show what's configured before you spend a send on it.
+  const [mail,setMail]=useState(null); const [mailBusy,setMailBusy]=useState(false);
+  useEffect(()=>{ api("/api/health").then(d=>setMail(d||{})); },[]);
+  const testMail=async()=>{
+    setMailBusy(true);
+    const r=await aj("/api/admin/test-mail",{});
+    setMailBusy(false);
+    if(r.ok) toast(`Test email sent via ${r.provider} to ${r.to}`,"ok");
+    else toast(r.error||"Test email failed","err");
+    setMail(m=>({...(m||{}),_last:r}));
+  };
 
   if(!owner) return <div className="card" style={{padding:24,maxWidth:400}}>
     <div className="lbl" style={{marginBottom:8}}>Account</div>
@@ -1261,6 +1273,42 @@ function Settings({me, admin}) {
     <div style={{marginBottom:4}}>
       <h1 style={{fontSize:22,fontWeight:700}}>Owner Console</h1>
     </div>
+
+    {/* Email — shows the live transport and sends a real test (with a sheet
+        attached) so a broken setup is caught here, not by a silent pipeline. */}
+    <div>
+      <div className="lbl" style={{marginBottom:8}}>Email</div>
+      <div className="card" style={{padding:14,display:"flex",flexDirection:"column",gap:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+          <span style={{fontSize:12.5,color:"var(--on2)"}}>Transport</span>
+          <span className="badge mono" style={{background:mail?.email_provider&&mail.email_provider!=="none"&&mail.email_provider!=="smtp"?"rgba(34,197,94,.15)":"rgba(245,158,11,.15)",
+            color:mail?.email_provider&&mail.email_provider!=="none"&&mail.email_provider!=="smtp"?"var(--green)":"var(--amber)"}}>
+            {mail?.email_provider||"…"}
+          </span>
+          {mail?.email_provider==="smtp"&&<span style={{fontSize:11.5,color:"var(--amber)"}}>
+            SMTP is blocked on Render's free plan — set BREVO_API_KEY + MAIL_FROM
+          </span>}
+          {mail&&!mail.mail_from_set&&<span style={{fontSize:11.5,color:"var(--red)"}}>MAIL_FROM not set</span>}
+          {mail&&!mail.alert_to_set&&<span style={{fontSize:11.5,color:"var(--on3)"}}>ALERT_TO not set</span>}
+          <div style={{flex:1}}/>
+          <button className="btn btn-primary btn-sm" disabled={mailBusy} onClick={testMail}>
+            <Icon n="alerts" s={12}/>{mailBusy?"Sending…":"Send test email"}
+          </button>
+        </div>
+        <div style={{fontSize:11.5,color:"var(--on3)",lineHeight:1.45}}>
+          Sends to you ({me.email}) and ALERT_TO, with a small .xlsx attached — the
+          same path a pipeline report takes, so a pass here means reports will land too.
+        </div>
+        {mail?._last&&<div className="mono" style={{fontSize:11,padding:"8px 10px",borderRadius:6,
+          background:mail._last.ok?"rgba(34,197,94,.10)":"rgba(239,68,68,.10)",
+          color:mail._last.ok?"var(--green)":"var(--red)",wordBreak:"break-word"}}>
+          {mail._last.ok
+            ? `sent via ${mail._last.provider} → ${mail._last.to}${mail._last.dropped?.length?` · dropped ${mail._last.dropped.join(", ")}`:""}`
+            : mail._last.error}
+        </div>}
+      </div>
+    </div>
+
     <div>
       <div className="lbl" style={{marginBottom:8}}>Active Sessions ({sessions.filter(s=>s.active).length} live)</div>
       <div className="card" style={{overflow:"auto"}}>

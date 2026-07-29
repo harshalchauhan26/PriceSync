@@ -17,7 +17,7 @@ import { encrypt } from "./crypto.js";
 import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
 import * as tenant from "./tenant.js";
-import { sendMismatchReport, sendNewSignup, mailProvider } from "./mailer.js";
+import { sendMismatchReport, sendNewSignup, mailProvider, sendTestEmail } from "./mailer.js";
 import { pushPrice, verifyStore, invalidateShopifyCfg } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
 import { startPushJob, getPushJob, runningPushJob, startReviewPushJob } from './push-job.js';
@@ -859,6 +859,14 @@ tenantRouter.post("/admin/users/delete", sec.ownerOnly, wrap(async (req, res) =>
   await sec.deleteUser(req.mboId, req.body.email);
   sec.clearRoleCache();
   res.json({ ok: true });
+}));
+// Deliverability check for the mail setup. Addressed exactly like a pipeline
+// report (caller + ALERT_TO, undeliverable dropped) so a pass here means a real
+// report will land too. Returns the provider's own error text so a bad key or
+// unverified MAIL_FROM is diagnosable without reading server logs.
+tenantRouter.post("/admin/test-mail", sec.ownerOnly, wrap(async (req, res) => {
+  const r = await sendTestEmail({ to: sec.currentUser(req)?.email });
+  res.json(r);
 }));
 // Approves a pending self-serve signup (see /api/auth/google) — grants
 // whatever role they already have (viewer by default) real tenant access.

@@ -265,6 +265,36 @@ function flatSheet(wb, sheetName, columns, rows) {
 
 // ---- pipeline lifecycle emails ----
 
+// One-shot deliverability check, wired to the "Send test email" button in
+// Settings. Goes through the SAME recipients()/deliver() path as a real report
+// and carries a small .xlsx, so a pass proves the whole chain — provider auth,
+// sender verification, recipient resolution AND attachment handling — without
+// waiting on a pipeline run. Returns the provider's own error text on failure
+// (e.g. Brevo's 400 for an unverified MAIL_FROM) instead of a generic message.
+export async function sendTestEmail({ to } = {}) {
+  const g = mailGuard(to); if (!g.ok) return g;
+  const { from } = config.smtp;
+  const provider = mailProvider();
+  const wb = new ExcelJS.Workbook();
+  flatSheet(wb, "Test", [{ key: "check", header: "check" }, { key: "value", header: "value" }],
+    [{ check: "provider", value: provider }, { check: "from", value: from },
+      { check: "to", value: g.to }, { check: "sent_at", value: new Date().toISOString() }]);
+  try {
+    await deliver({
+      from, to: g.to,
+      subject: `MBO Tracker — test email (${provider}) ${today()}`,
+      text: `This is a test from MBO Tracker.\n\n` +
+        `• Transport: ${provider}\n• From: ${from}\n• To: ${g.to}\n` +
+        (g.dropped.length ? `• Dropped as undeliverable: ${g.dropped.join(", ")}\n` : "") +
+        `\nIf this arrived WITH the attached sheet, pipeline reports will arrive too.\n\n— MBO Tracker`,
+      attachments: [{ filename: `test_${today()}.xlsx`, content: Buffer.from(await wb.xlsx.writeBuffer()) }],
+    });
+  } catch (e) {
+    return { ok: false, error: e.message, provider, to: g.to, dropped: g.dropped };
+  }
+  return { ok: true, provider, to: g.to, dropped: g.dropped };
+}
+
 // Sent the moment a run kicks off.
 export async function sendPipelineStarted({ to, total, runId } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
