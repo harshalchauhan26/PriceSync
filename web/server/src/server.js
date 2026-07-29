@@ -891,6 +891,29 @@ superRouter.use(sec.superAdminOnly);
 // users.mbo_id). Body { mboId: <id> } to enter, { mboId: null } to leave.
 // Only meaningful for a role=='super_admin' account — a flagged tenant
 // owner/admin already has its own mbo_id and needs none of this.
+// Platform-level diagnostics. Deliberately separate from the tenant route of
+// the same name: a super_admin owns no tenant, so /api/admin/test-mail (which
+// needs req.mboId) is unreachable for it. Accepts an optional { to } so support
+// can prove delivery to a REAL inbox — the super-admin's own login is usually
+// an unroutable .local address that gets dropped before sending.
+superRouter.post("/test-mail", wrap(async (req, res) => {
+  const target = String(req.body.to || "").trim() || sec.currentUser(req)?.email;
+  const r = await sendTestEmail({ to: target });
+  res.json(r);
+}));
+// Read-only snapshot of the things that silently break in production: which
+// mail transport is live, whether the DB answers, and how many runs are going.
+superRouter.get("/diagnostics", wrap(async (req, res) => {
+  const { from, to } = config.smtp;
+  let db = "ok", dbMs = null;
+  const t0 = Date.now();
+  try { await ping(); dbMs = Date.now() - t0; } catch (e) { db = e.message; }
+  res.json({ ok: true,
+    email: { provider: mailProvider(), from: from || null, alert_to: to || null },
+    db: { status: db, ms: dbMs },
+    pipeline: { active_runs: pipe.runningCount() },
+    node: process.version, uptime_s: Math.round(process.uptime()) });
+}));
 superRouter.post("/act-as", wrap(async (req, res) => {
   const raw = req.body.mboId;
   if (raw == null || raw === "") {

@@ -241,7 +241,15 @@ function Auth({onIn}) {
   // gets an unapproved viewer account (see /api/auth/google) that the tenant
   // owner then approves and assigns a role to in Settings → Users.
   const [brand,setBrand]=useState(""); const [email,setE]=useState(""); const [pw,setPw]=useState(""); const [err,setErr]=useState(""); const [busy,setBusy]=useState(false);
-  const gRef=useRef(null); const [gReady,setGReady]=useState(false);
+  // "signin" | "signup" — signup is a visible tab, not a footnote. Password
+  // accounts are owner-created, so signup offers Google only.
+  const [mode,setMode]=useState("signin");
+  // Google's state is tracked explicitly: when the GSI script or renderButton
+  // fails, gReady used to stay false and the page rendered an empty gap — no
+  // button and no reason, so sign-up looked like it didn't exist.
+  //   loading | ready | unavailable (no GOOGLE_CLIENT_ID) | failed (script/render)
+  const gRef=useRef(null); const [gState,setGState]=useState("loading");
+  const gReady=gState==="ready";
   const [brands,setBrands]=useState([]);
   // Google's initialize() runs ONCE, so its callback would otherwise close over
   // the first render's empty brand forever — picking a brand then had no
@@ -256,18 +264,28 @@ function Auth({onIn}) {
   useEffect(()=>{
     let dead=false;
     api("/api/auth/google/config").then(cfg=>{
-      if(dead||!cfg.client_id) return;
+      if(dead) return;
+      if(!cfg.client_id){ setGState("unavailable"); return; }
       const init=()=>{ if(dead||!gRef.current) return;
-        window.google.accounts.id.initialize({client_id:cfg.client_id,callback:async(resp)=>{
-          const d=await aj("/api/auth/google",{credential:resp.credential,brand:brandRef.current});
-          d.ok?onIn(d):setErr(d.error||"Google sign-in failed");
-        }});
-        window.google.accounts.id.renderButton(gRef.current,{theme:"outline",size:"large",width:286});
-        setGReady(true);
+        try{
+          window.google.accounts.id.initialize({client_id:cfg.client_id,callback:async(resp)=>{
+            const d=await aj("/api/auth/google",{credential:resp.credential,brand:brandRef.current});
+            d.ok?onIn(d):setErr(d.error||"Google sign-in failed");
+          }});
+          window.google.accounts.id.renderButton(gRef.current,{theme:"outline",size:"large",width:286});
+          setGState("ready");
+        }catch(e){ setGState("failed"); }
       };
       if(window.google?.accounts?.id) init();
-      else{ const s=document.createElement("script"); s.src="https://accounts.google.com/gsi/client"; s.async=true; s.onload=init; document.head.appendChild(s); }
-    });
+      else{
+        const s=document.createElement("script"); s.src="https://accounts.google.com/gsi/client"; s.async=true;
+        s.onload=init;
+        // Without this the failure was silent — a blocked or offline GSI script
+        // left the page with no button and no explanation.
+        s.onerror=()=>{ if(!dead) setGState("failed"); };
+        document.head.appendChild(s);
+      }
+    }).catch(()=>{ if(!dead) setGState("failed"); });
     return()=>{dead=true;};
   },[]);
   return <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)"}}>
@@ -279,30 +297,59 @@ function Auth({onIn}) {
           <div className="lbl">Terminal v2.4</div>
         </div>
       </div>
+      {/* Sign in / Create account — an explicit tab, because sign-up used to be
+          only a sentence of footer text and read as "there is no sign-up". */}
+      <div className="pill-group" style={{marginBottom:16,display:"flex"}}>
+        {[["signin","Sign in"],["signup","Create account"]].map(([k,l])=>
+          <button key={k} type="button" className={`pill${mode===k?" active":""}`} style={{flex:1}}
+            onClick={()=>{setMode(k); setErr("");}}>{l}</button>)}
+      </div>
+
       <div className="lbl" style={{marginBottom:4}}>Brand</div>
       <select className="inp" style={{width:"100%",marginBottom:12}} value={brand} onChange={e=>setBrand(e.target.value)} autoFocus required>
         <option value="">Select your brand…</option>
         {brands.map(b=><option key={b.slug} value={b.slug}>{b.name}</option>)}
       </select>
-      <div className="lbl" style={{marginBottom:4}}>Email</div>
-      <input className="inp" style={{width:"100%",marginBottom:12}} type="email" value={email} onChange={e=>setE(e.target.value)} required/>
-      <div className="lbl" style={{marginBottom:4}}>Password</div>
-      <input className="inp" style={{width:"100%"}} type="password" value={pw} onChange={e=>setPw(e.target.value)} required/>
-      <button disabled={busy} style={{width:"100%",marginTop:20,padding:"11px 0",borderRadius:8,background:"#3b82f6",color:"#fff",fontWeight:700,fontSize:14,border:"none",cursor:"pointer"}}>
-        {busy?"…":"Sign in"}
-      </button>
+
+      {mode==="signup"
+        ? <div style={{fontSize:12,color:"var(--on2)",lineHeight:1.5,marginBottom:4}}>
+            Pick your brand above, then continue with Google. Your account is
+            created straight away, but the brand's owner has to approve it and
+            set your role before you can see any data.
+          </div>
+        : <>
+            <div className="lbl" style={{marginBottom:4}}>Email</div>
+            <input className="inp" style={{width:"100%",marginBottom:12}} type="email" value={email} onChange={e=>setE(e.target.value)} required/>
+            <div className="lbl" style={{marginBottom:4}}>Password</div>
+            <input className="inp" style={{width:"100%"}} type="password" value={pw} onChange={e=>setPw(e.target.value)} required/>
+            <button disabled={busy} style={{width:"100%",marginTop:20,padding:"11px 0",borderRadius:8,background:"#3b82f6",color:"#fff",fontWeight:700,fontSize:14,border:"none",cursor:"pointer"}}>
+              {busy?"…":"Sign in"}
+            </button>
+          </>}
+
+      {/* The Google container must stay MOUNTED in both tabs — renderButton runs
+          once, so unmounting it would destroy the injected button for good. */}
       <div style={{marginTop:14}}>
-        {gReady&&<div style={{display:"flex",alignItems:"center",gap:8,color:"var(--on3)",fontSize:11,marginBottom:10}}>
+        {gReady&&mode==="signin"&&<div style={{display:"flex",alignItems:"center",gap:8,color:"var(--on3)",fontSize:11,marginBottom:10}}>
           <div style={{flex:1,height:1,background:"var(--border)"}}/>or<div style={{flex:1,height:1,background:"var(--border)"}}/>
         </div>}
-        {/* Google sign-in needs a brand too — both to sign up under and to
-            match against on the way back in. Blocked until one is picked so
-            the click can't fail server-side with "pick a brand first". */}
+        {/* Needs a brand either way: to sign up under, or to match on the way
+            back in. Held until one is picked so the click can't fail server-side. */}
         <div ref={gRef} title={brand?"":"Select your brand first"}
           style={{display:"flex",justifyContent:"center",
             opacity:brand?1:.45,pointerEvents:brand?"auto":"none"}}/>
-        {gReady&&!brand&&<div style={{fontSize:11,color:"var(--on3)",textAlign:"center",marginTop:8}}>
-          Select your brand to enable Google sign-in
+        {gReady&&!brand&&<div style={{fontSize:11.5,color:"var(--amber)",textAlign:"center",marginTop:8}}>
+          ↑ Select your brand to enable Google
+        </div>}
+        {gState==="loading"&&<div style={{fontSize:11.5,color:"var(--on3)",textAlign:"center"}}>Loading Google sign-in…</div>}
+        {gState==="unavailable"&&<div style={{fontSize:11.5,color:"var(--amber)",textAlign:"center",lineHeight:1.45}}>
+          Google sign-in isn’t configured on this server (GOOGLE_CLIENT_ID),
+          so accounts can only be created by your brand’s owner.
+        </div>}
+        {gState==="failed"&&<div style={{fontSize:11.5,color:"var(--red)",textAlign:"center",lineHeight:1.45}}>
+          Google sign-in failed to load — check that this site’s address is listed
+          as an authorised JavaScript origin on the Google client, and that no
+          extension is blocking accounts.google.com.
         </div>}
       </div>
       <div style={{marginTop:10,fontSize:12,color:"#ef4444",minHeight:16}}>{err}</div>
@@ -1368,12 +1415,24 @@ function SuperAdmin({ me }) {
   const [brandDraft,setBrandDraft]=useState("");
   const [showAddUser,setShowAddUser]=useState(false);
   const [userForm,setUserForm]=useState({email:"",password:"",role:"viewer"});
+  // Support diagnostics
+  const [diag,setDiag]=useState(null);
+  const [testTo,setTestTo]=useState("");
+  const [testBusy,setTestBusy]=useState(false);
+  const [testResult,setTestResult]=useState(null);
 
   const load=()=>{
     api("/api/superadmin/mbos").then(d=>setMbos(d.mbos||[]));
     api("/api/superadmin/sessions").then(d=>setSessions(d.sessions||[]));
   };
-  useEffect(()=>{ load(); const t=setInterval(load,15000); return()=>clearInterval(t); },[]);
+  const loadDiag=()=>api("/api/superadmin/diagnostics").then(d=>setDiag(d||{}));
+  useEffect(()=>{ load(); loadDiag(); const t=setInterval(load,15000); return()=>clearInterval(t); },[]);
+  const sendTest=async()=>{
+    setTestBusy(true); setTestResult(null);
+    const r=await aj("/api/superadmin/test-mail",{to:testTo.trim()});
+    setTestBusy(false); setTestResult(r);
+    r.ok?toast(`Sent via ${r.provider} to ${r.to}`,"ok"):toast(r.error||"Test failed","err");
+  };
 
   const openMbo=(id)=>{
     setSelected(id); setBrands(null); setUsers(null);
@@ -1481,6 +1540,59 @@ function SuperAdmin({ me }) {
       </div>
       <button className="btn btn-success btn-sm" disabled={busy} onClick={createMbo}>Create tenant</button>
     </div>}
+
+    {/* ── Support diagnostics ── the things that fail silently in production:
+        which mail transport is live, whether the DB answers, what's running.
+        The test send targets any address you type, because the super-admin's
+        own login is usually an unroutable .local that gets dropped. */}
+    <div className="card" style={{padding:16,marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,flexWrap:"wrap"}}>
+        <span className="lbl">Diagnostics</span>
+        <div style={{flex:1}}/>
+        <button className="btn btn-ghost btn-sm" onClick={loadDiag}><Icon n="refresh" s={12}/>Refresh</button>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10,marginBottom:14}}>
+        {(()=>{
+          const p=diag?.email?.provider, mailOk=p&&p!=="none"&&p!=="smtp";
+          const dbOk=diag?.db?.status==="ok";
+          const T=[
+            ["Mail transport", p||"…", mailOk?"var(--green)":"var(--amber)",
+              p==="smtp"?"blocked on Render free":p==="none"?"not configured":"HTTPS API"],
+            ["Database", dbOk?"ok":(diag?diag.db?.status:"…"), dbOk?"var(--green)":"var(--red)",
+              diag?.db?.ms!=null?`${diag.db.ms} ms`:""],
+            ["Active runs", diag?String(diag.pipeline?.active_runs??0):"…", "var(--on)", ""],
+            ["Uptime", diag?`${Math.floor((diag.uptime_s||0)/60)}m`:"…", "var(--on)", diag?.node||""],
+          ];
+          return T.map(([label,val,col,sub])=><div key={label} className="card" style={{padding:"10px 12px",background:"var(--card2)"}}>
+            <div className="lbl" style={{marginBottom:4}}>{label}</div>
+            <div className="mono" style={{fontSize:15,fontWeight:700,color:col,wordBreak:"break-all"}}>{val}</div>
+            {sub?<div style={{fontSize:10.5,color:"var(--on3)",marginTop:2}}>{sub}</div>:null}
+          </div>);
+        })()}
+      </div>
+      <div style={{fontSize:11.5,color:"var(--on3)",marginBottom:8}}>
+        From <span className="mono">{diag?.email?.from||"— MAIL_FROM not set"}</span>
+        {" · "}ALERT_TO <span className="mono">{diag?.email?.alert_to||"— not set"}</span>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <input className="inp" style={{flex:1,minWidth:220}} placeholder="test recipient (e.g. you@gmail.com)"
+          value={testTo} onChange={e=>setTestTo(e.target.value)}/>
+        <button className="btn btn-primary btn-sm" disabled={testBusy} onClick={sendTest}>
+          <Icon n="alerts" s={12}/>{testBusy?"Sending…":"Send test email"}
+        </button>
+      </div>
+      <div style={{fontSize:11,color:"var(--on3)",marginTop:6}}>
+        Sends a real email with a small .xlsx attached, down the same path as a
+        pipeline report. Leave blank to send to your own login + ALERT_TO.
+      </div>
+      {testResult&&<div className="mono" style={{fontSize:11,marginTop:10,padding:"8px 10px",borderRadius:6,wordBreak:"break-word",
+        background:testResult.ok?"rgba(34,197,94,.10)":"rgba(239,68,68,.10)",
+        color:testResult.ok?"var(--green)":"var(--red)"}}>
+        {testResult.ok
+          ? `sent via ${testResult.provider} → ${testResult.to}${testResult.dropped?.length?` · dropped ${testResult.dropped.join(", ")}`:""}`
+          : testResult.error}
+      </div>}
+    </div>
 
     <div style={{display:"grid",gridTemplateColumns:"1.3fr 1fr",gap:16}}>
       <div className="card" style={{padding:16}}>
