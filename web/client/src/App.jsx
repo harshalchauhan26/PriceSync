@@ -220,11 +220,22 @@ function PageBar({title, subtitle, brands, setBrands, brandScope, onClear, extra
    AUTH
 ═══════════════════════════════════════════════════════════════ */
 function Auth({onIn}) {
-  // Self-serve signup is closed platform-wide — every MBO (brand) is
-  // provisioned by the platform admin, and its users by that MBO's own
-  // owner console. This form is login-only.
+  // MBOs (brands) are provisioned by the platform admin. Password sign-in is
+  // login-only, but Google sign-in doubles as SIGN-UP: an unknown Google email
+  // gets an unapproved viewer account (see /api/auth/google) that the tenant
+  // owner then approves and assigns a role to in Settings → Users.
   const [brand,setBrand]=useState(""); const [email,setE]=useState(""); const [pw,setPw]=useState(""); const [err,setErr]=useState(""); const [busy,setBusy]=useState(false);
   const gRef=useRef(null); const [gReady,setGReady]=useState(false);
+  const [brands,setBrands]=useState([]);
+  // Google's initialize() runs ONCE, so its callback would otherwise close over
+  // the first render's empty brand forever — picking a brand then had no
+  // effect and every returning Google user got "brand doesn't match".
+  // A ref keeps the callback reading the CURRENT value without re-initialising.
+  const brandRef=useRef("");
+  useEffect(()=>{ brandRef.current=brand; },[brand]);
+  // Brand list is public (active brands only) so both signing up and signing
+  // back in can name a brand without knowing its slug.
+  useEffect(()=>{ api("/api/brands").then(d=>setBrands(d.brands||[])); },[]);
   const submit=async(e)=>{ e.preventDefault(); setBusy(true); setErr(""); const d=await aj("/api/login",{brand,email,password:pw}); setBusy(false); if(d.ok) onIn(d); else setErr(d.error||"Failed"); };
   useEffect(()=>{
     let dead=false;
@@ -232,7 +243,7 @@ function Auth({onIn}) {
       if(dead||!cfg.client_id) return;
       const init=()=>{ if(dead||!gRef.current) return;
         window.google.accounts.id.initialize({client_id:cfg.client_id,callback:async(resp)=>{
-          const d=await aj("/api/auth/google",{credential:resp.credential,brand});
+          const d=await aj("/api/auth/google",{credential:resp.credential,brand:brandRef.current});
           d.ok?onIn(d):setErr(d.error||"Google sign-in failed");
         }});
         window.google.accounts.id.renderButton(gRef.current,{theme:"outline",size:"large",width:286});
@@ -252,8 +263,11 @@ function Auth({onIn}) {
           <div className="lbl">Terminal v2.4</div>
         </div>
       </div>
-      <div className="lbl" style={{marginBottom:4}}>Brand ID</div>
-      <input className="inp" style={{width:"100%",marginBottom:12}} type="text" value={brand} onChange={e=>setBrand(e.target.value)} placeholder="e.g. studio-east" autoFocus required/>
+      <div className="lbl" style={{marginBottom:4}}>Brand</div>
+      <select className="inp" style={{width:"100%",marginBottom:12}} value={brand} onChange={e=>setBrand(e.target.value)} autoFocus required>
+        <option value="">Select your brand…</option>
+        {brands.map(b=><option key={b.slug} value={b.slug}>{b.name}</option>)}
+      </select>
       <div className="lbl" style={{marginBottom:4}}>Email</div>
       <input className="inp" style={{width:"100%",marginBottom:12}} type="email" value={email} onChange={e=>setE(e.target.value)} required/>
       <div className="lbl" style={{marginBottom:4}}>Password</div>
@@ -265,11 +279,21 @@ function Auth({onIn}) {
         {gReady&&<div style={{display:"flex",alignItems:"center",gap:8,color:"var(--on3)",fontSize:11,marginBottom:10}}>
           <div style={{flex:1,height:1,background:"var(--border)"}}/>or<div style={{flex:1,height:1,background:"var(--border)"}}/>
         </div>}
-        <div ref={gRef} style={{display:"flex",justifyContent:"center"}}/>
+        {/* Google sign-in needs a brand too — both to sign up under and to
+            match against on the way back in. Blocked until one is picked so
+            the click can't fail server-side with "pick a brand first". */}
+        <div ref={gRef} title={brand?"":"Select your brand first"}
+          style={{display:"flex",justifyContent:"center",
+            opacity:brand?1:.45,pointerEvents:brand?"auto":"none"}}/>
+        {gReady&&!brand&&<div style={{fontSize:11,color:"var(--on3)",textAlign:"center",marginTop:8}}>
+          Select your brand to enable Google sign-in
+        </div>}
       </div>
       <div style={{marginTop:10,fontSize:12,color:"#ef4444",minHeight:16}}>{err}</div>
       <div style={{fontSize:12,color:"var(--on3)"}}>
-        No account? Sign in with Google above to create one — it'll need the owner's approval before you get access.
+        No account? Pick your brand and sign in with Google — that creates your
+        account, and the brand's owner approves it and sets your role before you
+        get access.
       </div>
     </form>
   </div>;

@@ -301,19 +301,23 @@ export async function sendPipelineComplete({ mboId, to, stats } = {}) {
 // (not the configurable ALERT_TO) so account creation is never silently
 // missed just because someone changes the alert recipient.
 const OWNER_NOTIFY_TO = "harshal.growify@gmail.com";
-export async function sendNewSignup({ email } = {}) {
+export async function sendNewSignup({ email, brand } = {}) {
   const { user, pass, from } = config.smtp;
   if (!user || !pass) return { ok: false, error: "email not configured (SMTP_USER/SMTP_PASS)" };
   const to = deliverable(OWNER_NOTIFY_TO);
   if (!to) return { ok: false, error: `owner notify address undeliverable (${OWNER_NOTIFY_TO})` };
+  // The brand matters now that a signup joins whichever brand the user picked
+  // on the login page — without it there's no way to tell which Settings →
+  // Users list the pending account is actually sitting in.
+  const where = brand ? ` for ${brand}` : "";
   await transport().sendMail({
     from, to,
-    subject: `MBO Tracker — new sign-up awaiting approval: ${email}`,
+    subject: `MBO Tracker — new sign-up awaiting approval${where}: ${email}`,
     text: `${email} just signed in with Google and a "viewer" account was ` +
-      `created for them — but it is PENDING APPROVAL and currently has no ` +
-      `access to any tenant data.\n\nOpen Settings → Users to approve them ` +
-      `(and change their role if needed). Until you do, they'll only see an ` +
-      `"Awaiting approval" screen.\n\n— MBO Tracker`,
+      `created for them${where} — but it is PENDING APPROVAL and currently ` +
+      `has no access to any data.\n\nOpen Settings → Users${where} to approve ` +
+      `them (and change their role if needed). Until you do, they'll only see ` +
+      `an "Awaiting approval" screen.\n\n— MBO Tracker`,
   });
   return { ok: true, to };
 }

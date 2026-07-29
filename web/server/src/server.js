@@ -108,6 +108,15 @@ app.get("/api/health", (req, res) => {
     email_configured: !!(user && pass), alert_to_set: !!to });
 });
 app.get("/api/auth/google/config", (req, res) => res.json({ client_id: config.googleClientId }));
+// Public brand picker for the login/sign-up page. Deliberately narrow: slug +
+// display name for ACTIVE brands only — never counts, owners, or status of
+// suspended tenants. It has to be reachable pre-login, because both signing up
+// and signing back in require naming your brand, and a new user has no way to
+// know the slug otherwise (typing it blind was the old failure mode).
+app.get("/api/brands", wrap(async (req, res) => {
+  const rows = await q("SELECT slug, name FROM mbo WHERE status='active' ORDER BY name");
+  res.json({ brands: rows });
+}));
 app.post("/api/auth/google", wrap(async (req, res) => {
   if (!config.googleClientId) {
     return res.status(400).json({ ok: false, error: "Google sign-in not configured (set GOOGLE_CLIENT_ID in .env)" });
@@ -123,27 +132,31 @@ app.post("/api/auth/google", wrap(async (req, res) => {
   if (!email.includes("@")) return res.status(400).json({ ok: false, error: "no email in Google account" });
   let u = await sec.getUser(email);
   if (!u) {
-    // Self-serve signup via Google is open to anyone — but a brand-new
-    // account starts unapproved (no tenant data access at all, see
-    // tenant.js's resolveTenant) until the tenant owner approves it. It
-    // lands on Tenant #1 since a first-time signup has no Brand ID context
-    // to resolve to any other MBO. The random password is never used —
-    // this account only ever signs in via Google.
-    const studioEast = await q("SELECT status FROM mbo WHERE id=1");
-    if (!studioEast.length || studioEast[0].status !== "active") {
-      return res.status(403).json({ ok: false, error: "sign-up is not available right now" });
-    }
-    u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer", 1, false);
+    // Self-serve signup via Google is open to anyone — but a brand-new account
+    // starts unapproved (no tenant data access at all, see tenant.js's
+    // resolveTenant) until that brand's owner approves it. It joins the brand
+    // the user PICKED on the login page, so a signup can't silently land on
+    // the wrong tenant. The random password is never used — this account only
+    // ever signs in via Google.
+    const brandSlug = String(req.body.brand || "").trim();
+    if (!brandSlug) return res.status(400).json({ ok: false, error: "pick the brand you're signing up for first" });
+    const mbo = await store.mboBySlug(brandSlug);
+    if (!mbo) return res.status(404).json({ ok: false, error: "no such brand" });
+    if (mbo.status !== "active") return res.status(403).json({ ok: false, error: "this brand isn't accepting sign-ups right now" });
+    u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer", mbo.id, false);
     // Notify the owner that someone is waiting for approval — an unapproved
     // account can't do anything until a human acts, so a silent signup just
     // strands the user. Fire-and-forget: a mail failure must never block the
     // sign-in itself.
-    sendNewSignup({ email }).catch((e) => console.error("[MBO] signup notify failed:", e.message));
+    sendNewSignup({ email, brand: mbo.name }).catch((e) => console.error("[MBO] signup notify failed:", e.message));
   } else if (u.role !== "super_admin") {
+    // The brand the user picked must match the one their account belongs to —
+    // email alone is never enough. The login page populates the picker from
+    // /api/brands, so a returning user always has their brand to select.
     const brandSlug = String(req.body.brand || "").trim();
     const mbo = brandSlug ? await store.mboBySlug(brandSlug) : null;
     if (!mbo || mbo.id !== u.mbo_id) {
-      return res.status(401).json({ ok: false, error: "brand ID doesn't match this Google account's MBO" });
+      return res.status(401).json({ ok: false, error: "that brand doesn't match this Google account — pick the brand you were signed up under" });
     }
     if (mbo.status !== "active") return res.status(403).json({ ok: false, error: "this MBO has been suspended" });
   }
