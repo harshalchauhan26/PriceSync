@@ -263,6 +263,15 @@ function mailGuard(to) {
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+// A report sheet must never fail the run, but it must not fail SILENTLY either.
+// A bare .catch(() => []) is what turned a broken query ("column run_id does not
+// exist") into an empty attachment that looked like a genuinely empty result set.
+// Degrades to no rows, and says why.
+const rowsOrLog = (label, p) => Promise.resolve(p).catch((e) => {
+  console.error(`[MBO] report query failed (${label}) — sheet will be empty:`, e.message);
+  return [];
+});
+
 // One flat, Excel-autofilterable sheet from an array of row objects.
 function flatSheet(wb, sheetName, columns, rows) {
   const ws = wb.addWorksheet(safeSheetName(sheetName, new Set()));
@@ -377,28 +386,45 @@ export async function sendPipelineComplete({ mboId, to, stats, runId } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
 
-  // Scoped to THIS RUN, not the whole catalogue. products.run_id is stamped by
-  // saveResult for every row the run touched, so filtering on it yields exactly
-  // the products that ran — nothing more, nothing less. A 95-product run used to
-  // attach a sheet of all 8,900+ rows in the tenant, which made the attachment
-  // useless for seeing what the run actually did.
+  // Scoped to THIS RUN, not the whole catalogue — a 95-product run used to
+  // attach a sheet of all 8,900+ rows in the tenant, useless for seeing what the
+  // run actually did.
+  //
+  // The run marker lives on PRICE_HISTORY, not products: `products` has no
+  // run_id column at all. Filtering products on run_id threw, and because these
+  // queries are .catch(() => [])'d the failure was swallowed and both sheets
+  // silently arrived EMPTY with a count of 0.
+  //
+  // price_history holds MULTIPLE rows per product per run (the safe-retry pass
+  // appends a second), so DISTINCT ON takes the highest id per key = that
+  // product's final outcome for the run. It carries no currency column, hence
+  // the join back to products for the label.
+  //
   // runId is absent only for engines built outside the API (local refresh
-  // scripts); those keep the old whole-tenant snapshot.
+  // scripts); those keep the whole-tenant snapshot.
   const scoped = !!runId;
   const params = scoped ? [mboId, runId] : [mboId];
-  const updated = await q(
+  const updated = await rowsOrLog("price_updates", q(
     `SELECT rh.brand, rh.url, rh.base_price, rh.final_price, rh.currency, rh.status,
             rh.shopify_status, rh.approved_at
        FROM review_history rh
       WHERE rh.mbo_id=$1 AND (rh.shopify_status LIKE 'updated%' OR rh.shopify_status LIKE 'DRY RUN%')
         AND rh.approved_at >= now() - interval '24 hours'` +
-    (scoped ? ` AND EXISTS (SELECT 1 FROM products p
-        WHERE p.mbo_id=rh.mbo_id AND p.key=rh.key AND p.run_id=$2)` : ``) +
-    ` ORDER BY rh.approved_at DESC`, params).catch(() => []);
-  const allRows = await q(
-    `SELECT brand, url, base_price, live_price, currency, state, status, delta
-       FROM products WHERE mbo_id=$1${scoped ? " AND run_id=$2" : ""}
-      ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, params).catch(() => []);
+    (scoped ? ` AND EXISTS (SELECT 1 FROM price_history ph
+        WHERE ph.mbo_id=rh.mbo_id AND ph.key=rh.key AND ph.run_id=$2)` : ``) +
+    ` ORDER BY rh.approved_at DESC`, params));
+  const allRows = await rowsOrLog("price_fetch_all", q(scoped
+    ? `SELECT * FROM (
+         SELECT DISTINCT ON (ph.key) ph.brand, ph.url, ph.base_price, ph.live_price,
+                p.currency, ph.state, ph.status, ph.delta
+           FROM price_history ph
+           LEFT JOIN products p ON p.mbo_id = ph.mbo_id AND p.key = ph.key
+          WHERE ph.mbo_id=$1 AND ph.run_id=$2
+          ORDER BY ph.key, ph.id DESC
+       ) t ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`
+    : `SELECT brand, url, base_price, live_price, currency, state, status, delta
+         FROM products WHERE mbo_id=$1
+        ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, params));
 
   const wbUpdated = new ExcelJS.Workbook();
   flatSheet(wbUpdated, "Price Updates", [
