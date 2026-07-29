@@ -73,6 +73,7 @@ function mailLog(eng, promise, label) {
   return Promise.resolve(promise)
     .then((r) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-",
       status: "Email", msg: `${label}: ${r?.ok ? `sent to ${r.to}` : `not sent (${r?.error || "unknown"})`}` +
+        (r?.usedFallback ? " (via ALERT_TO — the run's own address wasn't deliverable)" : "") +
         (r?.dropped?.length ? ` · dropped undeliverable: ${r.dropped.join(", ")}` : "") }))
     .catch((e) => log(eng, { row: "—", domain: "email", url: "", currency: "-", price: "-",
       status: "Email", msg: `${label}: send failed — ${e.message}` }));

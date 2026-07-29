@@ -202,27 +202,43 @@ function deliverable(addr) {
   return a;
 }
 
-// Every pipeline/report mail goes to the UNION of:
-//   • the user who started the run (so the operator gets their own report), and
-//   • ALERT_TO (so the account owner sees every run regardless of who ran it).
-// Both matter: addressing the initiator ALONE is what hid a week of pipeline
-// mail — the admin who clicks "Run" each morning received all of it while the
-// owner watching ALERT_TO received none and assumed email was broken.
-// Deduped, order-stable (initiator first), undeliverable addresses dropped.
-function recipients(to) {
-  const seen = new Set(), keep = [], dropped = [];
-  const consider = [
-    ...String(to || "").split(/[,;]/),
-    ...String(config.smtp.to || "").split(/[,;]/),
-  ];
-  for (const raw of consider) {
-    if (!String(raw || "").trim()) continue;
-    const ok = deliverable(raw);
-    if (!ok) { dropped.push(String(raw).trim()); continue; }
-    if (seen.has(ok)) continue;
-    seen.add(ok); keep.push(ok);
+// A report goes to WHOEVER STARTED THE RUN — and only them. ALERT_TO is a
+// FALLBACK, used only when the run has no deliverable initiator at all.
+//
+// It is deliberately not a copy-to-owner: mail plans are capped per DAY (Brevo
+// free is 300), and cc'ing the owner on every run doubles the spend to deliver a
+// second copy of a report nobody asked for twice.
+//
+// ALERT_TO still matters as the fallback, because "initiator only" is what hid a
+// week of pipeline mail: runs started by admin@pricesync.local addressed a
+// .local domain that can never receive, so with no fallback the report is
+// silently lost rather than merely going to one inbox.
+//
+// Deduped, order-stable, undeliverable addresses dropped and reported.
+// Exported for tests — who receives a report has now changed twice, and it is
+// silent when wrong (mail simply goes to the wrong inbox, or nowhere).
+export function recipients(to) {
+  const pick = (raw) => {
+    const seen = new Set(), keep = [], dropped = [];
+    for (const one of String(raw || "").split(/[,;]/)) {
+      if (!one.trim()) continue;
+      const ok = deliverable(one);
+      if (!ok) { dropped.push(one.trim()); continue; }
+      if (!seen.has(ok)) { seen.add(ok); keep.push(ok); }
+    }
+    return { keep, dropped };
+  };
+  const initiator = pick(to);
+  if (initiator.keep.length) {
+    return { to: initiator.keep.join(", "), list: initiator.keep,
+      dropped: initiator.dropped, usedFallback: false };
   }
-  return { to: keep.join(", "), list: keep, dropped };
+  const fallback = pick(config.smtp.to);
+  return { to: fallback.keep.join(", "), list: fallback.keep,
+    // Surface BOTH sets of dropped addresses, so a lost initiator is visible in
+    // the run log even though the mail itself went to ALERT_TO.
+    dropped: [...initiator.dropped, ...fallback.dropped],
+    usedFallback: fallback.keep.length > 0 };
 }
 
 // Shared guard for every mail entry point: returns { ok:false, error } when
@@ -242,7 +258,7 @@ function mailGuard(to) {
       ? `no deliverable recipient — dropped undeliverable ${r.dropped.join(", ")} (set ALERT_TO to a real address)`
       : "no recipient (ALERT_TO)" };
   }
-  return { ok: true, to: r.to, list: r.list, dropped: r.dropped };
+  return { ok: true, to: r.to, list: r.list, dropped: r.dropped, usedFallback: r.usedFallback };
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -307,7 +323,7 @@ export async function sendPipelineStarted({ to, total, runId } = {}) {
       `You'll get a note at the halfway mark and a full report with two ` +
       `attached sheets when it finishes.\n\n— MBO Tracker`,
   });
-  return { ok: true, to: g.to };
+  return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback };
 }
 
 // Sent once, when the main pass crosses 50%.
@@ -321,7 +337,7 @@ export async function sendPipelineProgress({ to, done, total } = {}) {
     text: `The pricing pipeline run is about halfway.\n\n` +
       `• Checked so far: ${done} of ${total} (${pct}%)\n\n— MBO Tracker`,
   });
-  return { ok: true, to: g.to };
+  return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback };
 }
 
 // Sent after the safe-retry pass — how many fetch errors recovered vs remain.
@@ -349,7 +365,7 @@ export async function sendErrorsResolved({ mboId, to, stats } = {}) {
       `— MBO Tracker`,
     attachments: attach,
   });
-  return { ok: true, to: g.to, recovered, remaining };
+  return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback, recovered, remaining };
 }
 
 // Sent when the whole run is done. TWO attachments:
@@ -426,7 +442,7 @@ export async function sendPipelineComplete({ mboId, to, stats, runId } = {}) {
       { filename: `price_fetch_all_${today()}.xlsx`, content: Buffer.from(await wbAll.xlsx.writeBuffer()) },
     ],
   });
-  return { ok: true, to: g.to, updated: updated.length, all: allRows.length };
+  return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback, updated: updated.length, all: allRows.length };
 }
 
 // Sent once per NEW account created via Google sign-in, always to the owner
