@@ -1573,7 +1573,29 @@ function SuperAdmin({ me }) {
       <div style={{fontSize:11.5,color:"var(--on3)",marginBottom:8}}>
         From <span className="mono">{diag?.email?.from||"— MAIL_FROM not set"}</span>
         {" · "}ALERT_TO <span className="mono">{diag?.email?.alert_to||"— not set"}</span>
+        {diag?.email?.key_source?<>{" · "}key from <span className="mono">{diag.email.key_source}</span></>:null}
       </div>
+
+      {/* Exactly which mail env vars this process can see, values masked. The
+          fast answer to "I set the key but it still says smtp": if the var isn't
+          listed here, it never reached the container. */}
+      {diag?.mail_env?.length>0&&<details style={{marginBottom:10}}>
+        <summary style={{fontSize:11.5,color:"var(--on2)",cursor:"pointer"}}>
+          Environment seen by the server ({diag.mail_env.filter(v=>v.set).length} of {diag.mail_env.length} set)
+        </summary>
+        <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:3}}>
+          {diag.mail_env.map(v=><div key={v.name} className="mono" style={{fontSize:11,display:"flex",gap:8}}>
+            <span style={{color:v.set?"var(--green)":"var(--on3)",width:12}}>{v.set?"✓":"·"}</span>
+            <span style={{minWidth:180,color:"var(--on2)"}}>{v.name}</span>
+            <span style={{color:"var(--on3)",wordBreak:"break-all"}}>{v.preview||"not set"}</span>
+          </div>)}
+          {!diag.mail_env.some(v=>/BREVO/i.test(v.name)&&v.set)&&
+            <div style={{fontSize:11,color:"var(--amber)",marginTop:6,lineHeight:1.45}}>
+              No Brevo key visible. Add it in Render → your service → Environment
+              (not the Blueprint), then wait for the restart to finish.
+            </div>}
+        </div>
+      </details>}
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
         <input className="inp" style={{flex:1,minWidth:220}} placeholder="test recipient (e.g. you@gmail.com)"
           value={testTo} onChange={e=>setTestTo(e.target.value)}/>

@@ -908,8 +908,23 @@ superRouter.get("/diagnostics", wrap(async (req, res) => {
   let db = "ok", dbMs = null;
   const t0 = Date.now();
   try { await ping(); dbMs = Date.now() - t0; } catch (e) { db = e.message; }
+  // Names of mail-related env vars this process can actually see, with the
+  // value MASKED to a short prefix. Names+prefixes only, never the secret —
+  // enough to tell "the var never arrived" from "it arrived under a different
+  // name" or "I pasted the wrong string", which is otherwise pure guesswork.
+  const mailEnv = Object.keys(process.env)
+    .filter((k) => /BREVO|RESEND|SENDGRID|MAIL|SMTP|ALERT_TO/i.test(k))
+    .sort()
+    .map((k) => {
+      const v = String(process.env[k] || "");
+      const secret = /KEY|TOKEN|SECRET|PASS/i.test(k);
+      return { name: k, set: !!v.trim(),
+        preview: !v.trim() ? "" : secret ? `${v.trim().slice(0, 8)}…(${v.trim().length} chars)` : v.trim() };
+    });
   res.json({ ok: true,
-    email: { provider: mailProvider(), from: from || null, alert_to: to || null },
+    email: { provider: mailProvider(), from: from || null, alert_to: to || null,
+      key_source: config.mail.keySource || null },
+    mail_env: mailEnv,
     db: { status: db, ms: dbMs },
     pipeline: { active_runs: pipe.runningCount() },
     node: process.version, uptime_s: Math.round(process.uptime()) });

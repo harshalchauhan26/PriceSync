@@ -65,12 +65,42 @@ export const config = {
   // blocked on every plan; 465/587 open up on paid) — then leave these unset.
   //
   // Set exactly ONE key. Precedence if several are set: Resend, Brevo, SendGrid.
-  mail: {
-    resendKey: e.RESEND_API_KEY || "",
-    brevoKey: e.BREVO_API_KEY || "",
-    sendgridKey: e.SENDGRID_API_KEY || "",
-  },
+  // Detection is deliberately NOT dependent on getting the variable name exactly
+  // right. Provider API keys have unmistakable prefixes, so any env var holding
+  // one is recognised whatever it's called — a key pasted as BREVO_KEY,
+  // BREVO_SMTP_KEY or MAIL_KEY still works. Exact names are still preferred and
+  // checked first; prefix scanning is only the fallback.
+  //   Brevo: xkeysib-…   Resend: re_…   SendGrid: SG.…
+  mail: mailKeys(e),
 };
+
+function mailKeys(e) {
+  const trim = (v) => String(v || "").trim();
+  // Which env var supplied each key, for the diagnostics readout — knowing the
+  // name is what turns "still says smtp" into a five-second fix.
+  const source = {};
+  const byPrefix = (prefix, nameRe) => {
+    for (const [k, v] of Object.entries(e)) {
+      const val = trim(v);
+      if (!val) continue;
+      if (val.startsWith(prefix) || (nameRe.test(k) && /KEY|TOKEN|SECRET/i.test(k) && val.length > 20)) {
+        source[prefix] = k;
+        return val;
+      }
+    }
+    return "";
+  };
+  const pick = (exactName, prefix, nameRe) => {
+    const exact = trim(e[exactName]);
+    if (exact) { source[prefix] = exactName; return exact; }
+    return byPrefix(prefix, nameRe);
+  };
+  const resendKey = pick("RESEND_API_KEY", "re_", /RESEND/i);
+  const brevoKey = pick("BREVO_API_KEY", "xkeysib-", /BREVO/i);
+  const sendgridKey = pick("SENDGRID_API_KEY", "SG.", /SENDGRID/i);
+  return { resendKey, brevoKey, sendgridKey,
+    keySource: source["re_"] || source["xkeysib-"] || source["SG."] || null };
+}
 
 const problems = [];
 if (!config.databaseUrl) problems.push("SUPABASE_DB_URL (or SUPABASE_PROJECT_REF + SUPABASE_DB_PASSWORD) is required");
