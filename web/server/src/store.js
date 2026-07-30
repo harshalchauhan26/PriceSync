@@ -641,17 +641,15 @@ export async function setProxyBrands(mboId, list) {
 // of the SITE (how it treats non-India request IPs), not tenant preference.
 // A tenant can still add its own additional brands on top via meta.
 const DEFAULT_LOCAL_ONLY_BRANDS = new Set([
-  // WOOCS ("FOX") currency switcher geo-converts prices by IP: from the cloud
-  // server's foreign IP it serves USD-converted numbers labelled USD (a genuine
-  // ₹34,000 lehenga came back as $375 -> mismatch), while an India IP serves the
-  // correct INR. No relay/proxy fixes the number itself, so fetch it locally.
-  "labelanushree.com",
-  // Shopify Markets geo-pricing inflates the .js variant JSON by a duty/landed-
-  // cost multiplier (~1.23-1.25x) for non-India request IPs, still labelled
-  // INR — every one of 44 rows fetched from the cloud (Singapore) came back
-  // mismatched at that ratio while a same-day India-IP fetch matched base
-  // exactly. No query param/header override worked; fetch it locally.
+  // Shopify Markets prices by the REQUESTED country, and ?country=IN does pin
+  // the India catalog — verified from this dev machine and from a US datacenter.
+  // It does NOT work from the deployed Render (Virginia) service, which gets
+  // HTTP 400 for that exact URL and wiped all 44 rows to Fetch Error. The
+  // earlier "~1.23-1.25x geo-inflation" was simply the US market price this
+  // store serves when no country is requested. Fetch it locally.
   "mymoledro.com",
+  // labelanushree.com was removed from this list on request — it is pinned to
+  // INR by ?wcpbc-manual-country=IN instead. See DEFAULT_CLOUD_SKIP_BRANDS.
 ]);
 // These meta lists UNION the code defaults, so a hard-coded default could not be
 // removed by configuration at all — labelanushree/mymoledro could never be
@@ -689,13 +687,24 @@ export async function setLocalOnlyBrands(mboId, list) {
 }
 
 // Brands that must NEVER be fetched from the cloud — not even via the relay.
-// The store hard-blocks/geo-distorts every non-India IP: labelanushree returns
-// HTTP 400 to the relay's Cloudflare IP and USD-converted prices to the Render
-// IP, so a cloud run only clobbers the good India-fetched INR data with errors.
-// These are skipped on cloud runs REGARDLESS of the relay and refreshed solely
-// from a local run (scripts/run-local-only.mjs). Superset-safe:
-// they're also in local-only, so local runs still fetch them.
-const DEFAULT_CLOUD_SKIP_BRANDS = new Set(["labelanushree.com", "mymoledro.com"]);
+// Skipped on cloud runs REGARDLESS of the relay and refreshed solely from a
+// local run. Superset-safe: they're also in local-only, so local runs fetch them.
+//
+// mymoledro.com earns its place empirically. Shopify Markets prices it by the
+// requested country and ?country=IN returns the exact India price from this
+// dev machine AND from a US datacenter — but the Render (Virginia) service gets
+// HTTP 400 for that same URL, which wiped all 44 rows to Fetch Error on
+// 2026-07-30. Whatever rejects it is specific to Render's egress, so a cloud
+// run cannot be trusted for this brand no matter how the URL is built.
+//
+// labelanushree.com was REMOVED from both default lists on request: its geo
+// lever (?wcpbc-manual-country=IN, see DEFAULT_APPEND_PARAMS) is meant to hold
+// the INR baseline from any IP, so it now runs in the normal cloud pool. That
+// is not yet confirmed from Render's own egress — if its rows start coming back
+// as currency-mismatch errors or USD, put "labelanushree.com" back here and in
+// DEFAULT_LOCAL_ONLY_BRANDS (or add "labelanushree.com" to either meta list,
+// which needs no deploy) and refresh it locally.
+const DEFAULT_CLOUD_SKIP_BRANDS = new Set(["mymoledro.com"]);
 export async function cloudSkipBrandSet(mboId) {
   const cached = _cloudSkipCache.get(mboId);
   if (cached && Date.now() - cached.at < 30_000) return cached.set;
