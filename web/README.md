@@ -11,6 +11,12 @@ Shopify push, email reporting, authentication, roles, and owner console are
 implemented in the Node server. The Python application remains available as
 the behavior reference and legacy entry point.
 
+Read **[BRAND-FETCH-RUNBOOK.md](BRAND-FETCH-RUNBOOK.md)** before debugging a
+brand whose prices look wrong, before changing the per-brand fetch rules, and
+before concluding that a site is blocking the server. It records which levers
+pin each store's geo-pricing, why the local-only and relay routes are no longer
+used, and the two failure modes that most convincingly imitate a site block.
+
 ## Intended sheet workflow
 
 Each imported row has two different URL responsibilities:
