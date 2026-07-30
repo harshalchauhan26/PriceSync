@@ -3,6 +3,12 @@ main = "worker.js"
 compatibility_date = "2026-01-01"
 
 [vars]
-ALLOWED_HOSTS = "anitadongre.com,saakshakinni.com"
+# Every host a relayed fetch may target. A host missing here is answered with
+# HTTP 400 "host not allowed", which reaches the tracker as
+# "Fetch Error (store returned HTTP 400)" and looks exactly like the origin
+# rejecting us — that is what made all 44 mymoledro rows fail on 2026-07-30.
+# Only the "www." prefix is normalised away, so a country subdomain
+# (us.anitadongre.com, used by the fetch-time host swap) needs its own entry.
+ALLOWED_HOSTS = "anitadongre.com,us.anitadongre.com,saakshakinni.com,mymoledro.com,labelanushree.com"
 # RELAY_SECRET is a secret, not a var: `npx wrangler secret put RELAY_SECRET`
 # (or add it under Worker -> Settings -> Variables -> Encrypted in the dashboard)

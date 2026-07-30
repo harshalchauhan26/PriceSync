@@ -641,12 +641,11 @@ export async function setProxyBrands(mboId, list) {
 // of the SITE (how it treats non-India request IPs), not tenant preference.
 // A tenant can still add its own additional brands on top via meta.
 const DEFAULT_LOCAL_ONLY_BRANDS = new Set([
-  // Shopify Markets prices by the REQUESTED country, and ?country=IN does pin
-  // the India catalog — verified from this dev machine and from a US datacenter.
-  // It does NOT work from the deployed Render (Virginia) service, which gets
-  // HTTP 400 for that exact URL and wiped all 44 rows to Fetch Error. The
-  // earlier "~1.23-1.25x geo-inflation" was simply the US market price this
-  // store serves when no country is requested. Fetch it locally.
+  // Shopify Markets prices by the REQUESTED country, and ?country=IN pins the
+  // India catalog from any IP. Local-only here means "route it through the
+  // relay on cloud runs" (see the skip rules in startPipeline), not "the site
+  // hates us": the earlier ~1.23-1.25x was simply the US market price this
+  // store serves when no country is requested.
   "mymoledro.com",
   // labelanushree.com was removed from this list on request — it is pinned to
   // INR by ?wcpbc-manual-country=IN instead. See DEFAULT_CLOUD_SKIP_BRANDS.
@@ -690,12 +689,14 @@ export async function setLocalOnlyBrands(mboId, list) {
 // Skipped on cloud runs REGARDLESS of the relay and refreshed solely from a
 // local run. Superset-safe: they're also in local-only, so local runs fetch them.
 //
-// mymoledro.com earns its place empirically. Shopify Markets prices it by the
-// requested country and ?country=IN returns the exact India price from this
-// dev machine AND from a US datacenter — but the Render (Virginia) service gets
-// HTTP 400 for that same URL, which wiped all 44 rows to Fetch Error on
-// 2026-07-30. Whatever rejects it is specific to Render's egress, so a cloud
-// run cannot be trusted for this brand no matter how the URL is built.
+// EMPTY BY DEFAULT. It briefly held mymoledro.com on the belief that Render's
+// egress was being rejected: a cloud run put HTTP 400 on all 44 of its rows.
+// That 400 was OURS, not the store's — the relay worker answers a host outside
+// its ALLOWED_HOSTS with 400 (deliberately, so the 403-backoff ignores a config
+// error), mymoledro.com was not on that list, and the brand was local-only at
+// the time, so every row was routed through the relay and refused before the
+// request ever left Cloudflare. Adding the host to web/relay/wrangler.toml
+// fixed it. READ THIS BEFORE BLAMING A SITE for a uniform 400 on one brand.
 //
 // labelanushree.com was REMOVED from both default lists on request: its geo
 // lever (?wcpbc-manual-country=IN, see DEFAULT_APPEND_PARAMS) is meant to hold
@@ -704,7 +705,7 @@ export async function setLocalOnlyBrands(mboId, list) {
 // as currency-mismatch errors or USD, put "labelanushree.com" back here and in
 // DEFAULT_LOCAL_ONLY_BRANDS (or add "labelanushree.com" to either meta list,
 // which needs no deploy) and refresh it locally.
-const DEFAULT_CLOUD_SKIP_BRANDS = new Set(["mymoledro.com"]);
+const DEFAULT_CLOUD_SKIP_BRANDS = new Set([]);
 export async function cloudSkipBrandSet(mboId) {
   const cached = _cloudSkipCache.get(mboId);
   if (cached && Date.now() - cached.at < 30_000) return cached.set;
