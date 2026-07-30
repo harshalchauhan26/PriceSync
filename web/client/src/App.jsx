@@ -1192,15 +1192,15 @@ function BasePrice({admin}) {
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
     <PageBar title="Base Price History" subtitle="Current baseline per product, and every time it changed."
-      right={<>
-        <BrandMultiSelect value={brands} onChange={setBrands}/>
+      brands={brands} setBrands={setBrands}
+      onClear={(q||changed||brands.length)?()=>{setQ("");setChanged(false);setBrands([]);}:undefined}
+      extraLeft={<>
         <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>
+        <input className="inp" placeholder="Search product URL or brand…" value={q} onChange={e=>setQ(e.target.value)} style={{width:280}}/>
+        <button className={`pill${changed?" active":""}`} onClick={()=>setChanged(c=>!c)}>Changed only</button>
       </>}/>
 
-    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
-      <input className="inp" placeholder="Search product URL or brand…" value={q} onChange={e=>setQ(e.target.value)} style={{maxWidth:340}}/>
-      <button className={`pill${changed?" active":""}`} onClick={()=>setChanged(c=>!c)}>Changed only</button>
-      {(q||changed||brands.length>0)&&<button className="btn btn-ghost btn-sm" onClick={()=>{setQ("");setChanged(false);setBrands([]);}}><Icon n="x" s={12}/>Clear</button>}
+    <div style={{display:"flex",alignItems:"center",marginBottom:10}}>
       <span style={{marginLeft:"auto",fontSize:11,color:"var(--on3)"}}>{busy?"Loading…":`${fmtInt(d.items.length)} shown`}</span>
     </div>
 
