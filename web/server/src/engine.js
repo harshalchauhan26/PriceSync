@@ -7,11 +7,34 @@ export const COOLDOWN_MS = [1200, 2800];
 export const SHOPIFY_CENTS_THRESHOLD = 1_000_000;
 export const MATCH_TOLERANCE = 1.0;
 const CURRENCIES = ["USD", "CAD", "INR"];
+// Per-brand params appended at FETCH TIME ONLY — never persisted (canonicalUrl
+// in store.js strips every name in FETCH_ONLY_PARAMS; a fetch param that once
+// leaked into products.url corrupted a whole brand's rows).
+//
+// These pin the SITE's geo-pricing to India, so a cloud run reads the same
+// price an India visitor sees. Both levers were verified to work FROM A FOREIGN
+// IP, which is what makes them a real fix rather than a local-only workaround
+// — the value each store serves is a function of the requested country, not of
+// where the request came from:
+//   mymoledro.com      Shopify Markets. ?country=US returns 339622.61 for a
+//                      ₹275,000 product — the exact figure the Virginia-hosted
+//                      runs had been storing as a "mismatch" — and ?country=IN
+//                      returns 275000 from any IP. Replaces an earlier
+//                      `mlveda_country=in`, which was a no-op: MLveda is
+//                      client-side JS and cannot affect a server-side fetch
+//                      that never executes JS.
+//   labelanushree.com  WooCommerce "Price Based on Country" (WCPBC) — NOT
+//                      WOOCS, and NOT the WMC param the engine was sending.
+//                      ?wcpbc-manual-country=US serves $375 for the ₹34,000
+//                      Jade Lehenga (again the exact stored value), =IN pins
+//                      ₹34,000.
 const DEFAULT_APPEND_PARAMS = {
-  // Moledro uses MLveda country selection; without this the Shopify JSON can
-  // return geo-converted decimal INR values instead of the India catalog price.
-  "mymoledro.com": { mlveda_country: "in" },
+  "mymoledro.com": { country: "IN" },
+  "labelanushree.com": { "wcpbc-manual-country": "IN" },
 };
+
+// Every param the fetcher may append itself. Stripped before a URL is stored.
+export const FETCH_ONLY_PARAMS = ["wmc-currency", "currency", "country", "wcpbc-manual-country"];
 
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",

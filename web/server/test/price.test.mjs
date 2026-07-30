@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import {
   sanitizePrice, descaleIfCents, detectCurrency, extractPriceDetail,
   redirectedOffProduct, withCurrencyParam, wooApiUrl, extractRow,
+  FETCH_ONLY_PARAMS,
 } from "../src/engine.js";
 import {
   roundFinal, computeFinal, matchTol, stateOf, brandOf, canonicalUrl,
@@ -73,11 +74,16 @@ test("real rupee symbol outranks stray US dollar copy", () => {
   assert.equal(detectCurrency('"priceCurrency":"USD" visible \u20B933,000'), "INR");
 });
 
-test("Moledro Shopify fetch is pinned to India catalog prices", async () => {
+// Shopify Markets prices by REQUESTED country, so ?country=IN pins the India
+// catalog from any egress IP. The old param here was `mlveda_country=in`, which
+// never did anything: MLveda is client-side JS and cannot alter a server fetch.
+// Virginia-hosted runs were therefore served the US market price (\u20B9275,000 came
+// back as 339622.61) and stored it as a mismatch.
+test("Moledro Shopify fetch is pinned to the India market", async () => {
   const seen = [];
   const fetcher = { async get(url) {
     seen.push(url);
-    if (url.endsWith(".js?mlveda_country=in")) {
+    if (url.endsWith(".js?country=IN")) {
       return { data: JSON.stringify({ variants: [{ price: 26500000 }] }) };
     }
     return { data: "\u20B9265,000" };
@@ -85,7 +91,40 @@ test("Moledro Shopify fetch is pinned to India catalog prices", async () => {
   const [price, currency] = await extractRow(fetcher, "https://www.mymoledro.com/products/azura-lehenga-set", "shopify", null);
   assert.equal(price, 265000);
   assert.equal(currency, "INR");
-  assert.equal(seen[0], "https://www.mymoledro.com/products/azura-lehenga-set.js?mlveda_country=in");
+  assert.equal(seen[0], "https://www.mymoledro.com/products/azura-lehenga-set.js?country=IN");
+});
+
+// labelanushree runs WooCommerce "Price Based on Country" (WCPBC) \u2014 not WOOCS,
+// and not the WMC param the engine used to send. ?wcpbc-manual-country=US
+// serves $375 for the \u20B934,000 Jade Lehenga, so =IN is what holds the baseline.
+test("labelanushree fetch pins the WCPBC country to India", async () => {
+  const seen = [];
+  const woo = '<span class="woocommerce-Price-amount amount"><bdi>' +
+    '<span class="woocommerce-Price-currencySymbol">\u20B9</span>34,000</bdi></span>';
+  const fetcher = { async get(url) {
+    seen.push(url);
+    return { data: woo };
+  } };
+  const [price, currency] = await extractRow(fetcher, "https://labelanushree.com/product/jade-lehenga/", "wordpress", null);
+  assert.equal(price, 34000);
+  assert.equal(currency, "INR");
+  assert.ok(seen.every((u) => u.includes("wcpbc-manual-country=IN")),
+    `every request must carry the India pin, got ${JSON.stringify(seen)}`);
+});
+
+// A fetch-time param that reaches the stored URL corrupts the row permanently,
+// so canonicalUrl strips this list \u2014 keep the two in sync.
+test("FETCH_ONLY_PARAMS covers every param the fetcher appends", () => {
+  for (const p of ["wmc-currency", "currency", "country", "wcpbc-manual-country"]) {
+    assert.ok(FETCH_ONLY_PARAMS.includes(p), `${p} must be stripped before storing`);
+  }
+  assert.equal(canonicalUrl("https://mymoledro.com/products/sakura?country=IN"),
+    "https://mymoledro.com/products/sakura");
+  assert.equal(canonicalUrl("https://labelanushree.com/product/jade/?wcpbc-manual-country=IN"),
+    "https://labelanushree.com/product/jade/");
+  // A param that is part of the product identity must survive.
+  assert.equal(canonicalUrl("https://ekaya.in/products/keep?variant=42"),
+    "https://ekaya.in/products/keep?variant=42");
 });
 
 test("redirectedOffProduct catches removed products that 302 off the slug", () => {

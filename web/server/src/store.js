@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
 import { pool, withTenant } from "./db.js";
 import { toInr } from "./fx.js";
+import { FETCH_ONLY_PARAMS } from "./engine.js";
 
 const REQUIRED = ["MBO Product URL", "Designer Product URL", "Platform Type",
   "Custom Regex", "Studio East Price"];
@@ -11,8 +12,10 @@ export function canonicalUrl(url) {
   if (!s) return s;
   try {
     const u = new URL(s);
-    u.searchParams.delete("wmc-currency");
-    u.searchParams.delete("currency");
+    // Fetch-time params (currency pins, geo-pricing country pins) must never
+    // reach the stored URL: one that did baked ?wmc-currency=USD into every row
+    // of a brand and took a rescrape to repair.
+    for (const p of FETCH_ONLY_PARAMS) u.searchParams.delete(p);
     return u.toString();
   } catch { return s; }
 }
