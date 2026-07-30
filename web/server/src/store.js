@@ -640,16 +640,19 @@ export async function setProxyBrands(mboId, list) {
 // These defaults apply to every tenant equally — they describe a property
 // of the SITE (how it treats non-India request IPs), not tenant preference.
 // A tenant can still add its own additional brands on top via meta.
-const DEFAULT_LOCAL_ONLY_BRANDS = new Set([
-  // Shopify Markets prices by the REQUESTED country, and ?country=IN pins the
-  // India catalog from any IP. Local-only here means "route it through the
-  // relay on cloud runs" (see the skip rules in startPipeline), not "the site
-  // hates us": the earlier ~1.23-1.25x was simply the US market price this
-  // store serves when no country is requested.
-  "mymoledro.com",
-  // labelanushree.com was removed from this list on request — it is pinned to
-  // INR by ?wcpbc-manual-country=IN instead. See DEFAULT_CLOUD_SKIP_BRANDS.
-]);
+// EMPTY BY DEFAULT — every brand is fetched directly on cloud runs.
+//
+// mymoledro.com and labelanushree.com were both here on the theory that their
+// sites refuse non-India IPs. Neither does. Each prices by the country the
+// request ASKS for, and each is pinned to India by a URL param instead
+// (?country=IN and ?wcpbc-manual-country=IN — see DEFAULT_APPEND_PARAMS), which
+// works from any egress. mymoledro's later HTTP 400s were the relay refusing a
+// host missing from its own allowlist, not the store refusing us.
+//
+// The machinery is intact for the next site that genuinely IP-blocks: adding a
+// brand here means "relay it on cloud runs, or skip it if no relay is set", and
+// a meta entry does that without a deploy.
+const DEFAULT_LOCAL_ONLY_BRANDS = new Set([]);
 // These meta lists UNION the code defaults, so a hard-coded default could not be
 // removed by configuration at all — labelanushree/mymoledro could never be
 // brought into the normal cloud pool without editing source. An entry prefixed
