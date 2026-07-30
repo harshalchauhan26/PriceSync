@@ -426,6 +426,29 @@ function Home({go, admin}) {
 /* ═══════════════════════════════════════════════════════════════
    PIPELINE
 ═══════════════════════════════════════════════════════════════ */
+// Both buttons have dead air before anything visible happens, and the console
+// sat empty through it: /pipe/start returns as soon as the run is flagged, but
+// startPipeline still has to load the whole work list out of Postgres before the
+// first row can be logged; /pipe/abort only sets a flag, and the run keeps going
+// until its in-flight fetches settle. So the wait is real and the countdown
+// below is only an ESTIMATE — it is measured, then learned per browser, since
+// the true wait scales with catalog size and the client<->DB round trip.
+const BOOT_FALLBACK_MS={starting:12000,stopping:15000};
+const bootStoreKey=(k)=>"ps_boot_ms_"+k;
+function bootEstimate(kind){
+  try{
+    const v=Number(localStorage.getItem(bootStoreKey(kind)));
+    if(Number.isFinite(v)&&v>=2000&&v<=120000) return v;
+  }catch{}
+  return BOOT_FALLBACK_MS[kind];
+}
+// Rolling average weighted to history, so one freak wait doesn't skew the next
+// estimate and a genuine shift still converges within a few runs.
+function bootLearn(kind,ms){
+  if(!(ms>=500&&ms<=180000)) return;
+  try{ localStorage.setItem(bootStoreKey(kind),String(Math.round((bootEstimate(kind)*2+ms)/3))); }catch{}
+}
+
 function Pipeline({admin}) {
   const [brands,setBrands]=useState([]);
   const [st,setSt]=useState({entries:[],matched:0,mismatch:0,errors:0,total_rows:0,current_row:0,elapsed:0,message:"Idle.",running:false,phase:"idle",log_total:0});
@@ -433,6 +456,30 @@ function Pipeline({admin}) {
   const [vendors,setVendors]=useState([]); const [cat,setCat]=useState({total:0}); const [curSel,setCurSel]=useState("INR");
   const cursor=useRef(0), logRef=useRef(null);
   const vsel=brands;
+  // {kind:"starting"|"stopping", t0, est} while the engine is mid-transition.
+  const [boot,setBoot]=useState(null);
+  const [,tick]=useState(0);
+  useEffect(()=>{ if(!boot) return; const id=setInterval(()=>tick(n=>n+1),250); return()=>clearInterval(id); },[boot]);
+  // "starting" ends on the first LOG LINE, not on total_rows/running: the server
+  // flags running and keeps the previous run's total_rows until the work list is
+  // loaded, so both are true too early. It clears its log on start, so any entry
+  // arriving now is from this run.
+  useEffect(()=>{
+    if(!boot) return;
+    const done=boot.kind==="starting" ? st.entries.length>0 : !st.running;
+    if(done){ bootLearn(boot.kind,Date.now()-boot.t0); setBoot(null); }
+  },[boot,st.running,st.entries.length]);
+  const bootText=()=>{
+    if(!boot) return "";
+    const gone=Date.now()-boot.t0, left=Math.ceil((boot.est-gone)/1000);
+    const what=boot.kind==="starting"?"BOOTING UP":"STOPPING";
+    const why=boot.kind==="starting"
+      ? "loading the product list and starting workers"
+      : "letting in-flight fetches finish";
+    return left>0
+      ? `${what} — about ${left}s left · ${why}`
+      : `${what} — ${Math.round(gone/1000)}s elapsed · ${why}, almost there`;
+  };
 
   useEffect(()=>{ api("/api/pipe/status?cursor=0").then(d=>d.config&&setCfg(c=>({...c,...d.config}))); },[]);
   const refreshMeta=useCallback(()=>{
@@ -452,10 +499,20 @@ function Pipeline({admin}) {
 
   const send=(extra)=>aj("/api/pipe/config",{...cfg,...extra});
   const run=async(mode)=>{
+    // Countdown first, and clear the console before the two round trips — the
+    // config POST plus the start POST are themselves part of the dead air.
+    setBoot({kind:"starting",t0:Date.now(),est:bootEstimate("starting")});
+    setSt(s=>({...s,entries:[]})); cursor.current=0;
     await send({fresh_start:mode==="fresh",retry_errors:mode==="update",vendors:vsel});
     const d=await aj("/api/pipe/start",{});
-    d.error?toast(d.error,"err"):toast("Pipeline started","ok");
-    setSt(s=>({...s,entries:[]})); cursor.current=0;
+    // A rejected start (already running / too many runs / empty source) never
+    // logs anything, so drop the countdown rather than let it hang.
+    if(d.error){ setBoot(null); toast(d.error,"err"); } else toast("Pipeline started","ok");
+  };
+  const abort=async()=>{
+    setBoot({kind:"stopping",t0:Date.now(),est:bootEstimate("stopping")});
+    const d=await aj("/api/pipe/abort",{});
+    if(d&&d.error){ setBoot(null); toast(d.error,"err"); } else toast("Abort requested — finishing in-flight fetches","ok");
   };
   const clearLog=()=>{ setSt(s=>({...s,entries:[]})); aj("/api/pipe/clear_log",{}); };
   const onFile=async(f)=>{
@@ -584,22 +641,30 @@ function Pipeline({admin}) {
 
     {/* ── Right main ── */}
     <div style={{display:"flex",flexDirection:"column",minHeight:0,gap:10}}>
-      {/* Phase banner */}
-      {st.phase!=="idle"&&<div className="phase-banner">
-        <Icon n="warn" s={14}/>
-        <span>CURRENT PHASE: {st.message.toUpperCase()}</span>
-      </div>}
+      {/* Phase banner — the boot countdown replaces it, since st.message still
+          holds the PREVIOUS run's text until the work list finishes loading. */}
+      {boot
+        ? <div className="phase-banner" style={{borderColor:"var(--blue)",color:"var(--blue)"}}>
+            <span className="engine-dot" style={{background:"var(--blue)",animation:"pulseDot 1.2s infinite"}}/>
+            <span>{bootText()}</span>
+          </div>
+        : st.phase!=="idle"&&<div className="phase-banner">
+            <Icon n="warn" s={14}/>
+            <span>CURRENT PHASE: {st.message.toUpperCase()}</span>
+          </div>}
 
       {/* Action row */}
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-        <button className="btn btn-primary" onClick={()=>run("fresh")} disabled={st.running||!admin} style={{minWidth:130,justifyContent:"center"}}>
-          <Icon n="play" s={14}/>[Run from Start]
+        <button className="btn btn-primary" onClick={()=>run("fresh")} disabled={st.running||!admin||!!boot} style={{minWidth:130,justifyContent:"center"}}>
+          <Icon n="play" s={14}/>{boot?.kind==="starting"?"[Booting…]":"[Run from Start]"}
         </button>
-        <button className="btn btn-ghost" onClick={()=>run("update")} disabled={st.running||!admin} style={{minWidth:130,justifyContent:"center"}}>
+        <button className="btn btn-ghost" onClick={()=>run("update")} disabled={st.running||!admin||!!boot} style={{minWidth:130,justifyContent:"center"}}>
           <Icon n="refresh" s={14}/>[Check Updates]
         </button>
-        <button className="btn btn-abort" onClick={()=>aj("/api/pipe/abort",{})} disabled={!st.running} style={{minWidth:100,justifyContent:"center"}}>
-          <Icon n="stop" s={14}/>[Abort]
+        {/* Abort stays live during "starting" (the run honours the flag while it
+            loads), but locks once stopping so it can't be clicked repeatedly. */}
+        <button className="btn btn-abort" onClick={abort} disabled={boot?.kind==="stopping"||(!st.running&&!boot)} style={{minWidth:100,justifyContent:"center"}}>
+          <Icon n="stop" s={14}/>{boot?.kind==="stopping"?"[Stopping…]":"[Abort]"}
         </button>
         <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
           <span className="engine-dot" style={{background:st.running?"var(--green)":"var(--on3)",...(st.running?{animation:"pulseDot 2s infinite"}:{})}}/>
@@ -631,8 +696,10 @@ function Pipeline({admin}) {
 
       {/* Progress */}
       <div className="progress-track">
-        <div className="progress-fill" style={{width:pct+"%"}}>
-          {st.running&&<div className="shine" style={{position:"absolute",inset:0}}/>}
+        {/* Nothing to measure yet during boot, so run the shine across the whole
+            track at low opacity rather than show a 0%-wide bar. */}
+        <div className="progress-fill" style={boot&&!pct?{width:"100%",opacity:.22}:{width:pct+"%"}}>
+          {(st.running||boot)&&<div className="shine" style={{position:"absolute",inset:0}}/>}
         </div>
       </div>
 
@@ -656,7 +723,19 @@ function Pipeline({admin}) {
           </span>
           <span className={getTagClass(e.status)} style={{justifySelf:"end"}}>{getTagLabel(e.status)}</span>
         </div>)}
-        {!st.entries.length&&<div style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>No log yet — Run from Start.</div>}
+        {!st.entries.length&&(boot
+          ? <div style={{textAlign:"center",padding:"40px 0",color:"var(--on2)"}}>
+              <div style={{display:"flex",gap:6,justifyContent:"center",marginBottom:12}}>
+                {[0,1,2].map(i=><span key={i} className="engine-dot" style={{background:"var(--blue)",animation:`pulseDot 1.2s ${i*0.2}s infinite`}}/>)}
+              </div>
+              <div style={{fontWeight:700,letterSpacing:".04em"}}>{bootText()}</div>
+              <div style={{fontSize:11,color:"var(--on3)",marginTop:6}}>
+                {boot.kind==="starting"
+                  ? "Rows stream in as soon as the product list is loaded."
+                  : "Rows already in flight still finish and get saved."}
+              </div>
+            </div>
+          : <div style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>No log yet — Run from Start.</div>)}
       </div>
     </div>
   </div>;
