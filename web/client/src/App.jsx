@@ -1165,54 +1165,89 @@ function History({admin}) {
   </div>;
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   ALERTS
-═══════════════════════════════════════════════════════════════ */
-function Alerts({admin}) {
+/* ═════════════════════════════════════════════════════════════
+   BASE PRICE — what every product's baseline is now, and when it last moved.
+   base_price is what mismatches are judged against, and three paths rewrite it
+   (sheet sync, Review "set base", a SUCCESSFUL Shopify push) while a pipeline
+   run never does. Rows are ordered newest-change-first so the answer to "did it
+   just update" is the top of the table.
+═════════════════════════════════════════════════════════════ */
+const SRC_LABEL={shopify_push:"Shopify push",set_base:"Set base",set_base_all:"Set base (bulk)",sheet_sync:"Sheet sync",observed:"Seen between runs",unknown:"—"};
+function BasePrice({admin}) {
   const [brands,setBrands]=useState([]);
-  // Default 5% to match the nav badge (store.alertCount(5) in /api/meta) —
-  // a page that opens at 15% shows fewer alerts than the badge promises.
-  const [thr,setThr]=useState(5); const [dir,setDir]=useState("all"); const [d,setD]=useState({items:[],total:0,drops:0,spikes:0});
-  const load=useCallback(()=>api(`/api/alerts?threshold=${thr}&direction=${dir}&brands=${encodeURIComponent(brands.join(","))}`).then(setD),[thr,dir,brands]);
-  useEffect(()=>{ load(); },[load]);
-  const clear=()=>{ setDir("all"); setThr(5); };
+  const [q,setQ]=useState(""); const [changed,setChanged]=useState(false);
+  const [d,setD]=useState({items:[],total:0,changed:0}); const [busy,setBusy]=useState(true);
+  const [open,setOpen]=useState(null); const [trail,setTrail]=useState({});
+  const load=useCallback(()=>{
+    setBusy(true);
+    api(`/api/base?brands=${encodeURIComponent(brands.join(","))}&q=${encodeURIComponent(q)}&changed=${changed?1:0}`)
+      .then(r=>setD(r&&r.items?r:{items:[],total:0,changed:0})).finally(()=>setBusy(false));
+  },[brands,q,changed]);
+  useEffect(()=>{ const t=setTimeout(load,q?350:0); return()=>clearTimeout(t); },[load,q]);
+  const toggle=async(k)=>{
+    if(open===k) return setOpen(null);
+    setOpen(k);
+    if(!trail[k]){ const r=await api(`/api/base/trail?key=${encodeURIComponent(k)}`); setTrail(t=>({...t,[k]:r.trail||[]})); }
+  };
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
-    <PageBar title="Price Movement Alerts" subtitle="Volatility monitoring across designer brands."
-      brands={brands} setBrands={setBrands} onClear={clear}
-      extraLeft={<>
-        <div style={{display:"flex",flexDirection:"column",gap:4}}>
-          <div className="lbl">Threshold %</div>
-          <input type="number" className="inp mono" style={{width:80}} value={thr} onChange={e=>setThr(e.target.value)}/>
-        </div>
-        <div className="pill-group">
-          {[["all","All"],["drop","Drops"],["spike","Spikes"]].map(([k,l])=><button key={k} className={`pill${dir===k?" active":""}`} onClick={()=>setDir(k)}>{l}</button>)}
-        </div>
-        <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/></button>
+    <PageBar title="Base Price History" subtitle="Current baseline per product, and every time it changed."
+      right={<>
+        <BrandMultiSelect value={brands} onChange={setBrands}/>
+        <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>
       </>}/>
 
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
-      <Stat k="Alerts"    v={fmtInt(d.total)}/>
-      <Stat k="Drops"     v={fmtInt(d.drops)}   c="var(--green)"/>
-      <Stat k="Spikes"    v={fmtInt(d.spikes)}   c="var(--red)"/>
-      <Stat k="Threshold" v={"≥"+thr+"%"}         c="var(--blue)"/>
+    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+      <input className="inp" placeholder="Search product URL or brand…" value={q} onChange={e=>setQ(e.target.value)} style={{maxWidth:340}}/>
+      <button className={`pill${changed?" active":""}`} onClick={()=>setChanged(c=>!c)}>Changed only</button>
+      {(q||changed||brands.length>0)&&<button className="btn btn-ghost btn-sm" onClick={()=>{setQ("");setChanged(false);setBrands([]);}}><Icon n="x" s={12}/>Clear</button>}
+      <span style={{marginLeft:"auto",fontSize:11,color:"var(--on3)"}}>{busy?"Loading…":`${fmtInt(d.items.length)} shown`}</span>
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:10}}>
+      <Stat k="Products"        v={fmtInt(d.total)}/>
+      <Stat k="Ever re-based"   v={fmtInt(d.changed)}  c="var(--blue)"/>
+      <Stat k="Never changed"   v={fmtInt(Math.max(0,(d.total||0)-(d.changed||0)))} c="var(--on2)"/>
     </div>
 
     <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
       <table className="tbl">
-        <thead><tr>{["Product","Brand","Direction","Prev Price","Now","Delta","Change %","When"].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <thead><tr>{["Product","Brand","Base now","Base USD","Last change","When","Source","Times"].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
         <tbody>
-          {d.items.map((it,i)=>{ const up=it.direction==="spike",c=up?"var(--red)":"var(--green)"; return <tr key={i}>
-            <td style={{maxWidth:420}}><a href={it.url} target="_blank" rel="noopener" title={it.url} style={{color:"var(--blue)",...URL_WRAP}}>{fullUrl(it.url)}</a></td>
-            <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(it.brand||"").replace(/^www\./,"")}</td>
-            <td><span style={{display:"inline-flex",alignItems:"center",gap:4,fontWeight:700,fontSize:11,color:c}}><Icon n={up?"up":"down"} s={13} c={c}/>{up?"SPIKE":"DROP"}</span></td>
-            <td className="mono" style={{textAlign:"right"}}>{fmt(it.prev)}</td>
-            <td className="mono" style={{textAlign:"right"}}>{fmt(it.live_price)}</td>
-            <td className="mono" style={{textAlign:"right",color:c}}>{fmt(it.abs_change)}</td>
-            <td className="mono" style={{textAlign:"right",fontWeight:700,color:c}}>{it.pct>0?"+":""}{it.pct}%</td>
-            <td className="mono" style={{fontSize:11,color:"var(--on3)"}}>{(it.created_at||"").slice(0,16).replace("T"," ")}</td>
-          </tr>;})}
-          {!d.items.length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>No movements ≥ {thr}% — run the pipeline twice to generate history.</td></tr>}
+          {d.items.map((it)=>{
+            const n=Number(it.changes||0), isOpen=open===it.key;
+            return <React.Fragment key={it.key}>
+              <tr onClick={()=>n>0&&toggle(it.key)} style={{cursor:n>0?"pointer":"default"}}>
+                <td style={{maxWidth:400}}><a href={it.url} target="_blank" rel="noopener" onClick={e=>e.stopPropagation()} title={it.url} style={{color:"var(--blue)",...URL_WRAP}}>{fullUrl(it.url)}</a></td>
+                <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(it.brand||"").replace(/^www\./,"")}</td>
+                <td className="mono" style={{textAlign:"right",fontWeight:700}}>{fmt(it.base_price)}</td>
+                <td className="mono" style={{textAlign:"right",color:"var(--on3)"}}>{it.base_usd==null?"—":fmt(it.base_usd)}</td>
+                <td className="mono" style={{textAlign:"right",color:"var(--on2)"}}>
+                  {n>0?<>{fmt(it.last_old)} <span style={{color:"var(--on3)"}}>→</span> {fmt(it.last_new)}</>:"—"}
+                </td>
+                <td className="mono" style={{fontSize:11,color:n>0?"var(--on2)":"var(--on3)"}}>{n>0?String(it.last_at).slice(0,16).replace("T"," "):"never"}</td>
+                <td style={{fontSize:11,color:"var(--on3)"}}>{n>0?(SRC_LABEL[it.last_source]||it.last_source):"—"}</td>
+                <td className="mono" style={{textAlign:"right",color:n>0?"var(--blue)":"var(--on3)"}}>{n||0}</td>
+              </tr>
+              {isOpen&&<tr><td colSpan={8} style={{background:"rgba(255,255,255,.02)",padding:"8px 12px"}}>
+                {(trail[it.key]||[]).length
+                  ? <table className="tbl" style={{margin:0}}>
+                      <thead><tr>{["When","From","To","Base USD","Source"].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+                      <tbody>{trail[it.key].map((t,j)=><tr key={j}>
+                        <td className="mono" style={{fontSize:11}}>{String(t.changed_at).slice(0,19).replace("T"," ")}</td>
+                        <td className="mono" style={{textAlign:"right"}}>{fmt(t.old_base)}</td>
+                        <td className="mono" style={{textAlign:"right",fontWeight:700}}>{fmt(t.new_base)}</td>
+                        <td className="mono" style={{textAlign:"right",color:"var(--on3)"}}>{t.new_base_usd==null?"—":fmt(t.new_base_usd)}</td>
+                        <td style={{fontSize:11,color:"var(--on3)"}}>{SRC_LABEL[t.source]||t.source}</td>
+                      </tr>)}</tbody>
+                    </table>
+                  : <span style={{fontSize:11,color:"var(--on3)"}}>Loading…</span>}
+              </td></tr>}
+            </React.Fragment>;
+          })}
+          {!d.items.length&&!busy&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>
+            No products match. Base price changes only on a sheet sync, a Review “set base”, or a successful Shopify push — never on a pipeline run.
+          </td></tr>}
         </tbody>
       </table>
     </div>
@@ -1938,7 +1973,7 @@ function ExportData() {
    SHELL
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
-  const [me,setMe]=useState(undefined); const [view,setView]=useState("pipeline"); const [meta,setMeta]=useState({counts:{},alerts:0});
+  const [me,setMe]=useState(undefined); const [view,setView]=useState("pipeline"); const [meta,setMeta]=useState({counts:{}});
   useEffect(()=>{ api("/api/me").then(d=>setMe(d&&d.email?d:null)); },[]);
   useEffect(()=>{ if(!me) return; const f=()=>{
     api("/api/meta").then(d=>d.counts&&setMeta(m=>JSON.stringify(m)===JSON.stringify(d)?m:d));
@@ -1961,7 +1996,7 @@ export default function App() {
     ["pipeline","Pipeline","pipeline"],
     ["add","Add Products","plus"],
     ["review","Review","review"],
-    ["alerts","Alerts","alerts"],
+    ["base","Base Price","up"],
     ["history","History","clock"],
     ["export","Export","dl"],
     ["integrations","Integrations","plug"],
@@ -1992,8 +2027,6 @@ export default function App() {
         <span>{l}</span>
         {k==="review"&&meta.counts?.awaiting>0&&
           <span className="badge" style={{marginLeft:"auto",background:"rgba(245,158,11,.15)",color:"var(--amber)"}}>{meta.counts.awaiting}</span>}
-        {k==="alerts"&&meta.alerts>0&&
-          <span className="badge" style={{marginLeft:"auto",background:"rgba(239,68,68,.15)",color:"var(--red)"}}>{meta.alerts}</span>}
       </button>)}
 
       {/* Bottom */}
@@ -2051,7 +2084,7 @@ export default function App() {
         {view==="add"         && <AddProducts admin={admin}/>}
         {view==="review"      && <Review      admin={admin}/>}
         {view==="history"     && <History     admin={admin}/>}
-        {view==="alerts"      && <Alerts      admin={admin}/>}
+        {view==="base"        && <BasePrice   admin={admin}/>}
         {view==="export"      && <ExportData  />}
         {view==="integrations"&& <Integrations admin={admin}/>}
         {view==="home"        && <Home        go={setView} admin={admin}/>}

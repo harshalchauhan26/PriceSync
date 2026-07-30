@@ -17,7 +17,7 @@ import { encrypt } from "./crypto.js";
 import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
 import * as tenant from "./tenant.js";
-import { sendMismatchReport, sendNewSignup, mailProvider, sendTestEmail } from "./mailer.js";
+import { sendNewSignup, mailProvider, sendTestEmail } from "./mailer.js";
 import { pushPrice, verifyStore, invalidateShopifyCfg } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
 import { startPushJob, getPushJob, runningPushJob, startReviewPushJob } from './push-job.js';
@@ -184,11 +184,11 @@ tenantRouter.use(tenant.resolveTenant);
 // ---------- meta / fx / insights ----------
 tenantRouter.get("/meta", wrap(async (req, res) => {
   const mboId = req.mboId;
-  const [counts, alerts, imported_count, last_import, last_import_rows] = await Promise.all([
-    store.counts(mboId), store.alertCount(mboId, 5), store.countImported(mboId),
+  const [counts, imported_count, last_import, last_import_rows] = await Promise.all([
+    store.counts(mboId), store.countImported(mboId),
     store.getMeta(mboId, "last_import"), store.getMeta(mboId, "last_import_rows"),
   ]);
-  res.json({ counts, alerts, imported_count, last_import, last_import_rows });
+  res.json({ counts, imported_count, last_import, last_import_rows });
 }));
 async function fxState(mboId) {
   return { rates: await snapshot(mboId), overrides: getOverrides(mboId),
@@ -703,41 +703,25 @@ tenantRouter.get("/history/export", wrap(async (req, res) => {
   await sendXlsx(res, "approval_history", rows);
 }));
 
-// ---------- alerts ----------
-tenantRouter.get("/alerts", wrap(async (req, res) => {
-  const mboId = req.mboId;
-  const thr = Math.abs(parseFloat(req.query.threshold || "5")) || 5;
-  const dir = req.query.direction || "all";
+// Price-movement alerts were removed with their page: the pipeline completion
+// email still carries a Price Alerts tab (mailer.js alertRows), which is where
+// the signal was actually being read.
+
+// ---------- base price history ----------
+tenantRouter.get("/base", wrap(async (req, res) => {
   const brands = (req.query.brands || "").split(",").map((s) => s.trim()).filter(Boolean);
-  const p = [mboId]; let bc = "";
-  if (brands.length) { p.push(brands); bc = `AND brand = ANY($${p.length}::text[])`; }
-  p.push(thr);
-  const rows = await q(`SELECT key,url,brand,live_price,prev,created_at,status,
-      (live_price-prev) AS abs_change, ROUND(((live_price-prev)/prev*100)::numeric,2) AS pct
-    FROM ( SELECT key,url,brand,live_price,status,created_at,
-        LAG(live_price) OVER (PARTITION BY key ORDER BY created_at) AS prev,
-        ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) AS rn
-      FROM price_history WHERE mbo_id=$1 AND live_price IS NOT NULL) t
-    WHERE rn=1 AND prev IS NOT NULL AND prev<>0 ${bc}
-      AND ABS((live_price-prev)/prev*100) >= $${p.length}
-    ORDER BY ABS((live_price-prev)/prev*100) DESC LIMIT 1000`, p);
-  const items = [];
-  for (const r of rows) { const pct = Number(r.pct); const d = pct > 0 ? "spike" : "drop";
-    if (dir !== "all" && d !== dir) continue;
-    items.push({ ...r, pct, abs_change: r.abs_change == null ? null : Number(r.abs_change), direction: d, created_at: String(r.created_at) }); }
-  res.json({ items, total: items.length, spikes: items.filter((i) => i.direction === "spike").length,
-    drops: items.filter((i) => i.direction === "drop").length, threshold: thr });
+  res.json(await store.basePriceList(req.mboId, {
+    brands,
+    search: (req.query.q || "").trim(),
+    changedOnly: req.query.changed === "1" || req.query.changed === "true",
+    limit: Math.min(1000, Math.max(1, parseInt(req.query.limit || "400", 10) || 400)),
+    offset: Math.max(0, parseInt(req.query.offset || "0", 10) || 0),
+  }));
 }));
-tenantRouter.get("/alerts/brands", wrap(async (req, res) => {
-  const rows = await q("SELECT brand, COUNT(DISTINCT key) c FROM price_history WHERE mbo_id=$1 AND brand<>'' GROUP BY brand ORDER BY c DESC", [req.mboId]);
-  res.json({ brands: rows.map((r) => ({ brand: r.brand, count: Number(r.c) })) });
-}));
-tenantRouter.post("/alerts/email_mismatch", wrap(async (req, res) => {
-  const body = req.body || {};
-  const brands = Array.isArray(body.brands) ? body.brands.filter(Boolean)
-    : String(body.brands || "").split(",").map((b) => b.trim()).filter(Boolean);
-  const r = await sendMismatchReport(req.mboId, body.to, brands);
-  res.status(r.ok ? 200 : 400).json(r);
+tenantRouter.get("/base/trail", wrap(async (req, res) => {
+  const key = String(req.query.key || "");
+  if (!key) return res.status(400).json({ error: "key required" });
+  res.json({ trail: await store.basePriceTrail(req.mboId, key) });
 }));
 
 // ---------- integrations (one Shopify store per tenant) ----------

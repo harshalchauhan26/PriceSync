@@ -158,6 +158,54 @@ const SCHEMA = [
   'UPDATE resolved SET mbo_id=1 WHERE mbo_id IS NULL',
   'CREATE INDEX IF NOT EXISTS ix_resolved_mbo ON resolved(mbo_id)',
   'CREATE UNIQUE INDEX IF NOT EXISTS ux_resolved_mbo_key ON resolved(mbo_id, key)',
+
+  // ---- base_price audit ----
+  // base_price is the reference every mismatch is judged against, and three
+  // separate paths rewrite it (sheet sync, Review "set base", and a SUCCESSFUL
+  // Shopify push). Nothing recorded WHEN, so answering "did my base actually
+  // update" meant inferring it from consecutive price_history rows — which only
+  // sees a change if a run happened to straddle it.
+  //
+  // A trigger rather than three call-site inserts: it cannot be forgotten by a
+  // future write path, and it captures the real before/after from the row itself.
+  'CREATE TABLE IF NOT EXISTS base_price_audit (' +
+    'id BIGSERIAL PRIMARY KEY, mbo_id BIGINT REFERENCES mbo(id), key TEXT NOT NULL,' +
+    'brand TEXT, url TEXT, old_base DOUBLE PRECISION, new_base DOUBLE PRECISION,' +
+    'old_base_usd DOUBLE PRECISION, new_base_usd DOUBLE PRECISION, source TEXT,' +
+    'changed_at TIMESTAMPTZ DEFAULT now())',
+  'CREATE INDEX IF NOT EXISTS ix_bpa_mbo_key ON base_price_audit(mbo_id, key)',
+  'CREATE INDEX IF NOT EXISTS ix_bpa_mbo_changed ON base_price_audit(mbo_id, changed_at DESC)',
+
+  // AFTER UPDATE OF base_price: a pipeline run never lists that column in its
+  // SET, so runs cost nothing here. `app.base_source` is set by the write path
+  // when it can (see promoteLiveToBase); anything else records "unknown" rather
+  // than guessing.
+  `CREATE OR REPLACE FUNCTION mbo_log_base_change() RETURNS trigger AS $fn$
+   BEGIN
+     IF NEW.base_price IS DISTINCT FROM OLD.base_price THEN
+       INSERT INTO base_price_audit (mbo_id,key,brand,url,old_base,new_base,old_base_usd,new_base_usd,source)
+       VALUES (NEW.mbo_id, NEW.key, NEW.brand, NEW.url, OLD.base_price, NEW.base_price,
+               OLD.base_usd, NEW.base_usd,
+               COALESCE(NULLIF(current_setting('app.base_source', true), ''), 'unknown'));
+     END IF;
+     RETURN NULL;
+   END;
+   $fn$ LANGUAGE plpgsql`,
+  'DROP TRIGGER IF EXISTS trg_products_base_audit ON products',
+  'CREATE TRIGGER trg_products_base_audit AFTER UPDATE OF base_price ON products' +
+    ' FOR EACH ROW EXECUTE FUNCTION mbo_log_base_change()',
+
+  // One-off backfill so the page is not empty on day one: every base change
+  // that consecutive runs already witnessed. Marked "observed" because the
+  // timestamp is when a RUN SAW the new value, not when it was written, and
+  // a change made and undone between two runs is invisible to it.
+  `INSERT INTO base_price_audit (mbo_id,key,brand,url,old_base,new_base,source,changed_at)
+   SELECT mbo_id, key, brand, url, prev, base_price, 'observed', created_at FROM (
+     SELECT mbo_id, key, brand, url, base_price, created_at,
+            LAG(base_price) OVER (PARTITION BY mbo_id, key ORDER BY created_at) AS prev
+       FROM price_history WHERE base_price IS NOT NULL) t
+    WHERE prev IS NOT NULL AND prev <> base_price
+      AND NOT EXISTS (SELECT 1 FROM base_price_audit WHERE source = 'observed')`,
 ];
 
 export async function initStore() {
@@ -240,29 +288,6 @@ export async function counts(mboId, brand) {
     COUNT(*) FILTER (WHERE state='matched' AND decision='pending' AND review_dismissed_at IS NULL) resolved_awaiting,
     COUNT(*) FILTER (WHERE decision='rejected') rejected FROM products WHERE ${where}`, params));
   const o = {}; for (const k of Object.keys(r)) o[k] = num(r[k]); return o;
-}
-
-// Per-tenant cache: keyed by `${mboId}:${threshold}` since alertCount also
-// varies by the caller-supplied threshold.
-const _alertCache = new Map();
-export async function alertCount(mboId, threshold = 5) {
-  const cacheKey = `${mboId}:${threshold}`;
-  const now = Date.now();
-  const cached = _alertCache.get(cacheKey);
-  if (cached && now - cached.at < 60_000) return cached.value;
-  try {
-    const r = await withTenant(mboId, (db) => db.one(`SELECT COUNT(*) c FROM (
-      SELECT live_price, prev FROM (
-        SELECT live_price,
-          LAG(live_price) OVER (PARTITION BY key ORDER BY created_at) prev,
-          ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) rn
-        FROM price_history WHERE mbo_id=$1 AND live_price IS NOT NULL
-      ) t WHERE rn=1 AND prev IS NOT NULL AND prev<>0
-        AND ABS((live_price-prev)/prev*100) >= $2) z`, [mboId, Math.abs(threshold)]));
-    const value = num(r.c);
-    _alertCache.set(cacheKey, { at: now, value });
-    return value;
-  } catch { return 0; }
 }
 
 // ---- vendors ----
@@ -795,6 +820,9 @@ export async function promoteLiveToBase(mboId, run, prow) {
   if (!prow?.key) return null;
   const next = await liveBaseValue(mboId, prow);
   if (!next) return null;
+  // Labels the audit row the trigger is about to write. `true` scopes it to the
+  // surrounding transaction; a no-op if this runner isn't in one.
+  try { await run("SELECT set_config('app.base_source','shopify_push',true)", []); } catch {}
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await run(`UPDATE products SET base_price=$1, base_usd=$2, state='matched',
       status=$3, delta=0, updated_at=$4 WHERE mbo_id=$5 AND key=$6`,
@@ -814,6 +842,53 @@ export async function archiveApproved(mboId, client, prow, final, markup, ref, n
     final_price=$4,note=$5,decided_at=$6,shopify_status=NULL,shopify_at=NULL
     WHERE mbo_id=$7 AND id=$8`, ['approved', markup, ref, final, note, now, mboId, prow.id]);
   return inserted.rows[0];
+}
+
+// ---- base price history ----
+// One row per product: what base_price is NOW, plus when it last moved and how
+// often. LEFT JOIN, so a product that has never been re-based still lists with
+// its imported baseline and a null date — "never changed" is the answer to the
+// question being asked, not a row to hide.
+export async function basePriceList(mboId, { brands, search, changedOnly, limit = 400, offset = 0 } = {}) {
+  const p = [mboId]; const cl = ["p.mbo_id = $1"];
+  if (brands && brands.length) { p.push(brands); cl.push(`p.brand = ANY($${p.length}::text[])`); }
+  if (search) { p.push(`%${search}%`); cl.push(`(p.url ILIKE $${p.length} OR p.brand ILIKE $${p.length})`); }
+  // The stat tiles count the brand/search scope only. Folding "changed only"
+  // into them would make the totals restate the filter — "never changed: 0" —
+  // instead of the split the tiles exist to show.
+  const scope = [...cl];
+  const scopeParams = [...p];
+  if (changedOnly) cl.push("a.changes > 0");
+  p.push(limit, offset);
+  return withTenant(mboId, async (db) => {
+    const rows = await db.q(`SELECT p.key, p.brand, p.url, p.base_price, p.base_usd, p.currency,
+        p.live_price, p.status, a.changes, a.last_at, a.last_old, a.last_new, a.last_source
+      FROM products p
+      LEFT JOIN (
+        SELECT key, COUNT(*) AS changes, MAX(changed_at) AS last_at,
+               (ARRAY_AGG(old_base ORDER BY changed_at DESC))[1] AS last_old,
+               (ARRAY_AGG(new_base ORDER BY changed_at DESC))[1] AS last_new,
+               (ARRAY_AGG(source   ORDER BY changed_at DESC))[1] AS last_source
+          FROM base_price_audit WHERE mbo_id = $1 GROUP BY key
+      ) a ON a.key = p.key
+      WHERE ${cl.join(" AND ")}
+      ORDER BY a.last_at DESC NULLS LAST, p.brand, p.key
+      LIMIT $${p.length - 1} OFFSET $${p.length}`, p);
+    const tot = await db.one(`SELECT COUNT(*) AS n,
+        COUNT(*) FILTER (WHERE a.changes > 0) AS changed
+      FROM products p LEFT JOIN (SELECT key, COUNT(*) AS changes FROM base_price_audit
+        WHERE mbo_id = $1 GROUP BY key) a ON a.key = p.key
+      WHERE ${scope.join(" AND ")}`, scopeParams);
+    return { items: rows, total: num(tot?.n), changed: num(tot?.changed) };
+  });
+}
+
+// Full trail for one product, newest first.
+export async function basePriceTrail(mboId, key) {
+  return withTenant(mboId, (db) => db.q(
+    `SELECT old_base, new_base, old_base_usd, new_base_usd, source, changed_at
+       FROM base_price_audit WHERE mbo_id = $1 AND key = $2
+      ORDER BY changed_at DESC LIMIT 200`, [mboId, key]));
 }
 
 // ---- history ----
