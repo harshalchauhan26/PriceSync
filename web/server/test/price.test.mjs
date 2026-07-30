@@ -68,6 +68,20 @@ test("detectCurrency reads meta, symbols and JSON", () => {
   assert.equal(detectCurrency(""), null);
 });
 
+// us.anitadongre.com prices in USD but keeps "India ₹" in its country-switcher.
+// A bare-symbol rupee test labelled that page INR, and the currency guard then
+// rejected every row as "asked USD, page served INR".
+test("a rupee symbol in a switcher LABEL is not the page currency", () => {
+  const usPage = '<a href="/home?switch=true&amp;currencyCode=INR"><span>India ₹</span></a>' +
+    '<span class="value" itemprop="price" content="6190.00"> $6,190 <p class="siteCurrency">USD</p></span>' +
+    '"priceCurrency":"USD"';
+  assert.equal(detectCurrency(usPage), "USD");
+  // A symbol wrapped away from its digits IS still a price (common Woo markup).
+  assert.equal(detectCurrency('<span class="sym">₹</span>1,200'), "INR");
+  // And the plain adjacent case keeps working.
+  assert.equal(detectCurrency("₹4,45,500"), "INR");
+});
+
 test("real rupee symbol outranks stray US dollar copy", () => {
   assert.equal(sanitizePrice("\u20B933,000.00"), 33000);
   assert.equal(detectCurrency("\u20B933,000 Free Shipping above US$ 500"), "INR");

@@ -36,6 +36,27 @@ const DEFAULT_APPEND_PARAMS = {
 // Every param the fetcher may append itself. Stripped before a URL is stored.
 export const FETCH_ONLY_PARAMS = ["wmc-currency", "currency", "country", "wcpbc-manual-country"];
 
+// Per-brand host swap applied at FETCH TIME ONLY — the stored product URL keeps
+// its original host (saveResult persists prod.url, which this never touches).
+// For a brand whose baseline we track in USD, the US storefront is the correct
+// SOURCE, not the Indian one: anitadongre prices its US catalog independently
+// rather than converting, so the two hosts are different prices for the same
+// garment and no exchange rate relates them. Measured on 8 products, INR/USD
+// came out at 71.97, 71.96, 56.87, 65.63, 72.00, 72.00, 59.79 and 56.93 — a
+// conversion would have produced one constant.
+// Requires the brand to be in fetch_usd_brands: that routes it to the
+// base_usd comparison path in finalizeOne, so the US price is compared against
+// a US baseline instead of being FX-converted onto the ₹ one.
+const DEFAULT_FETCH_HOSTS = {
+  "anitadongre.com": "us.anitadongre.com",
+};
+
+export function withHost(url, host) {
+  if (!host) return url;
+  try { const u = new URL(url); u.host = host; return u.toString(); }
+  catch { return url; }
+}
+
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -189,7 +210,16 @@ export function detectCurrency(text) {
   if (!text) return null;
   let m = text.match(/(?:og|product):price:currency["'][^>]*content=["']([A-Z]{3})["']|content=["']([A-Z]{3})["'][^>]*(?:og|product):price:currency/);
   if (m) { const c = (m[1] || m[2]).toUpperCase(); if (CURRENCIES.includes(c)) return c; }
-  if (/\u20B9|\u00e2\u201a\u00b9/.test(text) || /\bRs\.?\s*\d/i.test(text)) return "INR";
+  // A rupee symbol counts as evidence only when it actually labels a NUMBER.
+  // us.anitadongre.com carries "India \u20B9" in its country-switcher dropdown while
+  // the price itself is "$6,190" with priceCurrency=USD \u2014 a bare-symbol test
+  // read that label as the page currency and returned INR for a USD page, which
+  // the currency guard then rejected as "asked USD, page served INR".
+  // Tags are stripped first so a symbol wrapped away from its digits
+  // (<span>\u20B9</span>1,200) still counts, while a symbol sitting alone in a menu
+  // label does not. The Rs branch has always required a digit this way.
+  const flat = String(text).replace(/<[^>]*>/g, " ");
+  if (/\u20B9\s*\d|\u00e2\u201a\u00b9\s*\d/.test(flat) || /\bRs\.?\s*\d/i.test(flat)) return "INR";
   m = text.match(/"(?:priceCurrency|price_currency|currency)"\s*:\s*"([A-Z]{3})"/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   m = text.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Z]{3})["']/);
@@ -424,9 +454,13 @@ export async function extractRow(fetcher, url, platform, customRegex, opts = {})
   const p = (platform || "").trim().toLowerCase();
   const domain = (() => { try { return new URL(url).host.replace(/^www\./, "").toLowerCase(); } catch { return ""; } })();
   const appendParams = { ...(DEFAULT_APPEND_PARAMS[domain] || {}), ...(opts.appendParams || {}) };
+  // Host swap first, so the currency/geo params below land on the host we will
+  // actually request — and so redirectedOffProduct compares the slug against
+  // the URL that was really fetched.
+  const target = withHost(url, opts.fetchHost || DEFAULT_FETCH_HOSTS[domain]);
   let u = opts.fetchCurrency
-    ? withCurrencyParam(url, opts.currencyParam || "wmc-currency", opts.fetchCurrency)
-    : url;
+    ? withCurrencyParam(target, opts.currencyParam || "wmc-currency", opts.fetchCurrency)
+    : target;
   // Per-brand extra query params (e.g. anitadongre's switch=true suppresses
   // its geo-redirect when fetching from a foreign/relay IP).
   if (Object.keys(appendParams).length) {
