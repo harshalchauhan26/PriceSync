@@ -1210,12 +1210,16 @@ function History({admin}) {
    run never does. Rows are ordered newest-change-first so the answer to "did it
    just update" is the top of the table.
 ═════════════════════════════════════════════════════════════ */
-const SRC_LABEL={shopify_push:"Shopify push",set_base:"Set base",set_base_all:"Set base (bulk)",sheet_sync:"Sheet sync",observed:"Seen between runs",unknown:"—"};
+const SRC_LABEL={shopify_push:"Shopify push",set_base:"Set base",set_base_all:"Set base (bulk)",sheet_sync:"Sheet sync",sheet_base:"Sheet update",observed:"Seen between runs",unknown:"—"};
 function BasePrice({admin}) {
   const [brands,setBrands]=useState([]);
   const [q,setQ]=useState(""); const [changed,setChanged]=useState(false);
   const [d,setD]=useState({items:[],total:0,changed:0}); const [busy,setBusy]=useState(true);
   const [open,setOpen]=useState(null); const [trail,setTrail]=useState({});
+  // Base-price sheet upload. The file is held client-side between preview and
+  // apply so the user can only ever commit the exact bytes they just saw
+  // parsed — re-reading from disk could apply a different file than previewed.
+  const [file,setFile]=useState(null); const [prev,setPrev]=useState(null); const [applying,setApplying]=useState(false);
   const load=useCallback(()=>{
     setBusy(true);
     api(`/api/base?brands=${encodeURIComponent(brands.join(","))}&q=${encodeURIComponent(q)}&changed=${changed?1:0}`)
@@ -1226,6 +1230,28 @@ function BasePrice({admin}) {
     if(open===k) return setOpen(null);
     setOpen(k);
     if(!trail[k]){ const r=await api(`/api/base/trail?key=${encodeURIComponent(k)}`); setTrail(t=>({...t,[k]:r.trail||[]})); }
+  };
+  const onSheet=async(f)=>{
+    if(!f||!admin) return;
+    setFile(f); setPrev(null);
+    const fd=new FormData(); fd.append("file",f);
+    toast("Reading "+f.name+"…");
+    const r=await api("/api/base/sheet_preview",{method:"POST",body:fd});
+    if(!r.ok){ setFile(null); return toast(r.error||"Could not read sheet","err"); }
+    setPrev(r);
+    toast(`${r.will_change} baseline(s) would change`,r.will_change?"ok":"err");
+  };
+  const applySheet=async()=>{
+    if(!admin||!file||!prev) return;
+    if(!prev.will_change) return toast("Nothing to change","err");
+    if(!confirm(`Update ${prev.will_change} base price(s)?\n\nbase_price is what every mismatch is judged against. ${prev.unmatched.length} unmatched URL(s) will be skipped, not added.`)) return;
+    setApplying(true);
+    const fd=new FormData(); fd.append("file",file);
+    const r=await api("/api/base/sheet_apply",{method:"POST",body:fd});
+    setApplying(false);
+    if(!r.ok) return toast(r.error||"Failed","err");
+    toast(`Updated ${r.updated} base price(s)`,"ok");
+    setFile(null); setPrev(null); load();
   };
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
@@ -1238,9 +1264,68 @@ function BasePrice({admin}) {
         <button className={`pill${changed?" active":""}`} onClick={()=>setChanged(c=>!c)}>Changed only</button>
       </>}/>
 
-    <div style={{display:"flex",alignItems:"center",marginBottom:10}}>
+    {/* Base-price sheet: URL column + price column, nothing else needed. */}
+    <div className="card" style={{padding:"10px 16px",marginBottom:10,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <span className="lbl">Update from sheet</span>
+      <input id="base-fi" type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}}
+        onChange={e=>{ onSheet(e.target.files[0]); e.target.value=""; }}/>
+      <button className="btn btn-ghost btn-sm" disabled={!admin} onClick={()=>document.getElementById("base-fi").click()}>
+        <Icon n="up" s={12}/>Choose sheet…
+      </button>
+      <span style={{fontSize:11,color:"var(--on3)"}}>
+        Needs two columns: a product <b>URL</b> and a <b>Base Price</b>. Blank prices are skipped; only base_price is touched.
+      </span>
+      {file&&<span className="mono" style={{fontSize:11,color:"var(--on2)"}}>{file.name}</span>}
+      {(file||prev)&&<button className="btn btn-ghost btn-sm" onClick={()=>{setFile(null);setPrev(null);}}><Icon n="x" s={12}/>Cancel</button>}
       <span style={{marginLeft:"auto",fontSize:11,color:"var(--on3)"}}>{busy?"Loading…":`${fmtInt(d.items.length)} shown`}</span>
     </div>
+
+    {prev&&<div className="card" style={{padding:"12px 16px",marginBottom:10}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:8}}>
+        <span style={{fontSize:12,color:"var(--on2)"}}>
+          Read <b>{prev.urlCol}</b> + <b>{prev.priceCol}</b> — {fmtInt(prev.total)} row(s):
+          {" "}<b style={{color:"var(--green)"}}>{fmtInt(prev.will_change)} will change</b>,
+          {" "}{fmtInt(prev.matched.length-prev.will_change)} already correct,
+          {" "}<b style={{color:prev.unmatched.length?"var(--red)":"var(--on3)"}}>{fmtInt(prev.unmatched.length)} unmatched</b>
+          {prev.skipped.length?<>, {fmtInt(prev.skipped.length)} skipped</>:null}
+        </span>
+        <div style={{flex:1}}/>
+        <button className="btn btn-primary btn-sm" onClick={applySheet} disabled={!admin||applying||!prev.will_change}>
+          <Icon n="check" s={12}/>{applying?"Updating…":`Apply ${fmtInt(prev.will_change)} change(s)`}
+        </button>
+      </div>
+      <div style={{maxHeight:240,overflow:"auto"}}>
+        <table className="tbl">
+          <thead><tr>{["Row","Product","Brand","Base now","→ New",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+          <tbody>
+            {prev.matched.filter(m=>m.changed).map((m,i)=><tr key={"m"+i}>
+              <td className="mono" style={{color:"var(--on3)",fontSize:11}}>{m.row}</td>
+              <td style={{maxWidth:380}}><span style={{...URL_WRAP,fontSize:11}}>{fullUrl(m.url)}</span></td>
+              <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(m.brand||"").replace(/^www\./,"")}</td>
+              <td className="mono" style={{textAlign:"right"}}>{fmt(m.old_base)}</td>
+              <td className="mono" style={{textAlign:"right",fontWeight:700,color:"var(--green)"}}>{fmt(m.new_base)}</td>
+              <td/>
+            </tr>)}
+            {/* Unmatched rows are shown, never applied — a typo'd URL must be
+                visible rather than silently becoming a new tracked product. */}
+            {prev.unmatched.map((u,i)=><tr key={"u"+i}>
+              <td className="mono" style={{color:"var(--on3)",fontSize:11}}>{u.row}</td>
+              <td style={{maxWidth:380}}><span style={{...URL_WRAP,fontSize:11,color:"var(--red)"}}>{u.url}</span></td>
+              <td colSpan={3} style={{fontSize:11,color:"var(--red)"}}>{u.reason||"no product with this URL — skipped"}</td>
+              <td/>
+            </tr>)}
+            {prev.skipped.map((s,i)=><tr key={"s"+i}>
+              <td className="mono" style={{color:"var(--on3)",fontSize:11}}>{s.row}</td>
+              <td style={{maxWidth:380}}><span style={{...URL_WRAP,fontSize:11,color:"var(--on3)"}}>{s.url||"(no URL)"}</span></td>
+              <td colSpan={3} style={{fontSize:11,color:"var(--on3)"}}>{s.reason}</td>
+              <td/>
+            </tr>)}
+            {!prev.will_change&&!prev.unmatched.length&&!prev.skipped.length&&
+              <tr><td colSpan={6} style={{textAlign:"center",padding:"20px 0",color:"var(--on3)"}}>Every row already matches the stored baseline — nothing to do.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>}
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:10}}>
       <Stat k="Products"        v={fmtInt(d.total)}/>

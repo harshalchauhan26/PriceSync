@@ -944,6 +944,108 @@ function sanitizeNum(v) {
   const m = String(v).replace(/[^0-9.]/g, "").match(/\d+(?:\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
 }
+// ---- base-price-only sheet ----
+// A hand-made 2-column sheet (product URL + new base price) that rewrites
+// base_price and NOTHING else. Deliberately separate from importSheet, which
+// syncs the whole catalog and can delete rows: the whole point here is that a
+// sheet of 5 corrected baselines cannot touch the other 8,929 products.
+//
+// Headers are matched loosely because the sheet is typed by hand — "URL",
+// "Product URL", "Designer Product URL" and "Link" all mean the same thing,
+// and a sheet that fails on a header spelling just gets retyped until it
+// passes, which teaches nothing and wastes a round trip.
+const BASE_URL_HEADERS = ["designer product url", "product url", "designer url", "url", "link", "product", "product link"];
+const BASE_PRICE_HEADERS = ["new base price", "base price", "studio east price", "base", "price", "base_price", "new base", "new price"];
+const normHeader = (h) => String(h || "").trim().toLowerCase().replace(/[\s_]+/g, " ");
+
+function pickHeader(cols, wanted) {
+  const norm = cols.map((c) => [c, normHeader(c)]);
+  for (const w of wanted) { const hit = norm.find(([, n]) => n === w); if (hit) return hit[0]; }
+  // Fall back to a containment match so "Designer Product URL (live)" still works.
+  for (const w of wanted) { const hit = norm.find(([, n]) => n.includes(w)); if (hit) return hit[0]; }
+  return null;
+}
+
+export function parseBaseSheet(buf) {
+  const wb = XLSX.read(buf, { type: "buffer" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  const cols = raw.length ? Object.keys(raw[0]) : [];
+  const urlCol = pickHeader(cols, BASE_URL_HEADERS);
+  // The price column must not resolve to the URL column when a sheet is headed
+  // e.g. "Product URL" / "Product" — exclude whatever the URL match consumed.
+  const priceCol = pickHeader(cols.filter((c) => c !== urlCol), BASE_PRICE_HEADERS);
+  if (!urlCol || !priceCol) {
+    throw new Error(`sheet needs a URL column and a base price column — found: ${cols.join(", ") || "(no columns)"}`);
+  }
+  const rows = raw.map((r, i) => {
+    const url = String(r[urlCol] || "").trim();
+    const base_price = sanitizeNum(r[priceCol]);
+    let _error = null;
+    if (!url) _error = "no URL";
+    // A blank price means "leave this one alone", not an error: a sheet is
+    // usually a full export with only a few cells filled in.
+    else if (String(r[priceCol]).trim() === "") _error = "blank price (skipped)";
+    else if (base_price == null || base_price <= 0) _error = `not a valid price: "${r[priceCol]}"`;
+    return { row: i + 2, url, base_price, _error };
+  });
+  return { urlCol, priceCol, rows };
+}
+
+// Matches sheet URLs to products and reports what WOULD change. Never writes.
+// Matching is on canonicalUrl so a pasted link carrying ?wmc-currency= or a
+// tracking param still finds its row.
+export async function previewBaseSheet(mboId, buf) {
+  const { urlCol, priceCol, rows } = parseBaseSheet(buf);
+  const usable = rows.filter((r) => !r._error);
+  const skipped = rows.filter((r) => r._error);
+  const prods = await withTenant(mboId, (db) =>
+    db.q("SELECT key, url, brand, base_price FROM products WHERE mbo_id=$1", [mboId]));
+  const byUrl = new Map();
+  for (const p of prods) {
+    const c = canonicalUrl(p.url).replace(/\/+$/, "").toLowerCase();
+    if (!byUrl.has(c)) byUrl.set(c, p);
+  }
+  const matched = [], unmatched = [];
+  const seen = new Set();
+  for (const r of usable) {
+    const c = canonicalUrl(r.url).replace(/\/+$/, "").toLowerCase();
+    const p = byUrl.get(c);
+    if (!p) { unmatched.push({ row: r.row, url: r.url, base_price: r.base_price }); continue; }
+    // A sheet listing the same URL twice would apply twice with the last write
+    // winning silently — surface it instead.
+    if (seen.has(p.key)) { unmatched.push({ row: r.row, url: r.url, base_price: r.base_price, reason: "duplicate URL in sheet" }); continue; }
+    seen.add(p.key);
+    matched.push({ row: r.row, key: p.key, url: p.url, brand: p.brand,
+      old_base: p.base_price, new_base: r.base_price,
+      changed: Number(p.base_price) !== Number(r.base_price) });
+  }
+  return { urlCol, priceCol, total: rows.length,
+    matched, unmatched, skipped: skipped.map((r) => ({ row: r.row, url: r.url, reason: r._error })),
+    will_change: matched.filter((m) => m.changed).length };
+}
+
+// Applies the matched rows. Unmatched URLs are never inserted — a typo would
+// otherwise become a permanent product that fails every run.
+export async function applyBaseSheet(mboId, buf) {
+  const pre = await previewBaseSheet(mboId, buf);
+  const changes = pre.matched.filter((m) => m.changed);
+  if (!changes.length) return { ...pre, updated: 0 };
+  await withTenant(mboId, async (db) => {
+    // Labels the audit rows the base_price trigger writes, so the Base Price
+    // page shows "Sheet update" rather than "unknown" for every one of these.
+    await db.client.query("SELECT set_config('app.base_source','sheet_base',true)");
+    for (const c of changes) {
+      await db.client.query(
+        "UPDATE products SET base_price=$1, updated_at=$2 WHERE mbo_id=$3 AND key=$4",
+        [c.new_base, new Date().toISOString().slice(0, 19).replace("T", " "), mboId, c.key]);
+      await db.client.query("UPDATE import_catalog SET base_price=$1 WHERE mbo_id=$2 AND key=$3",
+        [c.new_base, mboId, c.key]);
+    }
+  });
+  return { ...pre, updated: changes.length };
+}
+
 // ---- add products directly (manual entry or a standalone sheet) ----
 // Purely additive: always INSERTs new rows with a fresh key, never updates
 // or deletes an existing product. Distinct from importSheet/commitImportToProducts,

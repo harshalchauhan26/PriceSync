@@ -739,6 +739,21 @@ tenantRouter.get("/base/trail", wrap(async (req, res) => {
   if (!key) return res.status(400).json({ error: "key required" });
   res.json({ trail: await store.basePriceTrail(req.mboId, key) });
 }));
+// Base-price-only sheet: a 2-column upload (product URL + base price) that
+// rewrites base_price and nothing else. Two steps on purpose — preview shows
+// exactly which rows move and which URLs matched nothing, and only the second
+// call writes. base_price is what every mismatch is judged against, so it must
+// never change on the strength of a file the user hasn't seen parsed.
+tenantRouter.post("/base/sheet_preview", upload.single("file"), wrap(async (req, res) => {
+  if (!req.file) return res.status(400).json({ ok: false, error: "no file" });
+  try { res.json({ ok: true, ...(await store.previewBaseSheet(req.mboId, req.file.buffer)) }); }
+  catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+}));
+tenantRouter.post("/base/sheet_apply", upload.single("file"), wrap(async (req, res) => {
+  if (!req.file) return res.status(400).json({ ok: false, error: "no file" });
+  try { res.json({ ok: true, ...(await store.applyBaseSheet(req.mboId, req.file.buffer)) }); }
+  catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+}));
 
 // ---------- integrations (one Shopify store per tenant) ----------
 tenantRouter.get("/integration", wrap(async (req, res) => {
