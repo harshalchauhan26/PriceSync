@@ -396,10 +396,33 @@ export async function extractWordpress(fetcher, url, preferHigh = false) {
 // saakshakinni.com returned GBP 298 for a ₹34,000 product, which then failed
 // against the INR baseline. Only the currency param is carried, not the whole
 // query string — the API takes its own params and slug must not be shadowed.
+export function urlSlug(url) {
+  try {
+    const segs = new URL(url).pathname.replace(/\/+$/, "").split("/").filter(Boolean);
+    return decodeURIComponent(segs[segs.length - 1] || "").toLowerCase();
+  } catch { return ""; }
+}
+
+// `?slug=` can return MORE than the product asked for. Woo indexes every
+// VARIATION under its own slug, and a sibling product's variation matches the
+// same slug string: /product/rosetta-blouse-dracy-skirt/ returns the size-M
+// variation of "…-dracy-skirt-2" FIRST (₹15,500) and the real variable parent
+// second (range ₹11,000–₹26,500). Reading arr[0] therefore stored a mid-range
+// variation price and preferHigh never saw a price_range at all — variations
+// carry price_range: null. Take the top-level product (parent 0, not a
+// variation) whose permalink actually ends in the requested slug.
+export function pickWooProduct(arr, slug) {
+  if (!Array.isArray(arr) || !arr.length) return null;
+  const parents = arr.filter((p) => p && !p.parent && p.type !== "variation");
+  const pool = parents.length ? parents : arr;
+  const want = String(slug || "").toLowerCase();
+  const exact = want && pool.find((p) => urlSlug(p.permalink) === want);
+  return exact || pool[0];
+}
+
 export function wooApiUrl(url, currencyParam = "wmc-currency") {
   const u = new URL(url);
-  const segs = u.pathname.replace(/\/+$/, "").split("/").filter(Boolean);
-  const slug = segs[segs.length - 1] || "";
+  const slug = urlSlug(url);
   let out = `${u.origin}/wp-json/wc/store/v1/products?slug=${encodeURIComponent(slug)}`;
   const cur = currencyParam ? u.searchParams.get(currencyParam) : null;
   if (cur) out += `&${encodeURIComponent(currencyParam)}=${encodeURIComponent(cur)}`;
@@ -410,7 +433,7 @@ export async function extractWooApi(fetcher, url, preferHigh = false, currencyPa
   const resp = await fetcher.get(wooApiUrl(url, currencyParam));
   let arr;
   try { arr = JSON.parse(resp.data); } catch { return [null, null]; }
-  const p = Array.isArray(arr) ? arr[0]?.prices : null;
+  const p = pickWooProduct(arr, urlSlug(url))?.prices || null;
   if (!p) return [null, null];
   const scale = 10 ** (Number(p.currency_minor_unit) || 0);
   // Main (pre-sale) price = max(regular, current); range-high brands also

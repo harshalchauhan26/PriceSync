@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import {
   sanitizePrice, descaleIfCents, detectCurrency, extractPriceDetail,
   redirectedOffProduct, withCurrencyParam, wooApiUrl, extractRow,
-  FETCH_ONLY_PARAMS,
+  pickWooProduct, FETCH_ONLY_PARAMS,
 } from "../src/engine.js";
 import {
   roundFinal, computeFinal, matchTol, stateOf, brandOf, canonicalUrl,
@@ -185,6 +185,28 @@ test("INCIDENT: wooApiUrl carries the currency param onto the Store API URL", ()
   assert.equal(
     wooApiUrl("https://x.com/product/my-saree/?slug=evil&switch=true"),
     "https://x.com/wp-json/wc/store/v1/products?slug=my-saree");
+});
+
+test("INCIDENT: ?slug= returns a sibling's VARIATION first — take the variable parent", () => {
+  // Live saakshakinni.com response for /product/rosetta-blouse-dracy-skirt/:
+  // Woo indexes variations under their own slug, so the size-M variation of
+  // "…-dracy-skirt-2" is returned AHEAD of the real parent. arr[0] read its
+  // ₹15,500 and preferHigh saw price_range: null, so the ₹26,500 range-high
+  // never landed (base 26,500 vs live 15,500 = a -11,000 phantom mismatch).
+  const variation = { id: 29755, slug: "rosetta-blouse-dracy-skirt", parent: 29751, type: "variation",
+    permalink: "https://saakshakinni.com/product/rosetta-blouse-dracy-skirt-2/?attribute_pa_size=m",
+    prices: { price: "9300", regular_price: "15500", price_range: null } };
+  const parent = { id: 24785, slug: "rosetta-blouse-dracy-skirt", parent: 0, type: "variable",
+    permalink: "https://saakshakinni.com/product/rosetta-blouse-dracy-skirt/",
+    prices: { price: "11000", regular_price: "11000", price_range: { min_amount: "11000", max_amount: "26500" } } };
+  assert.equal(pickWooProduct([variation, parent], "rosetta-blouse-dracy-skirt").id, 24785);
+  // Exact permalink match wins even between two top-level products.
+  const other = { id: 1, parent: 0, type: "simple", permalink: "https://saakshakinni.com/product/other-thing/" };
+  assert.equal(pickWooProduct([other, parent], "rosetta-blouse-dracy-skirt").id, 24785);
+  // Degenerate payloads must not throw or return undefined-shaped junk.
+  assert.equal(pickWooProduct([variation], "rosetta-blouse-dracy-skirt").id, 29755);
+  assert.equal(pickWooProduct([], "x"), null);
+  assert.equal(pickWooProduct(null, "x"), null);
 });
 
 test("roundFinal rounds to the nearest 0/5/10 bucket", () => {

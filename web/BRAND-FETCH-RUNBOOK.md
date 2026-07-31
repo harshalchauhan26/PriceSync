@@ -77,6 +77,21 @@ bare-symbol rupee test read that menu label as the page currency. A rupee symbol
 now has to actually label a number (what the `Rs` branch always required), with
 tags stripped first so `<span>₹</span>1,200` still counts.
 
+### saakshakinni.com — the Store API `?slug=` trap (fixed 2026-07-31)
+`?slug=` is **not** a unique key. WooCommerce indexes every VARIATION under its
+own slug, so `/product/rosetta-blouse-dracy-skirt/` returns two objects and the
+**variation comes first**: the size-M variation of the *sibling* product
+`…-dracy-skirt-2` (`parent: 29751`, `type: "variation"`, regular_price ₹15,500,
+`price_range: null`), then the real variable parent (`parent: 0`,
+range ₹11,000–₹26,500). `extractWooApi` read `arr[0]`, so it stored ₹15,500 and
+`preferHigh` never fired — variations carry no `price_range` — leaving base
+26,500 vs live 15,500 as a phantom −11,000 mismatch.
+
+`pickWooProduct` now takes the top-level product (`parent` falsy, `type !==
+"variation"`) whose permalink ends in the requested slug. This is a **code fix,
+not a config one — it needs a deploy.** Any saakshakinni row whose product has a
+same-slug-prefixed sibling was affected; re-run the brand after deploying.
+
 ### houseofmasaba.com / mahimamahajan.in
 Flagged as suspicious (uniform 1.298 ratio; 17% `product unavailable`), then
 **confirmed fine by the user. Do not touch.**
