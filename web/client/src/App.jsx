@@ -881,6 +881,10 @@ function Review({admin}) {
   const [page,setPage]=useState(0); const PAGE_SIZE=500;
   const [cleanBusy,setCleanBusy]=useState(false);
   const [retryBusy,setRetryBusy]=useState(false); const [retryProgress,setRetryProgress]=useState(null);
+  // Ticked rows. When non-empty the push acts on EXACTLY these products and
+  // nothing else — the usual case is shipping one corrected product out of a
+  // brand without touching the other 164.
+  const [sel,setSel]=useState(()=>new Set());
   const convOn=convCur!=="INR";
   const queueTotal=Number(summary.total ?? items.length) || 0;
 
@@ -888,6 +892,10 @@ function Review({admin}) {
     const d=await api(`/api/review/items_by_brand?brands=${encodeURIComponent(brands.join(","))}`);
     const rows=d.items||[];
     setItems(rows.map(it=>({...it,_amt:"",_cur:(it.currency||"INR").toUpperCase()})));
+    // Drop ids that are no longer in the queue (pushed, rejected, hidden) so a
+    // stale tick can never resurrect a row the user thinks is gone.
+    const live=new Set(rows.map(it=>it.id));
+    setSel(s=>{ const n=new Set([...s].filter(id=>live.has(id))); return n.size===s.size?s:n; });
     setSummary({
       total:Number(d.summary?.total ?? rows.length) || 0,
       mismatch:Number(d.summary?.mismatch ?? rows.filter(it=>it.state==="mismatch").length) || 0,
@@ -939,20 +947,30 @@ function Review({admin}) {
     setRetryProgress(null); setRetryBusy(false);
     toast(`Retried ${errRows.length} error row(s)`,"ok");
   };
+  // Ticked rows win over the brand scope: with a selection the push carries
+  // explicit ids and "only mismatched" no longer applies (a ticked matched row
+  // must still go, or the button would silently skip what the user chose).
+  const toggleRow=(id)=>setSel(s=>{ const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; });
   const pushBrand=async()=>{
     if(!admin) return toast("Admin only","err");
-    if(!brands.length) return toast("Select at least one brand up top first","err");
-    const pushItems=onlyMismatch?items.filter(it=>it.state==="mismatch"):items;
-    const pushCount=onlyMismatch?(Number(summary.mismatch) || pushItems.length):queueTotal;
-    if(!pushCount) return toast(onlyMismatch?"No mismatched rows to push":"Nothing to push","err");
-    if(!confirm(`Archive ${fmtInt(pushCount)} ${onlyMismatch?"MISMATCHED ":""}row(s) to History and push the price to Shopify now, for ${brands.length===1?brands[0]:brands.length+" selected brands"}?`)) return;
+    const selMode=sel.size>0;
+    if(!selMode&&!brands.length) return toast("Select at least one brand up top, or tick the products you want","err");
+    const pushItems=selMode?items.filter(it=>sel.has(it.id)):(onlyMismatch?items.filter(it=>it.state==="mismatch"):items);
+    const pushCount=selMode?pushItems.length:(onlyMismatch?(Number(summary.mismatch) || pushItems.length):queueTotal);
+    if(!pushCount) return toast(onlyMismatch&&!selMode?"No mismatched rows to push":"Nothing to push","err");
+    const scope=selMode
+      ? (pushCount===1?`the 1 SELECTED product\n\n${fullUrl(pushItems[0].url)}`:`the ${fmtInt(pushCount)} SELECTED products`)
+      : `${brands.length===1?brands[0]:brands.length+" selected brands"}`;
+    if(!confirm(`Archive ${fmtInt(pushCount)} ${!selMode&&onlyMismatch?"MISMATCHED ":""}row(s) to History and push the price to Shopify now, for ${scope}?`)) return;
     setPushBusy(true);
     const overrides=pushItems.filter(it=>it._amt).map(it=>({id:it.id,price_amount:it._amt,price_currency:it._cur}));
-    const r=await aj("/api/review/push_brand",{brands,markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",overrides,only_mismatch:onlyMismatch});
+    const r=await aj("/api/review/push_brand",{brands,markup_pct:gm,convert:convOn,convert_currency:convOn?convCur:"",overrides,
+      only_mismatch:onlyMismatch,row_ids:selMode?pushItems.map(it=>it.id):undefined});
     setPushBusy(false);
     if(!r.ok) return toast(r.error||"Failed","err");
     if(!r.queued) return toast("Nothing to push","ok");
     toast(`Pushing ${r.queued} in batches of 10`,"ok");
+    setSel(new Set());
     setPushJob(r.job);
   };
   const cleanAll=async()=>{
@@ -969,7 +987,7 @@ function Review({admin}) {
   };
 
   return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
-    <PageBar title="Review & Approval Queue" subtitle="Pick brand(s) up top — mismatches show first, then errors, then already-matched. Pushing archives to History and updates Shopify in one step."
+    <PageBar title="Review & Approval Queue" subtitle="Pick brand(s) up top, or tick individual products to push just those — mismatches show first, then errors, then already-matched. Pushing archives to History and updates Shopify in one step."
       brands={brands} setBrands={setBrands} brandScope="review"
       extraLeft={<button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>}/>
 
@@ -1043,9 +1061,21 @@ function Review({admin}) {
       </div>}
     <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
       <table className="tbl">
-        <thead><tr>{["Product","State","Base","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+        <thead><tr>
+          {/* Select-all acts on the VISIBLE page only — with 8k rows behind a
+              filter, a header tick that silently selected everything offscreen
+              would be the same blast radius the brand guard exists to prevent. */}
+          <th style={{width:28}}>
+            <input type="checkbox" title="Select every product on this page"
+              checked={pageRows.length>0&&pageRows.every(it=>sel.has(it.id))}
+              ref={el=>{ if(el) el.indeterminate=pageRows.some(it=>sel.has(it.id))&&!pageRows.every(it=>sel.has(it.id)); }}
+              onChange={e=>{ const on=e.target.checked; setSel(s=>{ const n=new Set(s); pageRows.forEach(it=>on?n.add(it.id):n.delete(it.id)); return n; }); }}/>
+          </th>
+          {["Product","State","Base","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}
+        </tr></thead>
         <tbody>
-          {pageRows.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; return <tr key={it.id}>
+          {pageRows.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; const picked=sel.has(it.id); return <tr key={it.id} style={picked?{background:"var(--sel,rgba(90,140,255,.10))"}:undefined}>
+            <td><input type="checkbox" title="Push only the ticked products" checked={picked} onChange={()=>toggleRow(it.id)}/></td>
             <td style={{maxWidth:420}}><a href={it.url} target="_blank" rel="noopener" title={it.url} style={{color:"var(--blue)",...URL_WRAP}}>{fullUrl(it.url)}</a>
               <div className="mono" style={{fontSize:10,color:"var(--on3)"}}>{(it.brand||"").replace(/^www\./,"")}</div></td>
             <td><span className="mono" style={{fontSize:11,fontWeight:700,color:pc}}>{pl}</span></td>
@@ -1067,7 +1097,7 @@ function Review({admin}) {
               <button className="btn btn-danger btn-sm" title="Hide this product from Review — product & price data stay in the database" onClick={()=>del(it)} disabled={!admin}><Icon n="trash" s={12}/>Clear</button>
             </div></td>
           </tr>;})}
-          {!shown.length&&<tr><td colSpan={8} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>{items.length&&stateFilter!=="all"?`No ${stateFilter} rows in this view.`:"Nothing here."}</td></tr>}
+          {!shown.length&&<tr><td colSpan={9} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>{items.length&&stateFilter!=="all"?`No ${stateFilter} rows in this view.`:"Nothing here."}</td></tr>}
         </tbody>
       </table>
     </div>
@@ -1075,15 +1105,21 @@ function Review({admin}) {
 
     {/* Footer: combined archive + push (scoped to brand(s) up top), and a master "hide from Review" for the current view */}
     <div style={{marginTop:12,flexShrink:0,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-      {(()=>{const mmCount=Number(summary.mismatch ?? items.filter(it=>it.state==="mismatch").length) || 0; const pushCount=onlyMismatch?mmCount:queueTotal; return <>
-      <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!pushCount||!brands.length}
-        title={brands.length?(onlyMismatch?"Pushes only price-mismatch rows":undefined):"Select at least one brand up top before pushing — never runs across every brand at once"}>
-        <Icon n="share" s={14}/>{pushBusy?"Starting…":`Push and update price (${pushCount})`}
+      {(()=>{const mmCount=Number(summary.mismatch ?? items.filter(it=>it.state==="mismatch").length) || 0;
+        const selMode=sel.size>0; const pushCount=selMode?sel.size:(onlyMismatch?mmCount:queueTotal); return <>
+      <button className="btn btn-primary" onClick={pushBrand} disabled={!admin||pushBusy||!pushCount||(!selMode&&!brands.length)}
+        title={selMode?"Pushes ONLY the ticked products — nothing else in the brand moves"
+          :(brands.length?(onlyMismatch?"Pushes only price-mismatch rows":undefined):"Select at least one brand up top, or tick individual products below")}>
+        <Icon n="share" s={14}/>{pushBusy?"Starting…":selMode?`Push ${pushCount} selected product${pushCount===1?"":"s"}`:`Push and update price (${pushCount})`}
       </button>
-      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"var(--on2)",cursor:"pointer",userSelect:"none"}} title="Push only rows in the Price Mismatch state — skips matched and errored rows">
-        <input type="checkbox" checked={onlyMismatch} onChange={e=>setOnlyMismatch(e.target.checked)}/>
-        Only mismatched{onlyMismatch?` (${mmCount})`:""}
-      </label>
+      {selMode
+        ? <button className="btn btn-ghost btn-sm" onClick={()=>setSel(new Set())} title="Untick everything and go back to pushing the whole brand">
+            <Icon n="x" s={12}/>Clear selection ({sel.size})
+          </button>
+        : <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"var(--on2)",cursor:"pointer",userSelect:"none"}} title="Push only rows in the Price Mismatch state — skips matched and errored rows">
+            <input type="checkbox" checked={onlyMismatch} onChange={e=>setOnlyMismatch(e.target.checked)}/>
+            Only mismatched{onlyMismatch?` (${mmCount})`:""}
+          </label>}
       </>;})()}
       <button className="btn btn-danger" onClick={cleanAll} disabled={!admin||cleanBusy||!queueTotal}
         title="Hide every product currently shown below from Review — nothing is deleted from the database">
@@ -1093,7 +1129,9 @@ function Review({admin}) {
         title="Re-fetch a fresh live price for every FAIL row currently shown below">
         <Icon n="refresh" s={14}/>{retryBusy?`Retrying ${retryProgress?.done??0}/${retryProgress?.total??0}…`:`Retry errors (${items.filter(it=>it.state==="error").length})`}
       </button>
-      {!brands.length&&<div style={{fontSize:11,color:"var(--on3)"}}>Showing all brands — select one or more up top to push.</div>}
+      {sel.size>0
+        ? <div style={{fontSize:11,color:"var(--on2)"}}>{fmtInt(sel.size)} product{sel.size===1?"":"s"} ticked — the push is limited to {sel.size===1?"it":"them"}.</div>
+        : !brands.length&&<div style={{fontSize:11,color:"var(--on3)"}}>Showing all brands — select one or more up top, or tick individual products, to push.</div>}
     </div>
     {pushJob&&<div style={{marginTop:12}}><PushJobPanel job={pushJob} onDone={load} onClose={()=>setPushJob(null)}/></div>}
   </div>;

@@ -469,26 +469,42 @@ async function archiveForPush(mboId, prow, spec) {
   } catch (e) { await client.query("ROLLBACK"); throw e; }
   finally { client.release(); }
 }
-// Review page's single combined action for the brand selected at top:
-// archives every pending mismatch/error/matched row for that brand to
-// History, then pushes it to Shopify — same batch-progress job shape as
-// /api/history push_all/push_job, scoped strictly to one brand (never all).
+// Review page's single combined action: archives pending mismatch/error/matched
+// rows to History, then pushes them to Shopify — same batch-progress job shape
+// as /api/history push_all/push_job. Scope is either the brand(s) selected at
+// top (never all brands) or, when `row_ids` is sent, exactly the products the
+// user ticked — for the common case of pushing one product out of a brand.
 tenantRouter.post("/review/push_brand", wrap(async (req, res) => {
   const mboId = req.mboId;
   const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
-  if (!brands.length) return res.status(400).json({ ok: false, error: "select at least one brand before pushing" });
+  // Explicit row selection — "push just these products". The brand guard below
+  // exists because a whole-queue push once sent 600+ wrong prices live; an
+  // explicit list of ids carries no such blast radius, so it stands on its own
+  // and does NOT need a brand (the ids already name exactly what moves).
+  // Still scoped to this tenant, and still only pending, non-dismissed rows.
+  const rowIds = Array.isArray(req.body.row_ids)
+    ? [...new Set(req.body.row_ids.map(Number).filter((n) => Number.isFinite(n) && n > 0))]
+    : [];
+  if (!rowIds.length && !brands.length) {
+    return res.status(400).json({ ok: false, error: "select at least one brand, or tick the products you want to push" });
+  }
   // Optional "only mismatched" scope — push just the price-mismatch rows and
   // leave matched/error rows untouched (the default pushes all three states).
+  // Ignored for an explicit selection: ticking a row IS the choice of scope,
+  // and silently dropping a ticked matched row would be a lie.
   const onlyMismatch = req.body.only_mismatch === true || req.body.only_mismatch === "true";
-  const stateClause = onlyMismatch ? "state='mismatch'" : "state IN ('mismatch','error','matched')";
-  const rows = await q(`SELECT * FROM products WHERE mbo_id=$1 AND brand = ANY($2::text[]) AND decision='pending'
+  const stateClause = onlyMismatch && !rowIds.length ? "state='mismatch'" : "state IN ('mismatch','error','matched')";
+  const scopeClause = rowIds.length ? "id = ANY($2::bigint[])" : "brand = ANY($2::text[])";
+  const rows = await q(`SELECT * FROM products WHERE mbo_id=$1 AND ${scopeClause} AND decision='pending'
     AND ${stateClause} AND review_dismissed_at IS NULL
-    ORDER BY ${store.STATE_PRIORITY_SQL}`, [mboId, brands]);
+    ORDER BY ${store.STATE_PRIORITY_SQL}`, [mboId, rowIds.length ? rowIds : brands]);
   if (!rows.length) return res.json({ ok: true, queued: 0 });
   const by = sec.currentUser(req)?.email;
   const overrideMap = new Map((req.body.overrides || []).map((o) => [String(o.id), o]));
   const { markup_pct, convert, convert_currency } = req.body;
-  const label = `Push & update — ${brands.length===1?brands[0]:brands.length+" brands"}`;
+  const label = rowIds.length
+    ? `Push & update — ${rows.length===1?(rows[0].brand||"1 product"):rows.length+" selected products"}`
+    : `Push & update — ${brands.length===1?brands[0]:brands.length+" brands"}`;
   const push = startReviewPushJob(mboId, rows, (prow) => {
     const ov = overrideMap.get(String(prow.id)) || {};
     return archiveForPush(mboId, prow, {
