@@ -1067,23 +1067,90 @@ export function parseAddSheet(buf) {
   });
 }
 
-export async function addProducts(mboId, rows) {
-  const clean = (rows || [])
-    .map((r) => ({
-      url: String(r.url || "").trim(),
-      mbo_url: String(r.mbo_url || "").trim(),
-      platform: String(r.platform || "").trim(),
-      custom_regex: String(r.custom_regex || "").trim(),
-      base_price: r.base_price === "" || r.base_price == null ? null : Number(r.base_price),
-    }))
-    .filter((r) => r.url && Number.isFinite(r.base_price) && r.base_price > 0);
-  if (!clean.length) return { added: 0 };
+// Identity of a product for add/dedupe purposes: the designer URL, canonical
+// (fetch-time params stripped), trailing slash and case normalised. Anything
+// that reduces to the same string is the same product.
+export const productIdentity = (url) => canonicalUrl(String(url || "").trim()).replace(/\/+$/, "").toLowerCase();
+
+const cleanAddRows = (rows) => (rows || [])
+  .map((r) => ({
+    url: String(r.url || "").trim(),
+    mbo_url: String(r.mbo_url || "").trim(),
+    platform: String(r.platform || "").trim(),
+    custom_regex: String(r.custom_regex || "").trim(),
+    base_price: r.base_price === "" || r.base_price == null ? null : Number(r.base_price),
+  }))
+  .filter((r) => r.url && Number.isFinite(r.base_price) && r.base_price > 0);
+
+// Sorts an incoming sheet against what is already tracked, WITHOUT writing.
+//
+// addProducts used to insert unconditionally with a freshly generated key, so
+// it could never see an existing row: re-uploading an overlapping sheet stacked
+// copies, and 1,112 URLs ended up duplicated (1,157 extra rows, ~13% of the
+// catalog) — every one of them re-fetched on every run and shown several times
+// in Review.
+//
+//   new       — designer URL not tracked yet          -> insert
+//   unchanged — tracked, and mbo_url + base_price agree -> do nothing
+//   differs   — tracked, but mbo_url and/or base_price disagree -> opt-in only
+//
+// A BLANK mbo_url in the sheet is "no opinion", not a request to clear the one
+// on record — a sheet that only carries designer URLs must not wipe MBO URLs.
+export async function classifyProductRows(mboId, rows) {
+  const clean = cleanAddRows(rows);
+  const invalid = (rows || []).length - clean.length;
+  const existing = await withTenant(mboId, (db) =>
+    db.q("SELECT key, url, mbo_url, base_price, brand FROM products WHERE mbo_id=$1", [mboId]));
+  const byId = new Map();
+  for (const p of existing) {
+    const id = productIdentity(p.url);
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push(p);
+  }
+  const fresh = [], unchanged = [], differs = [];
+  const seen = new Set();
+  for (const r of clean) {
+    const id = productIdentity(r.url);
+    const hits = byId.get(id);
+    if (!hits) {
+      // A URL listed twice in one sheet is one product, not two — otherwise the
+      // upload reintroduces exactly the duplication this function exists to stop.
+      if (seen.has(id)) continue;
+      seen.add(id);
+      fresh.push({ ...r, brand: brandOf(r.url) });
+      continue;
+    }
+    const cur = hits[0];
+    const mboChanged = !!r.mbo_url && String(r.mbo_url).trim() !== String(cur.mbo_url || "").trim();
+    const priceChanged = Number(cur.base_price) !== Number(r.base_price);
+    if (!mboChanged && !priceChanged) {
+      unchanged.push({ url: cur.url, brand: cur.brand, base_price: cur.base_price, copies: hits.length });
+    } else {
+      differs.push({ url: cur.url, brand: cur.brand, copies: hits.length,
+        // Exact keys of every copy — the update targets these rather than
+        // re-matching on URL text, which duplicate copies can spell differently
+        // (one carrying a query param, another not).
+        keys: hits.map((h) => h.key),
+        old_base: cur.base_price, new_base: r.base_price, price_changed: priceChanged,
+        old_mbo_url: cur.mbo_url || "", new_mbo_url: mboChanged ? r.mbo_url : "", mbo_changed: mboChanged });
+    }
+  }
+  return { new: fresh, unchanged, differs, invalid };
+}
+
+// Inserts the genuinely new rows. Existing products are left alone unless
+// applyDiffs is set, and even then only the fields that actually disagree move.
+export async function addProducts(mboId, rows, { applyDiffs = false } = {}) {
+  const cls = await classifyProductRows(mboId, rows);
+  if (!cls.new.length && !(applyDiffs && cls.differs.length)) {
+    return { added: 0, updated: 0, unchanged: cls.unchanged.length, differs: cls.differs.length };
+  }
   return withTenant(mboId, async (db) => {
     let idx = num((await db.client.query(
       "SELECT COALESCE(MAX(split_part(key,'|',1)::int),0) m FROM products WHERE mbo_id=$1", [mboId]
     )).rows[0].m);
     let added = 0;
-    for (const r of clean) {
+    for (const r of cls.new) {
       idx += 1;
       const key = `${String(idx).padStart(5, "0")}|${r.url.slice(0, 280)}`;
       const result = await db.client.query(
@@ -1093,7 +1160,26 @@ export async function addProducts(mboId, rows) {
       );
       added += result.rowCount;
     }
-    return { added };
+    let updated = 0;
+    if (applyDiffs && cls.differs.length) {
+      // Labels the audit rows the base_price trigger writes.
+      await db.client.query("SELECT set_config('app.base_source','sheet_add',true)");
+      for (const d of cls.differs) {
+        // Every copy of a duplicated URL is updated, not just the first —
+        // leaving the others behind would make the same product disagree
+        // with itself across Review rows.
+        const sets = [], params = [];
+        if (d.price_changed) { params.push(d.new_base); sets.push(`base_price=$${params.length}`); }
+        if (d.mbo_changed) { params.push(d.new_mbo_url); sets.push(`mbo_url=$${params.length}`); }
+        if (!sets.length) continue;
+        params.push(mboId, d.keys);
+        const r = await db.client.query(
+          `UPDATE products SET ${sets.join(",")}
+           WHERE mbo_id=$${params.length - 1} AND key = ANY($${params.length}::text[])`, params);
+        updated += r.rowCount;
+      }
+    }
+    return { added, updated, unchanged: cls.unchanged.length, differs: cls.differs.length };
   });
 }
 

@@ -368,10 +368,19 @@ tenantRouter.post("/products/add_preview", upload.single("file"), wrap(async (re
   try { res.json({ ok: true, rows: store.parseAddSheet(req.file.buffer) }); }
   catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 }));
+// Sorts the incoming rows against what is already tracked, without writing —
+// new / unchanged / differs. The client shows the three groups so an upload
+// that overlaps the catalog adds only what is genuinely missing.
+tenantRouter.post("/products/classify", wrap(async (req, res) => {
+  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  res.json({ ok: true, ...(await store.classifyProductRows(req.mboId, rows)) });
+}));
 tenantRouter.post("/products/add", wrap(async (req, res) => {
   const mboId = req.mboId;
   const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
-  const r = await store.addProducts(mboId, rows);
+  // Existing rows move only when the user explicitly ticked the differs group.
+  const applyDiffs = req.body.apply_diffs === true || req.body.apply_diffs === "true";
+  const r = await store.addProducts(mboId, rows, { applyDiffs });
   res.json({ ok: true, ...r, counts: await store.counts(mboId) });
 }));
 

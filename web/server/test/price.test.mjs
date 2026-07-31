@@ -9,7 +9,7 @@ import {
 } from "../src/engine.js";
 import {
   roundFinal, computeFinal, matchTol, stateOf, brandOf, canonicalUrl,
-  normBrand, isPermanentError, liveBaseValue,
+  normBrand, isPermanentError, liveBaseValue, productIdentity,
 } from "../src/store.js";
 import { toInr, setOverrides } from "../src/fx.js";
 
@@ -207,6 +207,23 @@ test("INCIDENT: ?slug= returns a sibling's VARIATION first — take the variable
   assert.equal(pickWooProduct([variation], "rosetta-blouse-dracy-skirt").id, 29755);
   assert.equal(pickWooProduct([], "x"), null);
   assert.equal(pickWooProduct(null, "x"), null);
+});
+
+test("productIdentity: one product, however the URL is spelled", () => {
+  // Add-products dedupe hangs off this. A trailing slash, a capitalised host
+  // or a leftover fetch param must not make the same product look new — that
+  // is how 1,112 URLs ended up duplicated in the catalog.
+  const want = productIdentity("https://saakshakinni.com/product/rosetta-blouse-dracy-skirt");
+  for (const v of [
+    "https://saakshakinni.com/product/rosetta-blouse-dracy-skirt/",
+    "https://saakshakinni.com/product/rosetta-blouse-dracy-skirt?wmc-currency=INR",
+    "https://SAAKSHAKINNI.com/product/rosetta-blouse-dracy-skirt/",
+    "  https://saakshakinni.com/product/rosetta-blouse-dracy-skirt  ",
+  ]) assert.equal(productIdentity(v), want, v);
+  // Genuinely different products stay different — including the sibling slug
+  // that caused the Woo Store API mix-up.
+  assert.notEqual(productIdentity("https://saakshakinni.com/product/rosetta-blouse-dracy-skirt-2"), want);
+  assert.equal(productIdentity(""), "");
 });
 
 test("roundFinal rounds to the nearest 0/5/10 bucket", () => {

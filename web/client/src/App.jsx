@@ -753,6 +753,9 @@ function AddProducts({admin}) {
   const [rows,setRows]=useState([blankAddRow()]);
   const [preview,setPreview]=useState(null);
   const [busy,setBusy]=useState(false);
+  // Result of the new/unchanged/differs check, and whether the user opted in
+  // to also apply the differing rows. Nothing is written until `plan` exists.
+  const [plan,setPlan]=useState(null); const [applyDiffs,setApplyDiffs]=useState(false);
 
   const setCell=(i,k,v)=>setRows(rs=>rs.map((r,idx)=>idx===i?{...r,[k]:v}:r));
   const addRow=()=>setRows(rs=>[...rs,blankAddRow()]);
@@ -766,17 +769,32 @@ function AddProducts({admin}) {
     r.ok?setPreview(r.rows):toast(r.error||"Could not read file","err");
   };
 
-  const submit=async(payload,after)=>{
+  // Sort the rows against the catalog BEFORE offering to write anything: a
+  // sheet that overlaps what is already tracked should add only the genuinely
+  // missing links, not stack another copy of every row it repeats.
+  const check=async(payload)=>{
     if(!admin) return toast("Admin only","err");
     const valid=payload.filter(r=>r.url&&!r._error&&Number(r.base_price)>0);
-    if(!valid.length) return toast("Nothing valid to add — need a Designer URL and Base Price","err");
-    const skipped=payload.length-valid.length;
-    if(!confirm(`Add ${valid.length} new product(s) to the database?${skipped?` (${skipped} row(s) skipped — missing URL/price)`:""}\n\nThis only adds rows — nothing existing is changed or removed.`)) return;
+    if(!valid.length) return toast("Nothing valid — need a Designer URL and Base Price","err");
     setBusy(true);
-    const r=await aj("/api/products/add",{rows:valid});
+    const r=await aj("/api/products/classify",{rows:valid});
     setBusy(false);
-    r.ok?toast(`Added ${fmtInt(r.added)} product(s)${r.added<valid.length?` (${valid.length-r.added} already existed)`:""}`,"ok"):toast(r.error||"Failed","err");
-    if(r.ok) after();
+    if(!r.ok) return toast(r.error||"Could not check the rows","err");
+    setPlan({...r,rows:valid}); setApplyDiffs(false);
+  };
+  const commit=async(after)=>{
+    if(!admin||!plan) return;
+    const nNew=plan.new.length, nDiff=applyDiffs?plan.differs.length:0;
+    if(!nNew&&!nDiff) return toast("Nothing to do — every link is already tracked with the same details","ok");
+    if(!confirm(`Add ${nNew} new product(s)${nDiff?` and update ${nDiff} existing one(s)`:""}?\n\n`
+      +`${plan.unchanged.length} unchanged link(s) will be skipped.`
+      +`${!applyDiffs&&plan.differs.length?`\n${plan.differs.length} link(s) differ and will be LEFT ALONE (tick the box to include them).`:""}`)) return;
+    setBusy(true);
+    const r=await aj("/api/products/add",{rows:plan.rows,apply_diffs:applyDiffs});
+    setBusy(false);
+    if(!r.ok) return toast(r.error||"Failed","err");
+    toast(`Added ${fmtInt(r.added)}${r.updated?`, updated ${fmtInt(r.updated)}`:""}, skipped ${fmtInt(r.unchanged)} already-tracked`,"ok");
+    setPlan(null); after();
   };
 
   return <div style={{height:"100%",overflow:"auto"}}>
@@ -789,6 +807,55 @@ function AddProducts({admin}) {
       <button className={`tab${mode==="manual"?" active":""}`} onClick={()=>setMode("manual")}>Type it in</button>
       <button className={`tab${mode==="upload"?" active":""}`} onClick={()=>setMode("upload")}>Upload a sheet</button>
     </div>
+
+    {/* What WOULD happen, before anything is written. */}
+    {plan&&<div className="card" style={{padding:16,marginBottom:14}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
+        <span style={{fontSize:13,fontWeight:700}}>Checked against the catalog</span>
+        <div style={{flex:1}}/>
+        <button className="btn btn-ghost btn-sm" onClick={()=>setPlan(null)}><Icon n="x" s={12}/>Back</button>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
+        <Stat k="New — will be added"     v={fmtInt(plan.new.length)}       c="var(--green)"/>
+        <Stat k="Already tracked — skipped" v={fmtInt(plan.unchanged.length)} c="var(--on2)"/>
+        <Stat k="Differ — your call"      v={fmtInt(plan.differs.length)}   c={plan.differs.length?"var(--amber)":"var(--on3)"}/>
+      </div>
+
+      {plan.differs.length>0&&<>
+        <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--on2)",cursor:"pointer",userSelect:"none",marginBottom:8}}>
+          <input type="checkbox" checked={applyDiffs} onChange={e=>setApplyDiffs(e.target.checked)}/>
+          Also update these {plan.differs.length} existing product(s) — base price is what every mismatch is judged against
+        </label>
+        <div style={{maxHeight:220,overflow:"auto",marginBottom:12}}>
+          <table className="tbl">
+            <thead><tr>{["Product","Brand","Base now","→ Sheet","MBO URL",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+            <tbody>
+              {plan.differs.map((x,i)=><tr key={i} style={applyDiffs?undefined:{opacity:.55}}>
+                <td style={{maxWidth:340}}><span style={{...URL_WRAP,fontSize:11}}>{fullUrl(x.url)}</span>
+                  {x.copies>1&&<span style={{fontSize:10,color:"var(--amber)"}}> ×{x.copies} copies</span>}</td>
+                <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(x.brand||"").replace(/^www\./,"")}</td>
+                <td className="mono" style={{textAlign:"right"}}>{fmt(x.old_base)}</td>
+                <td className="mono" style={{textAlign:"right",fontWeight:700,color:x.price_changed?"var(--amber)":"var(--on3)"}}>
+                  {x.price_changed?fmt(x.new_base):"same"}</td>
+                <td style={{fontSize:11,color:x.mbo_changed?"var(--amber)":"var(--on3)"}}>{x.mbo_changed?"changes":"same"}</td>
+                <td/>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+      </>}
+
+      {plan.unchanged.length>0&&<div style={{fontSize:11,color:"var(--on3)",marginBottom:10}}>
+        {fmtInt(plan.unchanged.length)} link(s) are already tracked with the same base price — nothing will happen to them.
+        {plan.unchanged.some(u=>u.copies>1)&&<> Note: {fmtInt(plan.unchanged.filter(u=>u.copies>1).length)} of them already exist more than once in the database.</>}
+      </div>}
+      {plan.invalid>0&&<div style={{fontSize:11,color:"var(--red)",marginBottom:10}}>{fmtInt(plan.invalid)} row(s) skipped — missing URL or price.</div>}
+
+      <button className="btn btn-primary btn-sm" disabled={!admin||busy||(!plan.new.length&&!(applyDiffs&&plan.differs.length))}
+        onClick={()=>commit(()=>{ setRows([blankAddRow()]); setPreview(null); })}>
+        <Icon n="check" s={12}/>{busy?"Working…":`Add ${fmtInt(plan.new.length)} new${applyDiffs&&plan.differs.length?` + update ${fmtInt(plan.differs.length)}`:""}`}
+      </button>
+    </div>}
 
     {mode==="manual" && <div className="card" style={{padding:16}}>
       <table className="tbl">
@@ -814,8 +881,8 @@ function AddProducts({admin}) {
       <div style={{display:"flex",gap:8,marginTop:12}}>
         <button className="btn btn-ghost btn-sm" onClick={addRow}><Icon n="plus" s={12}/>Add row</button>
         <button className="btn btn-primary btn-sm" style={{marginLeft:"auto"}} disabled={!admin||busy}
-          onClick={()=>submit(rows,()=>setRows([blankAddRow()]))}>
-          <Icon n="check" s={12}/>{busy?"Adding…":"Add to database"}
+          onClick={()=>check(rows)}>
+          <Icon n="check" s={12}/>{busy?"Checking…":"Check against catalog"}
         </button>
       </div>
     </div>}
@@ -854,8 +921,8 @@ function AddProducts({admin}) {
           </table>
         </div>
         <button className="btn btn-primary btn-sm" style={{marginTop:12}} disabled={!admin||busy}
-          onClick={()=>submit(preview,()=>setPreview(null))}>
-          <Icon n="check" s={12}/>{busy?"Adding…":`Add ${preview.filter(r=>!r._error).length} to database`}
+          onClick={()=>check(preview)}>
+          <Icon n="check" s={12}/>{busy?"Checking…":`Check ${preview.filter(r=>!r._error).length} row(s) against catalog`}
         </button>
       </>}
     </div>}
@@ -1210,7 +1277,7 @@ function History({admin}) {
    run never does. Rows are ordered newest-change-first so the answer to "did it
    just update" is the top of the table.
 ═════════════════════════════════════════════════════════════ */
-const SRC_LABEL={shopify_push:"Shopify push",set_base:"Set base",set_base_all:"Set base (bulk)",sheet_sync:"Sheet sync",sheet_base:"Sheet update",observed:"Seen between runs",unknown:"—"};
+const SRC_LABEL={shopify_push:"Shopify push",set_base:"Set base",set_base_all:"Set base (bulk)",sheet_sync:"Sheet sync",sheet_base:"Sheet update",sheet_add:"Price list",observed:"Seen between runs",unknown:"—"};
 function BasePrice({admin}) {
   const [brands,setBrands]=useState([]);
   const [q,setQ]=useState(""); const [changed,setChanged]=useState(false);
