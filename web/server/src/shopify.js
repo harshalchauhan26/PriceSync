@@ -83,6 +83,33 @@ async function gql(endpoint, headers, query, variables) {
 }
 const gidNum = (gid) => String(gid || "").split("/").pop();
 
+// Fetches all product variants across pages using cursor pagination.
+// Shopify caps each page at 100; products with more require sequential requests.
+// Exported so the pagination logic can be unit-tested without a real Shopify store.
+export async function fetchAllVariants(run, ref) {
+  const first = ref.productId
+    ? await run(
+        "query($id: ID!) { product(id: $id) { id variants(first: 100) { nodes { id price } pageInfo { hasNextPage endCursor } } } }",
+        { id: `gid://shopify/Product/${ref.productId}` })
+    : await run(
+        "query($handle: String!) { productByHandle(handle: $handle) { id variants(first: 100) { nodes { id price } pageInfo { hasNextPage endCursor } } } }",
+        { handle: ref.handle });
+  const p = first.product || first.productByHandle;
+  if (!p) return null;
+  const productGid = p.id;
+  const variants = [...(p.variants?.nodes || [])];
+  let { hasNextPage, endCursor } = p.variants?.pageInfo || {};
+  while (hasNextPage) {
+    const next = await run(
+      "query($id: ID!, $after: String!) { product(id: $id) { variants(first: 100, after: $after) { nodes { id price } pageInfo { hasNextPage endCursor } } } }",
+      { id: productGid, after: endCursor });
+    const more = next.product?.variants;
+    variants.push(...(more?.nodes || []));
+    ({ hasNextPage, endCursor } = more?.pageInfo || {});
+  }
+  return { productGid, variants };
+}
+
 export function pushPrice(mboId, url, price) {
   return enqueuePush(mboId, () => _pushPrice(mboId, url, price));
 }
@@ -117,7 +144,7 @@ async function _pushPrice(mboId, url, price) {
     update_status: msg, status: msg,
   });
   try {
-    // 1 lookup + 1 bulk mutation per product, regardless of variant count.
+    // 1+ lookups (paginated if >100 variants) + 1 bulk mutation per product.
     let productGid, targets;
     if (ref.variantId) {
       const d = await run(
@@ -127,16 +154,11 @@ async function _pushPrice(mboId, url, price) {
       productGid = d.productVariant.product.id;
       targets = [d.productVariant];
     } else {
-      const d = ref.productId
-        ? await run("query($id: ID!) { product(id: $id) { id variants(first: 100) { nodes { id price } } } }",
-          { id: `gid://shopify/Product/${ref.productId}` })
-        : await run("query($handle: String!) { productByHandle(handle: $handle) { id variants(first: 100) { nodes { id price } } } }",
-          { handle: ref.handle });
-      const p = d.product || d.productByHandle;
-      if (!p) return fail(`${label} not found in store`);
-      targets = p.variants?.nodes || [];
-      if (!targets.length) return fail(`${label} has no variants`, gidNum(p.id));
-      productGid = p.id;
+      const pv = await fetchAllVariants(run, ref);
+      if (!pv) return fail(`${label} not found in store`);
+      productGid = pv.productGid;
+      targets = pv.variants;
+      if (!targets.length) return fail(`${label} has no variants`, gidNum(productGid));
     }
     const variantIds = targets.map((v) => gidNum(v.id));
     const oldPrices = targets.map((v) => ({ variant_id: gidNum(v.id), old_price: v.price }));
