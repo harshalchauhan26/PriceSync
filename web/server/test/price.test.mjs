@@ -44,6 +44,25 @@ test("INCIDENT: embedded JSON cents ARE flagged json so the caller descales", ()
   assert.equal(descaleIfCents(det.price), 1202500);
 });
 
+test("INCIDENT: sub-threshold Shopify cents (twentynine.co, houseofmasaba.com) landed 100x high", () => {
+  // Same page carries both the theme's cents JSON and a JSON-LD decimal price
+  // under the same "price" key; the regex takes the first (cents) match. A
+  // bare integer here is always cents regardless of size — "990000" sitting
+  // under the old 1M magnitude threshold is exactly how ₹9,900 rendered as
+  // ₹990,000 in Review.
+  const html = '"price":990000,"price_min":990000,"available":true "price":"9900.00"';
+  const det = extractPriceDetail(html);
+  assert.equal(det.source, "json");
+  assert.equal(det.isDecimal, false);
+  assert.equal(det.price / 100, 9900);
+});
+
+test("a decimal-formatted json price is a display amount, never divided", () => {
+  const det = extractPriceDetail('"lowPrice":"14000.00"');
+  assert.equal(det.isDecimal, true);
+  assert.equal(det.price, 14000);
+});
+
 test("INCIDENT: sale + struck-through original both tagged price -> take highest", () => {
   const html = '<span itemprop="price" content="4000"></span>' +
                '<span itemprop="price" content="8000"></span>';

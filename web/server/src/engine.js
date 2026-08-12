@@ -270,7 +270,11 @@ export function extractPriceDetail(html, customRegex = null, preferHigh = false)
   m = html.match(/itemprop=["']price["'][^>]*>([^<]+)</);
   if (m) return { price: sanitizePrice(m[1]), source: "itemprop" };
   m = html.match(/"(?:price|lowPrice)"\s*:\s*"?([0-9][0-9,.]*)"?/);
-  if (m) return { price: sanitizePrice(m[1]), source: "json" };
+  // A bare integer here is Shopify's own theme JSON (cents, e.g. "price":990000).
+  // A decimal-formatted match is a JSON-LD/schema display price living under the
+  // same key on the same page (e.g. "price":"9900.00") — the two can both be
+  // present, and this regex takes whichever comes first in the HTML.
+  if (m) return { price: sanitizePrice(m[1]), source: "json", isDecimal: m[1].includes(".") };
   m = html.match(/woocommerce-Price-amount[^>]*>(?:<bdi>)?\s*(?:<span[^>]*>[^<]*<\/span>)?\s*([0-9][0-9,.]*)/);
   if (m) return { price: sanitizePrice(m[1]), source: "woo" };
   return { price: null, source: null };
@@ -363,8 +367,12 @@ export async function extractShopify(fetcher, url, preferHigh = false) {
   // Only descale prices scraped from embedded JSON — Shopify theme JSON is
   // integer cents, but og:meta/itemprop/Woo markup is the display amount and
   // a real price above the threshold (INR couture) must not be divided.
+  // Within the "json" bucket, a decimal match (JSON-LD sharing the same key)
+  // is already a display price; a bare integer is cents regardless of size —
+  // the old magnitude-only threshold left genuine sub-₹10,000 cents values
+  // (e.g. "price":990000) undivided because they sat under it.
   const det = extractPriceDetail(html, null, preferHigh);
-  let price = det.source === "json" ? descaleIfCents(det.price) : det.price;
+  let price = det.source === "json" ? (det.isDecimal ? det.price : det.price / 100) : det.price;
   // HTML meta/JSON-LD advertise the SALE price; the theme's embedded product
   // JSON carries the original. First occurrence belongs to the main product.
   const cm = html.match(/"compare_at_price"\s*:\s*"?(\d+(?:\.\d+)?)"?/);
