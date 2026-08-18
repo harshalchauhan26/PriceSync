@@ -53,9 +53,16 @@ const SCHEMA = [
   // can stop re-fetching known-dead URLs; the row stays state=\'error\' and
   // still shows in Review. Never auto-set from a single failure, never a DELETE.
   'ALTER TABLE products ADD COLUMN IF NOT EXISTS verified_dead_at TIMESTAMPTZ',
+  // BUG-021: base_price alone is ambiguous — 3000 could be INR, USD or CAD.
+  // Set at import/add time from the brand's usd/native-currency config, and
+  // kept current by promoteLiveToBase() on every successful baseline update.
+  // matchTol() reads this instead of inferring tolerance scale from whatever
+  // currency happened to come back on the fetch that triggered the compare.
+  'ALTER TABLE products ADD COLUMN IF NOT EXISTS base_currency TEXT NOT NULL DEFAULT \'INR\'',
   'CREATE TABLE IF NOT EXISTS import_catalog (' +
     'key TEXT PRIMARY KEY, mbo_url TEXT, url TEXT, platform TEXT,' +
     'custom_regex TEXT, brand TEXT, base_price DOUBLE PRECISION, imported_at TEXT)',
+  'ALTER TABLE import_catalog ADD COLUMN IF NOT EXISTS base_currency TEXT NOT NULL DEFAULT \'INR\'',
   'CREATE INDEX IF NOT EXISTS ix_import_catalog_brand ON import_catalog(brand)',
   'CREATE TABLE IF NOT EXISTS price_history (' +
     'id BIGSERIAL PRIMARY KEY, key TEXT, url TEXT, brand TEXT,' +
@@ -810,6 +817,18 @@ export async function setNativeCurrencyBrands(mboId, obj) {
   return clean;
 }
 
+// BUG-021: resolves a brand to the currency its base_price/base_usd is
+// actually denominated in — a native-currency brand's own currency, a
+// USD-fetch brand's USD, otherwise INR. Computed once per import/add batch
+// and reused per-row rather than re-querying meta per product.
+export async function baseCurrencyResolver(mboId) {
+  const [native, usd] = await Promise.all([nativeCurrencyBrands(mboId), usdFetchBrandSet(mboId)]);
+  return (brand) => {
+    const nb = normBrand(brand);
+    return native[nb] || (usd.has(nb) ? "USD" : "INR");
+  };
+}
+
 // ---- approval archive ----
 const HIST_COLS = `mbo_id,key,mbo_url,url,platform,brand,base_price,live_price,currency,delta,
   status,markup_pct,ref,final_price,note,approved_by,approved_at`;
@@ -820,9 +839,15 @@ export async function liveBaseValue(mboId, prow) {
   const isNative = !!(nativeCur && curUp === nativeCur);
   const baseNew = isNative ? Number(prow.live_price) : await toInr(mboId, prow.live_price, curUp);
   if (baseNew == null || !Number.isFinite(baseNew) || baseNew <= 0) return null;
+  const isUsd = !isNative && curUp === "USD";
   return {
     baseNew,
-    baseUsd: !isNative && curUp === "USD" ? Number(prow.live_price) : null,
+    baseUsd: isUsd ? Number(prow.live_price) : null,
+    // BUG-021: the currency this promoted baseline is actually denominated
+    // in — feeds products.base_currency so matchTol() no longer has to infer
+    // tolerance scale from whatever currency the triggering fetch happened
+    // to return.
+    baseCurrency: isNative ? nativeCur : (isUsd ? "USD" : "INR"),
     statusLabel: `Price Matched (${isNative ? nativeCur : "INR"})`,
   };
 }
@@ -835,11 +860,11 @@ export async function promoteLiveToBase(mboId, run, prow) {
   // surrounding transaction; a no-op if this runner isn't in one.
   try { await run("SELECT set_config('app.base_source','shopify_push',true)", []); } catch {}
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  await run(`UPDATE products SET base_price=$1, base_usd=$2, state='matched',
-      status=$3, delta=0, updated_at=$4 WHERE mbo_id=$5 AND key=$6`,
-    [next.baseNew, next.baseUsd, next.statusLabel, now, mboId, prow.key]);
+  await run(`UPDATE products SET base_price=$1, base_usd=$2, base_currency=$3, state='matched',
+      status=$4, delta=0, updated_at=$5 WHERE mbo_id=$6 AND key=$7`,
+    [next.baseNew, next.baseUsd, next.baseCurrency, next.statusLabel, now, mboId, prow.key]);
   await run("UPDATE import_catalog SET base_price=$1 WHERE mbo_id=$2 AND key=$3", [next.baseNew, mboId, prow.key]);
-  return { base_price: next.baseNew, base_usd: next.baseUsd, status: next.statusLabel };
+  return { base_price: next.baseNew, base_usd: next.baseUsd, base_currency: next.baseCurrency, status: next.statusLabel };
 }
 
 export async function archiveApproved(mboId, client, prow, final, markup, ref, note, by) {
@@ -1169,6 +1194,7 @@ export async function addProducts(mboId, rows, { applyDiffs = false } = {}) {
   if (!cls.new.length && !(applyDiffs && cls.differs.length)) {
     return { added: 0, updated: 0, unchanged: cls.unchanged.length, differs: cls.differs.length };
   }
+  const currencyOf = await baseCurrencyResolver(mboId);
   return withTenant(mboId, async (db) => {
     let idx = num((await db.client.query(
       "SELECT COALESCE(MAX(split_part(key,'|',1)::int),0) m FROM products WHERE mbo_id=$1", [mboId]
@@ -1177,10 +1203,11 @@ export async function addProducts(mboId, rows, { applyDiffs = false } = {}) {
     for (const r of cls.new) {
       idx += 1;
       const key = `${String(idx).padStart(5, "0")}|${r.url.slice(0, 280)}`;
+      const brand = brandOf(r.url);
       const result = await db.client.query(
-        `INSERT INTO products (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (mbo_id,key) DO NOTHING`,
-        [mboId, key, r.mbo_url, r.url, r.platform, r.custom_regex, brandOf(r.url), r.base_price]
+        `INSERT INTO products (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price,base_currency)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (mbo_id,key) DO NOTHING`,
+        [mboId, key, r.mbo_url, r.url, r.platform, r.custom_regex, brand, r.base_price, currencyOf(brand)]
       );
       added += result.rowCount;
     }
@@ -1236,6 +1263,7 @@ export async function importSheet(mboId, buf, { replace = true, contains = '', d
     (!needle || p.url.toLowerCase().includes(needle)) &&
     (!domainSet.size || domainSet.has(p.brand)));
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const currencyOf = await baseCurrencyResolver(mboId);
   const { n, removed } = await withTenant(mboId, async (db) => {
     let n = 0, removed = 0;
     if (replace) {
@@ -1247,18 +1275,18 @@ export async function importSheet(mboId, buf, { replace = true, contains = '', d
       const chunk = prods.slice(s, s + CH);
       const importVals = []; const importPh = [];
       chunk.forEach((p, j) => {
-        const b = j * 9;
-        importPh.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9})`);
+        const b = j * 10;
+        importPh.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10})`);
         importVals.push(mboId, p.key, p.mbo_url, p.url, p.platform, p.custom_regex,
-          p.brand, p.base_price, now);
+          p.brand, p.base_price, now, currencyOf(p.brand));
       });
       await db.client.query(`INSERT INTO import_catalog
-        (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price,imported_at)
+        (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price,imported_at,base_currency)
         VALUES ${importPh.join(',')}
         ON CONFLICT(mbo_id,key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
           platform=excluded.platform,custom_regex=excluded.custom_regex,
           brand=excluded.brand,base_price=excluded.base_price,
-          imported_at=excluded.imported_at`, importVals);
+          imported_at=excluded.imported_at,base_currency=excluded.base_currency`, importVals);
       n += chunk.length;
     }
     return { n, removed };
@@ -1289,13 +1317,13 @@ export async function commitImportToProducts(mboId) {
     // scrape-critical field the product already had on file — that's
     // exactly what mislabeled a batch of Shopify products as generic
     // and made them scrape at 100x (cents, undescaled) on 2026-07-14.
-    await db.client.query(`INSERT INTO products (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price)
-      SELECT mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price FROM import_catalog
+    await db.client.query(`INSERT INTO products (mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price,base_currency)
+      SELECT mbo_id,key,mbo_url,url,platform,custom_regex,brand,base_price,base_currency FROM import_catalog
       WHERE mbo_id=$1
       ON CONFLICT(mbo_id,key) DO UPDATE SET mbo_url=excluded.mbo_url,url=excluded.url,
         platform=COALESCE(NULLIF(excluded.platform,''), products.platform),
         custom_regex=COALESCE(NULLIF(excluded.custom_regex,''), products.custom_regex),
-        brand=excluded.brand,base_price=excluded.base_price`, [mboId]);
+        brand=excluded.brand,base_price=excluded.base_price,base_currency=excluded.base_currency`, [mboId]);
     const after = num((await db.client.query("SELECT COUNT(*) c FROM products WHERE mbo_id=$1", [mboId])).rows[0].c);
     return { added: after - before, staged, total: after };
   });

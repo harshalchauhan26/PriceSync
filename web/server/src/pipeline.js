@@ -154,7 +154,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
       state = "matched"; status = "Price Matched (USD)"; msg = `USD baseline set @ ${live}`;
     } else {
       const delta = live - baseUsd;
-      if (Math.abs(delta) <= engTol(baseUsd, "USD")) { state = "matched"; status = "Price Matched (USD)"; }
+      if (Math.abs(delta) <= engTol(baseUsd, prod.base_currency)) { state = "matched"; status = "Price Matched (USD)"; }
       else { state = "mismatch"; status = "Price Mismatch! (USD)"; }
       msg = `USD ${live} vs baseline ${baseUsd}`;
     }
@@ -166,7 +166,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   if (nativeCur && cur === nativeCur) {
     const delta = live - base;
     let state, status;
-    if (Math.abs(delta) <= engTol(base, nativeCur)) { state = "matched"; status = `Price Matched (${nativeCur})`; }
+    if (Math.abs(delta) <= engTol(base, prod.base_currency)) { state = "matched"; status = `Price Matched (${nativeCur})`; }
     else { state = "mismatch"; status = `Price Mismatch! (${nativeCur})`; }
     log(eng, { row: tag, domain: brand, url, currency: nativeCur, price: String(live),
       status: state === "matched" ? "Price Matched" : "Price Mismatch!", msg: `${nativeCur} ${live} vs baseline ${base}` });
@@ -177,7 +177,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   const delta = liveInr - base;
   const disp = ["INR", "UNKNOWN"].includes(cur) ? cur : `${cur}->INR`;
   let state, status;
-  if (Math.abs(delta) <= engTol(base, cur)) { state = "matched"; status = `Price Matched (${cur})`; }
+  if (Math.abs(delta) <= engTol(base, prod.base_currency)) { state = "matched"; status = `Price Matched (${cur})`; }
   else { state = "mismatch"; status = `Price Mismatch! (${cur})`; }
   log(eng, { row: tag, domain: brand, url, currency: disp, price: liveInr.toFixed(2),
     status: state === "matched" ? "Price Matched" : "Price Mismatch!",
