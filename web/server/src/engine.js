@@ -560,6 +560,14 @@ export async function extractRow(fetcher, url, platform, customRegex, opts = {})
   // API geo-falls-back and returns the egress country's currency.
   else if (opts.wooApi) res = await extractWooApi(fetcher, u, hi, opts.currencyParam || "wmc-currency");
   else if (customRegex) res = await extractCustom(fetcher, u, customRegex, hi); // regex wins for wordpress/custom/unknown
+  // BUG-024: an explicitly-labeled wordpress row with no custom_regex/wooApi
+  // used to fall into the catch-all below, which cents-descales any bare
+  // integer JSON price it finds — correct for real Shopify theme JSON, wrong
+  // for WooCommerce's JSON-LD (already a display amount, e.g. "price":"36000"
+  // meaning ₹36,000, not paise). That silently read labelanushree.com's
+  // ₹36,000 as ₹360. extractWordpress() already does this right (no
+  // descaling) but was never wired in.
+  else if (p === "wordpress") res = await extractWordpress(fetcher, u, hi);
   // Unknown/blank platform (e.g. a row imported from an external sheet with
   // no Platform Type column) — route through extractShopify anyway: it
   // probes the .js JSON endpoint first (harmless 404 on non-Shopify hosts,
