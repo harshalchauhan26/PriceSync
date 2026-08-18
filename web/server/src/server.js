@@ -13,7 +13,7 @@ import { config } from "./config.js";
 import { q, one, ping, pool } from "./db.js";
 import * as sec from "./security.js";
 import * as store from "./store.js";
-import { encrypt } from "./crypto.js";
+import { encrypt, decrypt } from "./crypto.js";
 import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
 import * as tenant from "./tenant.js";
@@ -124,6 +124,12 @@ app.get("/api/brands", wrap(async (req, res) => {
   res.json({ brands: rows });
 }));
 app.post("/api/auth/google", wrap(async (req, res) => {
+  // This route runs before sec.guard (it establishes the session guard
+  // checks), so it needs its own rate limit rather than inheriting guard's —
+  // ip-wide first to stop pre-token-verify abuse, email-scoped once we know
+  // who's being targeted.
+  const ip = sec.ipOf(req);
+  if (sec.rateLimited(`google-ip:${ip}`)) return res.status(429).json({ ok: false, error: "too many attempts — try again shortly" });
   if (!config.googleClientId) {
     return res.status(400).json({ ok: false, error: "Google sign-in not configured (set GOOGLE_CLIENT_ID in .env)" });
   }
@@ -136,6 +142,7 @@ app.post("/api/auth/google", wrap(async (req, res) => {
   if (String(info.email_verified) !== "true") return res.status(401).json({ ok: false, error: "Google email not verified" });
   const email = String(info.email || "").toLowerCase().trim();
   if (!email.includes("@")) return res.status(400).json({ ok: false, error: "no email in Google account" });
+  if (sec.rateLimited(`google-email:${email}`)) return res.status(429).json({ ok: false, error: "too many attempts for this account — try again shortly" });
   let u = await sec.getUser(email);
   if (!u) {
     // Self-serve signup via Google is open to anyone — but a brand-new account
@@ -791,7 +798,8 @@ tenantRouter.post("/integration/save", wrap(async (req, res) => {
     return res.status(400).json({ ok: false, error: "shop_domain must look like your-store.myshopify.com" });
   }
   const ex = await store.getStoreIntegration(mboId);
-  const token = (d.access_token || "").trim() ? encrypt(d.access_token.trim()) : (ex?.access_token || "");
+  const newTokenPlain = (d.access_token || "").trim();
+  const token = newTokenPlain ? encrypt(newTokenPlain) : (ex?.access_token || "");
   await q(`INSERT INTO integrations(mbo_id,brand,shop_domain,access_token,api_version,dry_run,updated_at)
     VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(mbo_id,brand) DO UPDATE SET shop_domain=excluded.shop_domain,
       access_token=excluded.access_token, api_version=excluded.api_version, dry_run=excluded.dry_run, updated_at=excluded.updated_at`,
@@ -799,9 +807,22 @@ tenantRouter.post("/integration/save", wrap(async (req, res) => {
       d.dry_run ? 1 : 0, new Date().toISOString()]);
   if (d.price_url_source) await setPriceUrlSource(mboId, d.price_url_source);
   invalidateShopifyCfg(mboId);
+  // Audit trail (BUG-012): record who changed the domain/token and when, not
+  // the values themselves — see store.logIntegrationChange's masking.
+  const changedByEmail = sec.currentUser(req)?.email;
+  if (shopDomain !== (ex?.shop_domain || "")) {
+    await store.logIntegrationChange(mboId, { action: "save", field: "shop_domain",
+      oldValue: ex?.shop_domain, newValue: shopDomain, changedByEmail });
+  }
+  if (newTokenPlain) {
+    await store.logIntegrationChange(mboId, { action: "save", field: "access_token",
+      oldValue: ex?.access_token ? decrypt(ex.access_token) : "", newValue: newTokenPlain, changedByEmail });
+  }
   const verify = shopDomain ? await verifyStore(mboId) : { ok: false, status: "no store connected" };
   res.json({ ok: true, verified: verify.ok, verify_status: verify.status });
 }));
+tenantRouter.get("/admin/integration-audit", sec.ownerOnly, wrap(async (req, res) =>
+  res.json({ entries: await store.getIntegrationAudit(req.mboId) })));
 tenantRouter.post("/integration/verify", wrap(async (req, res) => res.json(await verifyStore(req.mboId))));
 tenantRouter.get("/integrations", wrap(async (req, res) => res.json({ brands: await store.integrationBrands(req.mboId) })));
 tenantRouter.get("/push/cad", wrap(async (req, res) => res.json({ default: "USD", cad_brands: [...(await store.cadBrandSet(req.mboId))] })));

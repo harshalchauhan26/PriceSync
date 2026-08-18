@@ -176,6 +176,17 @@ const SCHEMA = [
   'CREATE INDEX IF NOT EXISTS ix_bpa_mbo_key ON base_price_audit(mbo_id, key)',
   'CREATE INDEX IF NOT EXISTS ix_bpa_mbo_changed ON base_price_audit(mbo_id, changed_at DESC)',
 
+  // ---- integration audit (BUG-012) ----
+  // Shopify token/domain changes previously overwrote silently — no record of
+  // who changed what or what the prior value was, so a compromised admin
+  // account leaves no forensic trail. Values are masked (last 4 chars) before
+  // they ever reach this table.
+  'CREATE TABLE IF NOT EXISTS integration_audit (' +
+    'id BIGSERIAL PRIMARY KEY, mbo_id BIGINT REFERENCES mbo(id), action TEXT,' +
+    'field TEXT, old_value_masked TEXT, new_value_masked TEXT,' +
+    'changed_by_email TEXT, changed_at TIMESTAMPTZ DEFAULT now())',
+  'CREATE INDEX IF NOT EXISTS ix_integration_audit_mbo ON integration_audit(mbo_id, changed_at DESC)',
+
   // AFTER UPDATE OF base_price: a pipeline run never lists that column in its
   // SET, so runs cost nothing here. `app.base_source` is set by the write path
   // when it can (see promoteLiveToBase); anything else records "unknown" rather
@@ -915,6 +926,19 @@ export async function historyList(mboId, brands, status) {
 export async function getStoreIntegration(mboId) {
   return withTenant(mboId, (db) => db.one(
     "SELECT * FROM integrations WHERE mbo_id=$1 AND brand=$2", [mboId, STORE_KEY]));
+}
+// Masks a secret/domain value to its last 4 characters for the audit trail —
+// enough to spot-check "did this change" without storing the value itself.
+const maskValue = (v) => v ? `...${String(v).slice(-4)}` : "";
+export async function logIntegrationChange(mboId, { action, field, oldValue, newValue, changedByEmail }) {
+  await withTenant(mboId, (db) => db.client.query(
+    `INSERT INTO integration_audit (mbo_id,action,field,old_value_masked,new_value_masked,changed_by_email)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [mboId, action, field, maskValue(oldValue), maskValue(newValue), changedByEmail || null]));
+}
+export async function getIntegrationAudit(mboId) {
+  return withTenant(mboId, (db) => db.q(
+    "SELECT action, field, old_value_masked, new_value_masked, changed_by_email, changed_at FROM integration_audit WHERE mbo_id=$1 ORDER BY changed_at DESC LIMIT 200", [mboId]));
 }
 export async function integrationBrands(mboId) {
   const brands = await withTenant(mboId, (db) => db.q(`SELECT brand, COUNT(*) c, COUNT(*) FILTER (WHERE state='mismatch') m
