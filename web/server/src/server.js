@@ -319,10 +319,15 @@ tenantRouter.post("/pipe/start", wrap(async (req, res) => {
   eng.log.length = 0; eng.logmeta.offset = 0;
   // Pipeline lifecycle emails go to whoever started the run, not a fixed address.
   eng.userEmail = req.session.email;
+  eng.startedByUid = req.session.uid; // BUG-016: recorded on the pipeline_runs bookend row.
   const runId = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 13) + "-" + req.session.uid;
   pipe.startPipeline(eng, runId);
   res.json({ ok: true });
 }));
+// BUG-016: read-only history of run bookends, including any 'interrupted'
+// by an unclean restart — lets the UI surface "your last run didn't finish
+// cleanly" instead of that being invisible outside the server log.
+tenantRouter.get("/pipe/runs", wrap(async (req, res) => res.json({ runs: await store.recentPipelineRuns(req.mboId) })));
 tenantRouter.post("/pipe/abort", (req, res) => { pipe.getEngine(req.mboId, req.session.uid).state.abort = true; res.json({ ok: true }); });
 tenantRouter.post("/pipe/clear_log", (req, res) => { const eng = pipe.getEngine(req.mboId, req.session.uid); eng.log.length = 0; eng.logmeta.offset = 0; res.json({ ok: true }); });
 tenantRouter.get("/pipe/status", (req, res) => {
@@ -1186,6 +1191,12 @@ if (fs.existsSync(CLIENT_DIST)) {
 const p = await ping();
 if (!p.ok) { console.error("[MBO] Supabase FAILED:", p.msg); process.exit(1); }
 await store.initStore();
+// BUG-016: any pipeline_runs row still 'running' at boot belongs to a
+// process that died mid-run (crash, OOM, deploy) — the in-memory ENGINES
+// state it described is gone regardless, so mark it interrupted rather than
+// leaving it looking permanently "in progress".
+const interrupted = await store.markStaleRunsInterrupted().catch((e) => { console.error("[MBO] pipeline_runs interrupt sweep failed:", e.message); return []; });
+if (interrupted.length) console.log(`[MBO] marked ${interrupted.length} stale pipeline run(s) interrupted on boot`);
 pipe.setDefault('data_source', 'database');
 // Restore Tenant #1's saved FX overrides (pre-existing behavior, preserved
 // exactly). Other tenants start with no override until they explicitly set

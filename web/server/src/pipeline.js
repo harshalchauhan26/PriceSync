@@ -407,6 +407,13 @@ export async function startPipeline(eng, runId) {
   const cfg = eng.config, st = eng.state;
   const mode = cfg.fresh_start ? "fresh" : "update";
   const vendors = (cfg.vendors && cfg.vendors.length) ? cfg.vendors : null;
+  // BUG-016: a DB bookend for this run, so a mid-run process death (Render
+  // spin-down, OOM, deploy) leaves a visible 'interrupted' record instead of
+  // silently vanishing — see markStaleRunsInterrupted(), called at boot.
+  // Best-effort: a DB hiccup writing the bookend must never block the run.
+  let dbRunId = null, runStatus = "interrupted";
+  try { dbRunId = await store.startPipelineRun(mboId, eng.startedByUid); }
+  catch (e) { log(eng, { row: "—", domain: "pipeline_runs", url: "", currency: "-", price: "-", status: "Warning", msg: "run bookend insert failed: " + e.message }); }
   try {
     eng.usdFetchBrands = await store.usdFetchBrandSet(mboId);
     eng.rangeHighBrands = await store.rangeHighBrandSet(mboId);
@@ -520,10 +527,13 @@ export async function startPipeline(eng, runId) {
     st.message = (st.abort ? "Aborted" : "Completed") +
       (st.retry_recovered ? ` (${st.retry_recovered} recovered)` : "") +
       (voided ? ` · ${voided} link(s) marked dead` : "") + ". Saved to database.";
+    runStatus = "completed";
   } catch (e) {
     st.phase = "done"; st.message = "Error: " + e.message;
   } finally {
     st.running = false;
+    try { await store.finishPipelineRun(mboId, dbRunId, { status: runStatus, total: st.total_rows, matched: st.matched, errors: st.errors }); }
+    catch (e) { log(eng, { row: "—", domain: "pipeline_runs", url: "", currency: "-", price: "-", status: "Warning", msg: "run bookend update failed: " + e.message }); }
   }
   if (!st.abort && !cfg.simulation) {
     const stats = { completed: st.completed, matched: st.matched, mismatch: st.mismatch,

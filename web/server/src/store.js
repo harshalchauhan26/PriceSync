@@ -224,6 +224,21 @@ const SCHEMA = [
        FROM price_history WHERE base_price IS NOT NULL) t
     WHERE prev IS NOT NULL AND prev <> base_price
       AND NOT EXISTS (SELECT 1 FROM base_price_audit WHERE source = 'observed')`,
+
+  // ---- pipeline run bookend (BUG-016, Decision-002) ----
+  // All pipeline state otherwise lives only in the in-memory ENGINES map — a
+  // Render spin-down/OOM/deploy mid-run silently loses all progress with no
+  // record it ever happened. This is the lightweight bookend, not full
+  // DB-backed resumable state (that's the deferred "full" fix in the doc):
+  // one row per run, 'running' at start, 'completed'/'interrupted' at end,
+  // and any row still 'running' after an unclean restart gets swept to
+  // 'interrupted' on the next boot (see markStaleRunsInterrupted()).
+  'CREATE TABLE IF NOT EXISTS pipeline_runs (' +
+    'id BIGSERIAL PRIMARY KEY, mbo_id BIGINT REFERENCES mbo(id), status TEXT NOT NULL DEFAULT \'running\',' +
+    'started_by BIGINT, started_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ,' +
+    'total INT, matched INT, errors INT)',
+  'CREATE INDEX IF NOT EXISTS ix_pipeline_runs_mbo ON pipeline_runs(mbo_id, started_at DESC)',
+  'CREATE INDEX IF NOT EXISTS ix_pipeline_runs_running ON pipeline_runs(status) WHERE status=\'running\'',
 ];
 
 export async function initStore() {
@@ -1375,6 +1390,34 @@ export async function markVerifiedDead(mboId) {
       RETURNING p.key`, [mboId]);
     return r.length;
   });
+}
+
+// ---- pipeline run bookend (BUG-016) ----
+export async function startPipelineRun(mboId, startedBy) {
+  const row = await withTenant(mboId, (db) => db.one(
+    "INSERT INTO pipeline_runs (mbo_id, started_by) VALUES ($1,$2) RETURNING id", [mboId, startedBy || null]));
+  return row.id;
+}
+export async function finishPipelineRun(mboId, runDbId, { status, total, matched, errors }) {
+  if (runDbId == null) return;
+  await withTenant(mboId, (db) => db.q(
+    `UPDATE pipeline_runs SET status=$1, finished_at=now(), total=$2, matched=$3, errors=$4
+     WHERE id=$5 AND mbo_id=$6`, [status, total ?? null, matched ?? null, errors ?? null, runDbId, mboId]));
+}
+// Called once at server startup: any row still 'running' belongs to a
+// process that died without reaching finishPipelineRun (crash, OOM, deploy)
+// — a real in-progress run only exists as long as its own process does, so
+// EVERY 'running' row at boot is, by definition, orphaned. Cross-tenant by
+// nature (a boot-time sweep, not a request scoped to one mbo).
+export async function markStaleRunsInterrupted() {
+  const r = await pool.query(`UPDATE pipeline_runs SET status='interrupted', finished_at=now()
+    WHERE status='running' RETURNING id, mbo_id`);
+  return r.rows;
+}
+export async function recentPipelineRuns(mboId, limit = 10) {
+  return withTenant(mboId, (db) => db.q(
+    `SELECT id, status, started_at, finished_at, total, matched, errors FROM pipeline_runs
+     WHERE mbo_id=$1 ORDER BY started_at DESC LIMIT $2`, [mboId, limit]));
 }
 export async function clearVerifiedDead(mboId, key) {
   await withTenant(mboId, (db) => db.q(
