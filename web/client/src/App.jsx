@@ -1141,12 +1141,17 @@ function Review({admin}) {
           {["Product","State","Base","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}
         </tr></thead>
         <tbody>
-          {pageRows.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const showConv=(it.currency||"INR").toUpperCase()!=="INR"; const picked=sel.has(it.id); return <tr key={it.id} style={picked?{background:"var(--sel,rgba(90,140,255,.10))"}:undefined}>
+          {pageRows.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const isUsdRow=(it.currency||"").toUpperCase()==="USD"&&it.base_usd!=null; const showConv=(it.currency||"INR").toUpperCase()!=="INR"&&!isUsdRow; const picked=sel.has(it.id); return <tr key={it.id} style={picked?{background:"var(--sel,rgba(90,140,255,.10))"}:undefined}>
             <td><input type="checkbox" title="Push only the ticked products" checked={picked} onChange={()=>toggleRow(it.id)}/></td>
             <td style={{maxWidth:420}}><a href={it.url} target="_blank" rel="noopener" title={it.url} style={{color:"var(--blue)",...URL_WRAP}}>{fullUrl(it.url)}</a>
               <div className="mono" style={{fontSize:10,color:"var(--on3)"}}>{(it.brand||"").replace(/^www\./,"")}</div></td>
             <td><span className="mono" style={{fontSize:11,fontWeight:700,color:pc}}>{pl}</span></td>
-            <td className="mono" style={{textAlign:"right"}}>{fmt(it.base_price)}</td>
+            {/* isUsdRow: base_usd is the real baseline this row is actually matched
+                against (see store.js saveResult) -- showing raw base_price (still
+                the original INR number) here would compare against a USD Live
+                price with no shared unit, exactly the "convert to INR to compare"
+                look Decision-006 removed from the matching logic itself. */}
+            <td className="mono" style={{textAlign:"right"}}>{fmt(isUsdRow?it.base_usd:it.base_price)}</td>
             <td className="mono" style={{textAlign:"right"}}>
               {fmt(it.live_price)} <span style={{color:"var(--on3)",fontSize:10}}>{it.currency}</span>
               {showConv&&<div style={{fontSize:10,color:"var(--on3)"}}>≈ ₹{fmt(li)}</div>}
