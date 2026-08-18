@@ -769,12 +769,13 @@ tenantRouter.get("/integration", wrap(async (req, res) => {
   const mboId = req.mboId;
   const c = await store.getStoreIntegration(mboId);
   res.json({ shop_domain: c?.shop_domain || "", api_version: c?.api_version || "2024-10",
-    dry_run: c ? !!(c.dry_run) : true, has_token: !!(c?.access_token),
+    dry_run: c ? !!(c.dry_run) : false, has_token: !!(c?.access_token),
     price_url_source: await getPriceUrlSource(mboId) });
 }));
 tenantRouter.post("/integration/save", wrap(async (req, res) => {
   const mboId = req.mboId;
   const d = req.body || {};
+  if (typeof d.dry_run !== "boolean") return res.status(400).json({ ok: false, error: "dry_run must be explicitly true or false" });
   const ex = await store.getStoreIntegration(mboId);
   const token = (d.access_token || "").trim() ? encrypt(d.access_token.trim()) : (ex?.access_token || "");
   await q(`INSERT INTO integrations(mbo_id,brand,shop_domain,access_token,api_version,dry_run,updated_at)
