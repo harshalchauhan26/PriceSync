@@ -629,27 +629,32 @@ tenantRouter.post("/review/rerun", wrap(async (req, res) => {
   const fresh = await pipe.rerunOne(mboId, it);
   res.json({ ok: true, item: fresh, state: fresh?.state, counts: await store.counts(mboId) });
 }));
-// Archives rows to History in the background, one row/transaction at a
-// time, so each finished row shows up in History immediately instead of
-// the whole batch appearing only once every row is done. Fire-and-forget —
-// the route responds before this runs.
-async function approveRowsInBackground(mboId, entries) {
+// Archives rows to History one row/transaction at a time. Awaited by both
+// callers (BUG-014): it used to be fire-and-forget, so the route responded
+// "queued: N" before any row was actually processed and a mid-batch DB error
+// was only ever logged server-side — the user saw "100 approved" when some
+// had silently failed. Returns real per-row counts instead.
+async function approveRows(mboId, entries) {
+  let approved = 0, failed = 0;
   for (const { prow, spec } of entries) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await approveOne(mboId, client, prow, spec);
       await client.query("COMMIT");
+      approved++;
     } catch (e) {
       await client.query("ROLLBACK").catch(() => {});
       console.error("[MBO] approve failed for", prow.key, ":", e.message);
+      failed++;
     } finally { client.release(); }
   }
+  return { approved, failed };
 }
 // "Approve Selected" (the checkbox multi-select) — archives to History
 // only; no Shopify push happens here (that's a separate, deliberate step
-// from the History tab). Responds immediately; archiving runs in the
-// background so rows land in History as each completes, not all at once.
+// from the History tab). Awaited (BUG-014) so the response carries real
+// approved/failed counts instead of a pre-guessed "queued: N".
 tenantRouter.post("/review/approve_selected", wrap(async (req, res) => {
   const mboId = req.mboId;
   const specs = Array.isArray(req.body.rows) ? req.body.rows : [];
@@ -660,13 +665,12 @@ tenantRouter.post("/review/approve_selected", wrap(async (req, res) => {
   const by = sec.currentUser(req)?.email;
   const entries = specs.map((spec) => ({ prow: byId.get(String(spec.id)), spec: { ...spec, _by: by } }))
     .filter((e) => e.prow);
-  res.json({ ok: true, queued: entries.length });
-  approveRowsInBackground(mboId, entries).catch((e) => console.error("[MBO] approve_selected background loop crashed:", e.message));
+  res.json({ ok: true, ...(await approveRows(mboId, entries)) });
 }));
 tenantRouter.post("/review/approve_all", wrap(async (req, res) => {
   // Archives every matching row to History; no Shopify push happens here —
-  // that's a separate, deliberate step from the History tab. Responds
-  // immediately; see approveRowsInBackground.
+  // that's a separate, deliberate step from the History tab. Awaited
+  // (BUG-014); see approveRows.
   const mboId = req.mboId;
   const kind = req.body.kind || "mismatch";
   const state = { mismatch: "mismatch", error: "error", resolved: "matched" }[kind] || "mismatch";
@@ -680,8 +684,7 @@ tenantRouter.post("/review/approve_all", wrap(async (req, res) => {
   const rows = await q(`SELECT * FROM products WHERE ${where}`, p);
   const by = sec.currentUser(req)?.email;
   const spec = { ...req.body, custom_price: null, _by: by };
-  res.json({ ok: true, queued: rows.length });
-  approveRowsInBackground(mboId, rows.map((prow) => ({ prow, spec }))).catch((e) => console.error("[MBO] approve_all background loop crashed:", e.message));
+  res.json({ ok: true, ...(await approveRows(mboId, rows.map((prow) => ({ prow, spec })))) });
 }));
 tenantRouter.post("/review/reject_all", wrap(async (req, res) => {
   const mboId = req.mboId;
