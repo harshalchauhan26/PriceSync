@@ -152,9 +152,11 @@ app.post("/api/auth/google", wrap(async (req, res) => {
     u = await sec.createUser(email, crypto.randomBytes(24).toString("hex"), "viewer", mbo.id, false);
     // Notify the owner that someone is waiting for approval — an unapproved
     // account can't do anything until a human acts, so a silent signup just
-    // strands the user. Fire-and-forget: a mail failure must never block the
-    // sign-in itself.
-    sendNewSignup({ email, brand: mbo.name }).catch((e) => console.error("[MBO] signup notify failed:", e.message));
+    // strands the user. Awaited (but never blocks the sign-in on failure): a
+    // dropped notification with no log line left the owner unaware anyone
+    // was waiting until they happened to check the user list.
+    try { await sendNewSignup({ email, brand: mbo.name }); }
+    catch (e) { console.warn("[MBO] approval email failed for", email, e.message); }
   } else if (u.role !== "super_admin") {
     // The brand the user picked must match the one their account belongs to —
     // email alone is never enough. The login page populates the picker from
