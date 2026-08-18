@@ -252,6 +252,52 @@ const SCHEMA = [
     'last_error TEXT, next_retry_at TIMESTAMPTZ DEFAULT now(),' +
     'status TEXT NOT NULL DEFAULT \'pending\', created_at TIMESTAMPTZ DEFAULT now())',
   'CREATE INDEX IF NOT EXISTS ix_mail_queue_pending ON mail_queue(next_retry_at) WHERE status=\'pending\'',
+
+  // ---- ON DELETE CASCADE for every mbo(id) FK (BUG-017, Decision-005) ----
+  // Every mbo_id FK above was added inline (ADD COLUMN ... REFERENCES mbo(id))
+  // with no ON DELETE rule, so deleting a tenant left every one of its rows
+  // behind — including encrypted Shopify tokens in `integrations`. A future
+  // restore that reused the same auto-incremented mbo_id could then hand a
+  // new tenant another tenant's orphaned credentials.
+  //
+  // Guarded by confdeltype <> 'c' (not already CASCADE) rather than an
+  // unconditional drop+recreate on every boot: ADD CONSTRAINT on a FK
+  // re-validates every existing row, which would otherwise re-scan
+  // `products`/`price_history` in full on every single restart forever, not
+  // just once. No pre-migration orphan cleanup needed: every table here was
+  // already backfilled to mbo_id=1 before the original FK went on (see Phase
+  // A above), so there is no existing row whose mbo_id fails to reference a
+  // real mbo — a pre-existing orphan is provably not possible in this data.
+  //
+  // Deliberately CASCADE only, not the NOT NULL / RLS parts of the original
+  // BUG-017 writeup — Decision-005 scoped those out to the later Phase D
+  // pass (RLS in particular needs the dedicated BYPASSRLS role that doesn't
+  // exist yet, see db.js's withSuperAdmin).
+  `DO $$
+   DECLARE t text;
+   BEGIN
+     FOREACH t IN ARRAY ARRAY['products','import_catalog','price_history','review_history',
+       'integrations','meta','mismatch','error','resolved','base_price_audit',
+       'integration_audit','pipeline_runs','mail_queue']
+     LOOP
+       IF EXISTS (
+         SELECT 1 FROM pg_constraint c
+         JOIN pg_class rel ON rel.oid = c.conrelid
+         WHERE rel.relname = t AND c.contype = 'f' AND c.confrelid = 'mbo'::regclass
+           AND c.confdeltype <> 'c'
+       ) THEN
+         -- Isolated per table: one unexpected constraint name or a genuine
+         -- orphaned row (re-validated by ADD CONSTRAINT) must not abort the
+         -- whole boot-time migration for every OTHER table.
+         BEGIN
+           EXECUTE format('ALTER TABLE %I DROP CONSTRAINT IF EXISTS %I', t, t || '_mbo_id_fkey');
+           EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (mbo_id) REFERENCES mbo(id) ON DELETE CASCADE', t, t || '_mbo_id_fkey');
+         EXCEPTION WHEN OTHERS THEN
+           RAISE WARNING 'BUG-017: could not add ON DELETE CASCADE to %.mbo_id: %', t, SQLERRM;
+         END;
+       END IF;
+     END LOOP;
+   END $$;`,
 ];
 
 export async function initStore() {
