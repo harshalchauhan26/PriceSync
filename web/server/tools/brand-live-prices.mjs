@@ -33,7 +33,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { q, pool, ping } from "../src/db.js";
 import * as store from "../src/store.js";
-import { Fetcher, extractRow, extractShopify, requestedCurrency, withCurrencyParam } from "../src/engine.js";
+import { Fetcher, extractRow, extractShopify, requestedCurrency, withCurrencyParam, detectCurrency } from "../src/engine.js";
 import { toUsd } from "../src/fx.js";
 import { config } from "../src/config.js";
 
@@ -55,11 +55,22 @@ class LoggingFetcher extends Fetcher {
 const MARKETS_USD_CACHE = new Map();
 async function shopifyMarketsUsd(fetcher, domain, url, nativePrice, preferHigh) {
   if (MARKETS_USD_CACHE.get(domain) === false) return null;
-  let usPrice = null;
-  try { [usPrice] = await extractShopify(fetcher, withCurrencyParam(url, "country", "US"), preferHigh); } catch { /* fall through */ }
-  // A store without Markets USD just re-serves the native price unchanged —
-  // treating that as "USD" would silently mislabel a CAD/INR number.
-  const real = usPrice != null && Math.abs(usPrice - nativePrice) > 0.01;
+  const usUrl = withCurrencyParam(url, "country", "US");
+  let usPrice = null, usCur = null;
+  try {
+    [usPrice] = await extractShopify(fetcher, usUrl, preferHigh);
+    // BUG-025: extractShopify's own returned currency is unreliable here —
+    // its DOMAIN_CURRENCY cache is keyed by hostname only, so once the
+    // NATIVE-price fetch for this domain caches a currency (e.g. CAD), this
+    // ?country=US fetch inherits that stale label instead of detecting its
+    // own, even for a genuine Markets store. Detected fresh, off this
+    // request's own HTML, ignoring that cache — the only way to tell a real
+    // Markets conversion (manijassal.com: price differs, currency genuinely
+    // USD) apart from a same-currency international markup (houseofarmuse.com:
+    // price differs 1.25x, currency still INR).
+    usCur = detectCurrency((await fetcher.get(usUrl)).data);
+  } catch { /* fall through */ }
+  const real = usPrice != null && usCur === "USD" && Math.abs(usPrice - nativePrice) > 0.01;
   if (MARKETS_USD_CACHE.get(domain) === undefined) MARKETS_USD_CACHE.set(domain, real);
   return real ? usPrice : null;
 }
