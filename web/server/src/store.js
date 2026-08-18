@@ -645,6 +645,7 @@ export const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, 
 // brand-quirk config can never leak into or clobber another tenant's.
 const _cadCache = new Map();
 const _usdFetchCache = new Map();
+const _usdConvertCache = new Map();
 const _rangeHighCache = new Map();
 const _gentleCache = new Map();
 const _proxyCache = new Map();
@@ -692,6 +693,33 @@ export async function setUsdFetchBrands(mboId, list) {
 }
 export async function fetchCurrencyFor(mboId, brand) {
   return (await usdFetchBrandSet(mboId)).has(normBrand(brand)) ? "USD" : null;
+}
+
+// ---- per-brand USD-CONVERT (Decision-006) ----
+// Distinct from usd_fetch_brand_set: that set REQUESTS USD from the site
+// itself (?wmc-currency=USD) and fails loud if the site can't serve it — only
+// right for a brand with a genuine USD storefront. Most brands here have none
+// (plain INR designer sites, no currency switcher) — this set instead fetches
+// the NATIVE price as normal, then converts it to USD via fx.js for the
+// baseline/live-price/push comparison, same math brand-live-prices.mjs
+// already uses for its offline USD sheets. A brand in native_currency_brands
+// or usd_fetch_brand_set should not also be in this set — finalizeOne()
+// checks those first and returns before reaching the convert branch.
+export async function usdConvertBrandSet(mboId) {
+  const cached = _usdConvertCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.set;
+  const raw = await getMeta(mboId, "usd_convert_brands", "");
+  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  _usdConvertCache.set(mboId, { at: Date.now(), set });
+  return set;
+}
+export async function setUsdConvertBrands(mboId, list) {
+  const arr = (Array.isArray(list) ? list : String(list || "").split(","))
+    .map(normBrand).filter(Boolean);
+  const uniq = [...new Set(arr)];
+  await setMeta(mboId, "usd_convert_brands", uniq.join(","));
+  _usdConvertCache.delete(mboId);
+  return uniq;
 }
 
 // ---- per-brand RANGE price preference ----

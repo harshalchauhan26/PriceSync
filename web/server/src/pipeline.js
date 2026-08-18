@@ -1,6 +1,6 @@
 import pLimit from "p-limit";
 import { Fetcher, extractRow, requestedCurrency } from "./engine.js";
-import { toInr } from "./fx.js";
+import { toInr, toUsd } from "./fx.js";
 import { config } from "./config.js";
 import * as store from "./store.js";
 import { sendPipelineStarted, sendPipelineProgress, sendErrorsResolved, sendPipelineComplete } from "./mailer.js";
@@ -171,6 +171,27 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
     log(eng, { row: tag, domain: brand, url, currency: nativeCur, price: String(live),
       status: state === "matched" ? "Price Matched" : "Price Mismatch!", msg: `${nativeCur} ${live} vs baseline ${base}` });
     await store.saveResult(mboId, prod, status, live, cur, state, runId);
+    return state;
+  }
+  // Decision-006: this brand has no real USD storefront to fetch from (that's
+  // usdFetchBrands, checked above via fetchCur/cur==="USD") -- it fetched its
+  // normal native price, and we convert THAT to USD ourselves, the same
+  // fx.js math brand-live-prices.mjs already uses for its offline sheets.
+  if (cur !== "UNKNOWN" && eng.usdConvertBrands && eng.usdConvertBrands.has(normBrand(brand))) {
+    const liveUsd = await toUsd(mboId, live, cur);
+    const baseUsd = prod.base_usd;
+    let state, status, msg;
+    if (baseUsd == null) {
+      state = "matched"; status = "Price Matched (USD)"; msg = `USD baseline set @ ${liveUsd}`;
+    } else {
+      const delta = liveUsd - baseUsd;
+      if (Math.abs(delta) <= engTol(baseUsd, "USD")) { state = "matched"; status = "Price Matched (USD)"; }
+      else { state = "mismatch"; status = "Price Mismatch! (USD)"; }
+      msg = `USD ${liveUsd} vs baseline ${baseUsd} (native ${cur} ${live})`;
+    }
+    log(eng, { row: tag, domain: brand, url, currency: "USD", price: String(liveUsd),
+      status: state === "matched" ? "Price Matched" : "Price Mismatch!", msg });
+    await store.saveResult(mboId, prod, status, liveUsd, "USD", state, runId, { usdBaseline: true });
     return state;
   }
   const liveInr = await toInr(mboId, live, cur);
@@ -378,6 +399,7 @@ async function runPass(eng, rows, workers, fetcher, runId, onDone) {
 export async function rerunOne(mboId, prod) {
   const eng = { mboId, config: { simulation: false }, state: {}, log: [], logmeta: { offset: 0 } };
   eng.usdFetchBrands = await store.usdFetchBrandSet(mboId);
+  eng.usdConvertBrands = await store.usdConvertBrandSet(mboId);
   eng.rangeHighBrands = await store.rangeHighBrandSet(mboId);
   eng.proxyBrands = await store.proxyBrandSet(mboId);
   eng.localOnlyBrands = await store.localOnlyBrandSet(mboId);
@@ -416,6 +438,7 @@ export async function startPipeline(eng, runId) {
   catch (e) { log(eng, { row: "—", domain: "pipeline_runs", url: "", currency: "-", price: "-", status: "Warning", msg: "run bookend insert failed: " + e.message }); }
   try {
     eng.usdFetchBrands = await store.usdFetchBrandSet(mboId);
+    eng.usdConvertBrands = await store.usdConvertBrandSet(mboId);
     eng.rangeHighBrands = await store.rangeHighBrandSet(mboId);
     eng.gentleBrands = await store.gentleBrandSet(mboId);
     eng.proxyBrands = await store.proxyBrandSet(mboId);

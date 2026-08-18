@@ -493,9 +493,14 @@ async function approveOne(mboId, client, prow, body) {
     const nb = store.normBrand(prow.brand);
     const nativeCur = (await store.nativeCurrencyBrands(mboId))[nb];
     const isUsdFetch = (await store.usdFetchBrandSet(mboId)).has(nb);
+    // Decision-006: a usd_convert_brand_set row already has live_price/currency
+    // stored as USD by finalizeOne() (it converted the native fetch itself) —
+    // same shape as isUsdFetch's row, just a different reason the USD number
+    // exists, so it takes the identical no-round-trip path.
+    const isUsdConvert = !isUsdFetch && (await store.usdConvertBrandSet(mboId)).has(nb);
     if (nativeCur === "USD") {
       finalRaw = store.computeFinal(prow.base_price, prow.live_price, ref, markup, custom, false, 1);
-    } else if (isUsdFetch) {
+    } else if (isUsdFetch || isUsdConvert) {
       finalRaw = store.computeFinal(prow.base_usd, prow.live_price, ref, markup, custom, false, 1);
     } else {
       const liveInr = await toInr(mboId, prow.live_price, prow.currency);
