@@ -924,7 +924,7 @@ export async function integrationBrands(mboId) {
 
 // ---- import sheet (xlsx/csv) ----
 function rowToProduct(r, idx) {
-  const url = String(r["Designer Product URL"] || "").trim();
+  const url = canonicalUrl(String(r["Designer Product URL"] || "").trim());
   const mbo = String(r["MBO Product URL"] || "").trim();
   if (!url && !mbo) return null;
   const key = `${String(idx).padStart(5, "0")}|${(url || mbo).slice(0, 280)}`;
@@ -1055,7 +1055,7 @@ export function parseAddSheet(buf) {
   const ws = wb.Sheets[wb.SheetNames[0]];
   const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
   return raw.map((r) => {
-    const url = String(r["Designer Product URL"] || "").trim();
+    const url = canonicalUrl(String(r["Designer Product URL"] || "").trim());
     const mbo_url = String(r["MBO Product URL"] || "").trim();
     const platform = String(r["Platform Type"] || "").trim();
     const custom_regex = String(r["Custom Regex"] || "").trim();
