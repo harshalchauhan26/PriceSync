@@ -479,11 +479,29 @@ async function approveOne(mboId, client, prow, body) {
   const ref = hasAmount ? `amount:${amountCurrency}` : (body.ref || "live");
   const targetCur = await store.pushCurrencyFor(mboId, prow.brand);
   const targetRate = fx[targetCur] || 1;
-  const convert = true;
-  const liveInr = await toInr(mboId, prow.live_price, prow.currency);
-  const finalRaw = hasAmount
-    ? Math.round((amount * amountRate / targetRate) * 100) / 100
-    : store.computeFinal(prow.base_price, liveInr, ref, markup, custom, convert, targetRate);
+  let finalRaw;
+  if (hasAmount) {
+    finalRaw = Math.round((amount * amountRate / targetRate) * 100) / 100;
+  } else {
+    // BUG-023: a USD-native brand's price never needs an INR round-trip —
+    // toInr(USD->INR) then dividing by targetRate (INR->USD) cancels out
+    // mathematically, but each leg rounds to 2 decimals, so pushing it
+    // through anyway introduces FX drift that shouldn't exist. Same
+    // flag-checking pattern finalizeOne() (pipeline.js) already uses to
+    // decide a row is USD-native — native_currency_brands stores base_price
+    // directly in USD; usd_fetch_brand_set stores its USD baseline in base_usd.
+    const nb = store.normBrand(prow.brand);
+    const nativeCur = (await store.nativeCurrencyBrands(mboId))[nb];
+    const isUsdFetch = (await store.usdFetchBrandSet(mboId)).has(nb);
+    if (nativeCur === "USD") {
+      finalRaw = store.computeFinal(prow.base_price, prow.live_price, ref, markup, custom, false, 1);
+    } else if (isUsdFetch) {
+      finalRaw = store.computeFinal(prow.base_usd, prow.live_price, ref, markup, custom, false, 1);
+    } else {
+      const liveInr = await toInr(mboId, prow.live_price, prow.currency);
+      finalRaw = store.computeFinal(prow.base_price, liveInr, ref, markup, custom, true, targetRate);
+    }
+  }
   const final = store.roundFinal(finalRaw);
   const archived = await store.archiveApproved(mboId, client, prow, final, markup, ref, body.note || "", body._by);
   return { final, archived, pushCur: targetCur };
