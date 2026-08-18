@@ -36,6 +36,15 @@ const DEFAULT_APPEND_PARAMS = {
 // Every param the fetcher may append itself. Stripped before a URL is stored.
 export const FETCH_ONLY_PARAMS = ["wmc-currency", "currency", "country", "wcpbc-manual-country"];
 
+// BUG-019: appendParams (per-brand, DB-stored via relayParams) is user/admin
+// input reaching a fetch URL — a whitelist plus a plain-token value charset
+// stops both a stray key and an unescaped value from being injected. Every
+// key actually used in practice (including FETCH_ONLY_PARAMS entries like
+// wcpbc-manual-country, legitimately used as an appendParam — see
+// DEFAULT_APPEND_PARAMS above) is on this list; nothing outside it passes.
+const APPEND_PARAM_ALLOWED_KEYS = new Set(["country", "wmc-currency", "currency", "switch", "wcpbc-manual-country"]);
+const APPEND_PARAM_VALUE_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
 // Per-brand host swap applied at FETCH TIME ONLY — the stored product URL keeps
 // its original host (saveResult persists prod.url, which this never touches).
 // For a brand whose baseline we track in USD, the US storefront is the correct
@@ -533,9 +542,15 @@ export async function extractRow(fetcher, url, platform, customRegex, opts = {})
     ? withCurrencyParam(target, opts.currencyParam || "wmc-currency", opts.fetchCurrency)
     : target;
   // Per-brand extra query params (e.g. anitadongre's switch=true suppresses
-  // its geo-redirect when fetching from a foreign/relay IP).
-  if (Object.keys(appendParams).length) {
-    for (const [k, v] of Object.entries(appendParams)) u = withCurrencyParam(u, k, v);
+  // its geo-redirect when fetching from a foreign/relay IP). BUG-019: these
+  // come from a DB-stored per-brand config (relayParams), so a compromised
+  // row or fat-fingered admin edit could otherwise inject an arbitrary key
+  // into every fetch for that brand — whitelist + charset-validate here,
+  // the one place appendParams actually reaches a request URL, regardless
+  // of hardcoded (DEFAULT_APPEND_PARAMS) or DB-sourced origin.
+  for (const [k, v] of Object.entries(appendParams)) {
+    if (!APPEND_PARAM_ALLOWED_KEYS.has(k) || !APPEND_PARAM_VALUE_RE.test(String(v))) continue;
+    u = withCurrencyParam(u, k, v);
   }
   const hi = opts.preferHighPrice === true;
   let res;
