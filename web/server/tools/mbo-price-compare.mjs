@@ -1,11 +1,12 @@
-// Compare a brand's stored base_price against the MBO storefront's INR price.
+// Compare a brand's stored base_price against the MBO storefront's price.
 //
 //   node web/server/tools/mbo-price-compare.mjs --brand aisharao.com
+//   node web/server/tools/mbo-price-compare.mjs --brand amitaggarwal.com --currency USD
 //   node web/server/tools/mbo-price-compare.mjs --list          # brands A-Z
 //
-// Reads the MBO Product URL only, asks Shopify Markets for the INR presentment
-// (?currency=INR — the store itself is USD), and writes
-// <Brand>_StudioEast_INR.xlsx. Touches no database.
+// Reads the MBO Product URL only, asks Shopify Markets for the requested
+// presentment currency (default INR — the store itself is USD), and writes
+// <Brand>_StudioEast_<CUR>.xlsx. Touches no database.
 //
 // These two numbers are NOT the same quantity and are not expected to match:
 //   base_price      = the DESIGNER's price, what a mismatch is judged against
@@ -15,6 +16,8 @@
 // every product would read as matched against a comparison never made.
 import ExcelJS from "exceljs";
 import axios from "axios";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { q, pool, ping } from "../src/db.js";
 
 const arg = (f) => { const i = process.argv.indexOf(f); return i > -1 ? process.argv[i + 1] : null; };
@@ -22,9 +25,10 @@ const BRAND = arg("--brand");
 const MBO_ID = Number(arg("--mbo") || 1);
 const CONCURRENCY = Number(arg("--concurrency") || 3);
 const GAP_MS = Number(arg("--gap") || 250);
+const CURRENCY = (arg("--currency") || "INR").toUpperCase();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const jsUrl = (u) => { const x = new URL(u); return `${x.origin}${x.pathname.replace(/\/+$/, "")}.js?currency=INR`; };
+const jsUrl = (u) => { const x = new URL(u); return `${x.origin}${x.pathname.replace(/\/+$/, "")}.js?currency=${CURRENCY}`; };
 
 // Shopify throttles hard on a full-catalog sweep (a 8,777-row run lost 1,072
 // rows to 429 even at 1.2/s), so retries back off generously rather than
@@ -93,7 +97,7 @@ if (Object.keys(fails).length) { console.log("failures:"); Object.entries(fails)
 
 const wb = new ExcelJS.Workbook();
 const ws = wb.addWorksheet(BRAND.slice(0, 30));
-const C = ["designer_url", "mbo_url", "title", "base_price", "studio_east_inr", "diff", "ratio", "variant_range", "db_live_price", "db_state", "error"];
+const C = ["designer_url", "mbo_url", "title", "base_price", `studio_east_${CURRENCY.toLowerCase()}`, "diff", "ratio", "variant_range", "db_live_price", "db_state", "error"];
 ws.addRow(C); ws.getRow(1).font = { bold: true };
 ws.views = [{ state: "frozen", ySplit: 1 }];
 ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: C.length } };
@@ -103,7 +107,8 @@ out.forEach((o) => ws.addRow([o.url, o.mbo_url, o.title || "", o.base_price, o.p
   o.min != null && o.min !== o.max ? `${o.min}-${o.max}` : "", o.live_price, o.state, o.err || ""]));
 ws.columns.forEach((c, i) => { c.width = [56, 58, 30, 12, 16, 12, 9, 16, 13, 10, 26][i] || 16; });
 
-const file = `${BRAND.replace(/\.[a-z.]+$/, "").replace(/[^a-z0-9]/gi, "_")}_StudioEast_INR.xlsx`;
-await wb.xlsx.writeFile(`c:/Users/HARSHAL/OneDrive/Desktop/New folder (7)/${file}`);
+const file = `${BRAND.replace(/\.[a-z.]+$/, "").replace(/[^a-z0-9]/gi, "_")}_StudioEast_${CURRENCY}.xlsx`;
+const outDir = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../../..");
+await wb.xlsx.writeFile(path.join(outDir, file));
 console.log(`\nWrote ${file}. No database was touched.\n`);
 await pool.end();

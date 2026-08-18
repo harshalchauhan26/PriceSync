@@ -50,6 +50,16 @@ export async function toInr(mboId, amount, cur) {
   return Math.round(amount * (await rateOf(mboId, c)) * 100) / 100;
 }
 
+// Pivots any amount+currency through INR to USD — reuses toInr's passthrough
+// for INR/unknown-as-INR and rateOf's same cache/fallback/overrides, so this
+// stays consistent with every other currency figure the app shows.
+export async function toUsd(mboId, amount, cur) {
+  if (amount == null) return null;
+  const inr = await toInr(mboId, amount, cur);
+  if (inr == null) return null;
+  return Math.round((inr / (await rateOf(mboId, "USD"))) * 100) / 100;
+}
+
 // EUR/GBP included because Review's per-row override currency select offers
 // them — without a real rate the client previews those amounts at rate 1.
 export async function snapshot(mboId, curs = ["USD", "CAD", "EUR", "GBP", "INR"]) {
