@@ -778,20 +778,29 @@ tenantRouter.get("/integration", wrap(async (req, res) => {
     dry_run: c ? !!(c.dry_run) : false, has_token: !!(c?.access_token),
     price_url_source: await getPriceUrlSource(mboId) });
 }));
+// myshopify.com store domains only — a mistyped/placeholder domain (localhost,
+// ".local", arbitrary text) used to save silently and only surface at push
+// time as a generic "connection error".
+const SHOP_DOMAIN_RE = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
 tenantRouter.post("/integration/save", wrap(async (req, res) => {
   const mboId = req.mboId;
   const d = req.body || {};
   if (typeof d.dry_run !== "boolean") return res.status(400).json({ ok: false, error: "dry_run must be explicitly true or false" });
+  const shopDomain = (d.shop_domain || "").trim();
+  if (shopDomain && !SHOP_DOMAIN_RE.test(shopDomain)) {
+    return res.status(400).json({ ok: false, error: "shop_domain must look like your-store.myshopify.com" });
+  }
   const ex = await store.getStoreIntegration(mboId);
   const token = (d.access_token || "").trim() ? encrypt(d.access_token.trim()) : (ex?.access_token || "");
   await q(`INSERT INTO integrations(mbo_id,brand,shop_domain,access_token,api_version,dry_run,updated_at)
     VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(mbo_id,brand) DO UPDATE SET shop_domain=excluded.shop_domain,
       access_token=excluded.access_token, api_version=excluded.api_version, dry_run=excluded.dry_run, updated_at=excluded.updated_at`,
-    [mboId, store.STORE_KEY, (d.shop_domain || "").trim(), token, (d.api_version || "2024-10").trim(),
+    [mboId, store.STORE_KEY, shopDomain, token, (d.api_version || "2024-10").trim(),
       d.dry_run ? 1 : 0, new Date().toISOString()]);
   if (d.price_url_source) await setPriceUrlSource(mboId, d.price_url_source);
   invalidateShopifyCfg(mboId);
-  res.json({ ok: true });
+  const verify = shopDomain ? await verifyStore(mboId) : { ok: false, status: "no store connected" };
+  res.json({ ok: true, verified: verify.ok, verify_status: verify.status });
 }));
 tenantRouter.post("/integration/verify", wrap(async (req, res) => res.json(await verifyStore(req.mboId))));
 tenantRouter.get("/integrations", wrap(async (req, res) => res.json({ brands: await store.integrationBrands(req.mboId) })));
