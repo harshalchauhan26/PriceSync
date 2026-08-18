@@ -17,7 +17,7 @@ import { encrypt, decrypt } from "./crypto.js";
 import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
 import * as tenant from "./tenant.js";
-import { sendNewSignup, mailProvider, sendTestEmail } from "./mailer.js";
+import { sendNewSignup, mailProvider, sendTestEmail, mailQueueBacklog, startMailQueueWorker } from "./mailer.js";
 import { pushPrice, verifyStore, invalidateShopifyCfg } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
 import { startPushJob, getPushJob, runningPushJob, startReviewPushJob } from './push-job.js';
@@ -101,7 +101,7 @@ app.post("/api/register", wrap(async (req, res) => {
 // dashboard login: on Render the SMTP_* vars are sync:false (entered by hand),
 // so a deploy that silently lacks them sends nothing and looks identical to a
 // working one from the outside.
-app.get("/api/health", (req, res) => {
+app.get("/api/health", async (req, res) => {
   const active = pipe.runningCount();
   const { to, from } = config.smtp;
   // email_provider names the transport ("resend"/"brevo"/"sendgrid"/"smtp"/
@@ -109,9 +109,13 @@ app.get("/api/health", (req, res) => {
   // outbound 25/465/587 are blocked there — so seeing "smtp" in production is
   // itself the diagnosis for silent mail.
   const provider = mailProvider();
+  // BUG-015: a growing backlog with no other visible mail failure is
+  // otherwise invisible outside the DB. Best-effort — a health check must
+  // never itself fail because of this.
+  const mailQueueBacklogCount = await mailQueueBacklog().catch(() => null);
   res.json({ ok: true, running: active > 0, active_runs: active,
     email_configured: provider !== "none" && !!from, email_provider: provider,
-    mail_from_set: !!from, alert_to_set: !!to });
+    mail_from_set: !!from, alert_to_set: !!to, mail_queue_backlog: mailQueueBacklogCount });
 });
 app.get("/api/auth/google/config", (req, res) => res.json({ client_id: config.googleClientId }));
 // Public brand picker for the login/sign-up page. Deliberately narrow: slug +
@@ -1197,6 +1201,7 @@ await store.initStore();
 // leaving it looking permanently "in progress".
 const interrupted = await store.markStaleRunsInterrupted().catch((e) => { console.error("[MBO] pipeline_runs interrupt sweep failed:", e.message); return []; });
 if (interrupted.length) console.log(`[MBO] marked ${interrupted.length} stale pipeline run(s) interrupted on boot`);
+startMailQueueWorker(); // BUG-015: retries queued mail every 5 minutes.
 pipe.setDefault('data_source', 'database');
 // Restore Tenant #1's saved FX overrides (pre-existing behavior, preserved
 // exactly). Other tenants start with no override until they explicitly set

@@ -492,7 +492,7 @@ export async function startPipeline(eng, runId) {
       // only (see progressMail above).
       if (!halfSent && !cfg.simulation && progressMail && mainTotal > 0 && st.completed >= mainTotal / 2) {
         halfSent = true;
-        mailLog(eng, sendPipelineProgress({ to: eng.userEmail, done: st.completed, total: mainTotal }), "50%");
+        mailLog(eng, sendPipelineProgress({ mboId, to: eng.userEmail, done: st.completed, total: mainTotal }), "50%");
       }
     });
     if (!st.abort && cfg.safe_retry) {

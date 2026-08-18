@@ -148,7 +148,22 @@ async function postJson(url, headers, body) {
 // shape the callers already build ({ from, to, subject, text, attachments }) and
 // routes it over the configured provider's HTTPS API, falling back to SMTP.
 // Keeping ONE function means a provider swap never has to touch a call site.
-async function deliver(msg) {
+//
+// BUG-015: opts.queueOnFail is opt-in, not blanket — a failed pipeline-lifecycle
+// email is durably retried (see queueMail below), but sendTestEmail/sendNewSignup
+// still fail immediately with no retry, which is the UX those callers want (a
+// "test email" that silently retries for 15 minutes before ever reporting
+// failure defeats the point of the button).
+async function deliver(msg, opts = {}) {
+  try {
+    await deliverNow(msg);
+  } catch (e) {
+    if (opts.queueOnFail) await queueMail(msg, opts.mboId, e.message).catch((qe) =>
+      console.error("[MBO] mail_queue insert failed (mail is now lost):", qe.message));
+    throw e;
+  }
+}
+async function deliverNow(msg) {
   const provider = mailProvider();
   const from = parseFrom(msg.from);
   const rcpt = toList(msg.to);
@@ -183,6 +198,45 @@ async function deliver(msg) {
   }
   // SMTP. Works locally and on paid Render; blocked on Render's free plan.
   await transport().sendMail(msg);
+}
+
+const MAIL_RETRY_LIMIT = 3;
+const MAIL_RETRY_INTERVAL_MS = 5 * 60_000;
+async function queueMail(msg, mboId, error) {
+  const body = { from: msg.from, text: msg.text,
+    attachments: (msg.attachments || []).map((a) => ({ filename: a.filename, content: b64(a.content) })) };
+  await q(`INSERT INTO mail_queue (mbo_id, recipient, subject, body_json, last_error)
+    VALUES ($1,$2,$3,$4,$5)`, [mboId || null, msg.to, msg.subject, JSON.stringify(body), error || null]);
+}
+// Background retry loop for BUG-015 — call once at boot. Not exported for
+// re-entrant use: one interval per process is the intent, same as any other
+// singleton boot-time worker in this app.
+export function startMailQueueWorker() {
+  setInterval(() => { processMailQueueOnce().catch((e) => console.error("[MBO] mail_queue worker failed:", e.message)); },
+    MAIL_RETRY_INTERVAL_MS).unref();
+}
+async function processMailQueueOnce() {
+  const due = await q(`SELECT * FROM mail_queue WHERE status='pending' AND next_retry_at <= now() ORDER BY id LIMIT 20`);
+  for (const row of due) {
+    const body = row.body_json;
+    try {
+      await deliverNow({ from: body.from, to: row.recipient, subject: row.subject, text: body.text,
+        attachments: (body.attachments || []).map((a) => ({ filename: a.filename, content: Buffer.from(a.content, "base64") })) });
+      await q(`UPDATE mail_queue SET status='sent' WHERE id=$1`, [row.id]);
+    } catch (e) {
+      const attempt = row.attempt + 1;
+      const failed = attempt >= MAIL_RETRY_LIMIT;
+      await q(`UPDATE mail_queue SET attempt=$1, status=$2, last_error=$3,
+        next_retry_at=now() + interval '5 minutes' WHERE id=$4`,
+        [attempt, failed ? "failed" : "pending", e.message, row.id]);
+    }
+  }
+}
+// /api/health surfaces this — a growing backlog with no visible mail failures
+// elsewhere is otherwise invisible outside the DB.
+export async function mailQueueBacklog() {
+  const r = await q(`SELECT COUNT(*)::int c FROM mail_queue WHERE status='pending'`);
+  return r[0]?.c ?? 0;
 }
 
 // Domains that can never actually receive mail. This guard exists because
@@ -321,7 +375,7 @@ export async function sendTestEmail({ to } = {}) {
 }
 
 // Sent the moment a run kicks off.
-export async function sendPipelineStarted({ to, total, runId } = {}) {
+export async function sendPipelineStarted({ mboId, to, total, runId } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
   await deliver({
@@ -331,12 +385,12 @@ export async function sendPipelineStarted({ to, total, runId } = {}) {
       `• Products to check: ${total ?? "?"}\n• Run id: ${runId || "—"}\n\n` +
       `You'll get a note at the halfway mark and a full report with two ` +
       `attached sheets when it finishes.\n\n— MBO Tracker`,
-  });
+  }, { queueOnFail: true, mboId });
   return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback };
 }
 
 // Sent once, when the main pass crosses 50%.
-export async function sendPipelineProgress({ to, done, total } = {}) {
+export async function sendPipelineProgress({ mboId, to, done, total } = {}) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
   const pct = total ? Math.round((done / total) * 100) : 50;
@@ -345,7 +399,7 @@ export async function sendPipelineProgress({ to, done, total } = {}) {
     subject: `MBO Tracker — pipeline ${pct}% done (${done}/${total}) (${today()})`,
     text: `The pricing pipeline run is about halfway.\n\n` +
       `• Checked so far: ${done} of ${total} (${pct}%)\n\n— MBO Tracker`,
-  });
+  }, { queueOnFail: true, mboId });
   return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback };
 }
 
@@ -373,7 +427,7 @@ export async function sendErrorsResolved({ mboId, to, stats } = {}) {
       (attach.length ? `The attached sheet lists the ${rows.length} row(s) still in error.\n\n` : ``) +
       `— MBO Tracker`,
     attachments: attach,
-  });
+  }, { queueOnFail: true, mboId });
   return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback, recovered, remaining };
 }
 
@@ -467,7 +521,7 @@ export async function sendPipelineComplete({ mboId, to, stats, runId } = {}) {
       { filename: `price_updates_${today()}.xlsx`, content: Buffer.from(await wbUpdated.xlsx.writeBuffer()) },
       { filename: `price_fetch_all_${today()}.xlsx`, content: Buffer.from(await wbAll.xlsx.writeBuffer()) },
     ],
-  });
+  }, { queueOnFail: true, mboId });
   return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback, updated: updated.length, all: allRows.length };
 }
 

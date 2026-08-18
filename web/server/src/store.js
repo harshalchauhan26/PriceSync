@@ -239,6 +239,19 @@ const SCHEMA = [
     'total INT, matched INT, errors INT)',
   'CREATE INDEX IF NOT EXISTS ix_pipeline_runs_mbo ON pipeline_runs(mbo_id, started_at DESC)',
   'CREATE INDEX IF NOT EXISTS ix_pipeline_runs_running ON pipeline_runs(status) WHERE status=\'running\'',
+
+  // ---- mail queue (BUG-015, Decision-003) ----
+  // deliver() threw on provider errors and the pipeline's mailLog() only
+  // logged it — a transient SMTP/API outage (common on Render, where plain
+  // SMTP is blocked outright) permanently lost the completion report. Queued
+  // here instead; a background worker (mailer.js#startMailQueueWorker)
+  // retries every 5 minutes, up to 3 attempts, before giving up as 'failed'.
+  'CREATE TABLE IF NOT EXISTS mail_queue (' +
+    'id BIGSERIAL PRIMARY KEY, mbo_id BIGINT REFERENCES mbo(id), recipient TEXT NOT NULL,' +
+    'subject TEXT, body_json JSONB NOT NULL, attempt INT NOT NULL DEFAULT 0,' +
+    'last_error TEXT, next_retry_at TIMESTAMPTZ DEFAULT now(),' +
+    'status TEXT NOT NULL DEFAULT \'pending\', created_at TIMESTAMPTZ DEFAULT now())',
+  'CREATE INDEX IF NOT EXISTS ix_mail_queue_pending ON mail_queue(next_retry_at) WHERE status=\'pending\'',
 ];
 
 export async function initStore() {
