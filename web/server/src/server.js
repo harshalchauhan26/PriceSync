@@ -54,7 +54,7 @@ app.use(express.json({ limit: "2mb" }));
 app.use(session({
   store: new (connectPgSimple(session))({ pool, createTableIfMissing: true }),
   secret: config.secret, resave: false, saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: "lax", secure: config.isCloud, maxAge: 12 * 3600 * 1000 },
+  cookie: { httpOnly: true, sameSite: "strict", secure: config.isCloud, maxAge: 12 * 3600 * 1000 },
 }));
 
 // Log the real error server-side (with the request id) but return a generic
