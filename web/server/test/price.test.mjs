@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import {
   sanitizePrice, descaleIfCents, detectCurrency, extractPriceDetail,
   redirectedOffProduct, withCurrencyParam, wooApiUrl, extractRow,
-  pickWooProduct, FETCH_ONLY_PARAMS,
+  pickWooProduct, FETCH_ONLY_PARAMS, isUnsafeCustomRegex,
 } from "../src/engine.js";
 import {
   roundFinal, computeFinal, matchTol, stateOf, brandOf, canonicalUrl,
@@ -55,6 +55,23 @@ test("INCIDENT: sub-threshold Shopify cents (twentynine.co, houseofmasaba.com) l
   assert.equal(det.source, "json");
   assert.equal(det.isDecimal, false);
   assert.equal(det.price / 100, 9900);
+});
+
+test("BUG-010: isUnsafeCustomRegex rejects catastrophic-backtracking shapes", () => {
+  assert.equal(isUnsafeCustomRegex("(a+)+b"), true);
+  assert.equal(isUnsafeCustomRegex("(a|a)+b"), true);
+  assert.equal(isUnsafeCustomRegex("(.*?)+"), true);
+  assert.equal(isUnsafeCustomRegex("a".repeat(501)), true);
+  assert.equal(isUnsafeCustomRegex(""), true);
+  // Ordinary brand price regexes must keep working.
+  assert.equal(isUnsafeCustomRegex('"price"\\s*:\\s*"?([0-9.,]+)"?'), false);
+  assert.equal(isUnsafeCustomRegex("Rs\\.?\\s*([0-9,]+)"), false);
+});
+
+test("BUG-010: extractPriceDetail refuses to run an unsafe custom_regex", () => {
+  const det = extractPriceDetail('"price":"1200"', "(a+)+b");
+  assert.equal(det.price, null);
+  assert.equal(det.source, null);
 });
 
 test("a decimal-formatted json price is a display amount, never divided", () => {

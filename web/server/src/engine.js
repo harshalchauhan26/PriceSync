@@ -239,6 +239,20 @@ export function detectCurrency(text) {
   return null;
 }
 
+const CUSTOM_REGEX_MAX_LEN = 500;
+// Rejects the two catastrophic-backtracking shapes that actually hang V8's
+// regex engine: a quantified group containing another quantifier (`(a+)+`,
+// `(a*)+`), and a quantified alternation where a branch is a prefix of
+// another (`(a|a)+`, `(a|ab)+`). Not exhaustive ReDoS detection — see the
+// ponytail note at the call site.
+export function isUnsafeCustomRegex(pattern) {
+  const p = String(pattern || "");
+  if (!p || p.length > CUSTOM_REGEX_MAX_LEN) return true;
+  if (/\([^()]*[+*][^()]*\)[+*]/.test(p)) return true;
+  if (/\([^()]*\|[^()]*\)[+*]/.test(p)) return true;
+  return false;
+}
+
 // Returns { price, source }. The source matters because only prices read out
 // of embedded Shopify-style JSON ("price": 120250000) can be integer cents —
 // og:meta/itemprop/Woo markup always carries the display (decimal) amount, so
@@ -264,6 +278,14 @@ export function extractPriceDetail(html, customRegex = null, preferHigh = false)
   if (customRegex) {
     // No generic fallback on regex miss: removed/redirected product pages must
     // surface as "price not found", never as a random price from the page.
+    // BUG-010: a catastrophically backtracking custom_regex (nested quantifiers,
+    // quantified alternation) can hang this worker thread for minutes against
+    // 100KB+ page HTML. Guarded here — the one place every custom_regex actually
+    // executes — rather than at each of the several save paths that write it.
+    // ponytail: heuristic pattern-shape check, not a real ReDoS proof; swap for
+    // the re2 package (linear-time engine, see Research.md) if a pattern still
+    // slips through.
+    if (isUnsafeCustomRegex(customRegex)) return { price: null, source: null };
     try {
       const m = html.match(new RegExp(customRegex, "s"));
       if (m) {
