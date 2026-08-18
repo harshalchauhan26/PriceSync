@@ -199,6 +199,21 @@ export function isLocked(ip) {
 export const registerFail = (ip) => FAILS.set(ip, [...(FAILS.get(ip) || []), Date.now()]);
 export const clearFails = (ip) => FAILS.delete(ip);
 
+// Generic sliding-window limiter, same shape as FAILS/isLocked above but
+// keyed by any caller-chosen string (ip+path, ip, ip+email, ...) instead of
+// just ip — lets guard() rate-limit EVERY write route in one place, and lets
+// a pre-guard route like /api/auth/google reuse it under its own key.
+const RATE = new Map();
+const RATE_WINDOW = 60_000; const RATE_MAX = 10;
+export function rateLimited(key, max = RATE_MAX, windowMs = RATE_WINDOW) {
+  const now = Date.now();
+  const hits = (RATE.get(key) || []).filter((t) => now - t < windowMs);
+  const limited = hits.length >= max;
+  hits.push(now);
+  RATE.set(key, hits);
+  return limited;
+}
+
 // ---- sessions ----
 export function loginUser(req, user) {
   const sid = Math.random().toString(16).slice(2) + Date.now().toString(16);
@@ -267,7 +282,12 @@ export async function guard(req, res, next) {
     if (req.session.approved !== identity.approved) req.session.approved = identity.approved;
   } catch (e) { return res.status(500).json({ error: "auth check failed" }); }
   touch(req);
-  if (WRITE.has(req.method) && !isAdmin(req) && !isSuperAdmin(req)) return res.status(403).json({ error: "admin role required" });
+  if (WRITE.has(req.method)) {
+    // Keyed by (ip, path) so a noisy IP hammering one write route can't also
+    // starve every other write route's own budget, and vice versa.
+    if (rateLimited(`${ipOf(req)}:${p}`)) return res.status(429).json({ error: "too many requests — slow down" });
+    if (!isAdmin(req) && !isSuperAdmin(req)) return res.status(403).json({ error: "admin role required" });
+  }
   next();
 }
 // Owner-gated tenant routes (the in-app Users/Sessions console). A super_admin
