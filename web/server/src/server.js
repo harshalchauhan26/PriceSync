@@ -1217,5 +1217,14 @@ function shutdown(signal) {
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("unhandledRejection", (reason) => console.error("[MBO] unhandledRejection:", reason));
-process.on("uncaughtException", (err) => console.error("[MBO] uncaughtException:", err));
+// After an uncaught exception the process is in an unknown state (open
+// handles, half-written transactions, corrupted in-memory maps) — continuing
+// to serve requests from it is dangerous. Render restarts the instance
+// automatically, so exiting is strictly safer than staying up. Non-production
+// stays up so a local dev session doesn't die on every stray rejection.
+function fatal(label, err) {
+  console.error(`[MBO] ${label}:`, err);
+  if (config.isCloud) process.exit(1);
+}
+process.on("unhandledRejection", (reason) => fatal("unhandledRejection", reason));
+process.on("uncaughtException", (err) => fatal("uncaughtException", err));
