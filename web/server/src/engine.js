@@ -208,7 +208,17 @@ export function descaleIfCents(v) {
 
 export function detectCurrency(text) {
   if (!text) return null;
-  let m = text.match(/(?:og|product):price:currency["'][^>]*content=["']([A-Z]{3})["']|content=["']([A-Z]{3})["'][^>]*(?:og|product):price:currency/);
+  // Shopify.currency.active is a live, per-request JS global Shopify itself
+  // sets for the visitor's resolved Market \u2014 it must outrank every static
+  // meta/JSON-LD tag below, which are baked in at publish time for SEO and do
+  // NOT update per Market. sapanaamin.com's own og:price:currency says "USD"
+  // (frozen), while a Markets-localized visit genuinely returns
+  // Shopify.currency={"active":"INR","rate":"97.04"} with the price already
+  // converted to INR by Shopify itself \u2014 checking the static tag first read
+  // that INR-denominated number as USD, a ~97x currency mislabel.
+  let m = text.match(/Shopify\.currency\s*=\s*\{[^}]*?["']active["']\s*:\s*["']([A-Z]{3})["']/);
+  if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
+  m = text.match(/(?:og|product):price:currency["'][^>]*content=["']([A-Z]{3})["']|content=["']([A-Z]{3})["'][^>]*(?:og|product):price:currency/);
   if (m) { const c = (m[1] || m[2]).toUpperCase(); if (CURRENCIES.includes(c)) return c; }
   // A rupee symbol counts as evidence only when it actually labels a NUMBER.
   // us.anitadongre.com carries "India \u20B9" in its country-switcher dropdown while
@@ -223,8 +233,6 @@ export function detectCurrency(text) {
   m = text.match(/"(?:priceCurrency|price_currency|currency)"\s*:\s*"([A-Z]{3})"/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   m = text.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Z]{3})["']/);
-  if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
-  m = text.match(/Shopify\.currency\s*=\s*\{[^}]*?["']active["']\s*:\s*["']([A-Z]{3})["']/);
   if (m && CURRENCIES.includes(m[1].toUpperCase())) return m[1].toUpperCase();
   if (/\bC\$|\bCAD\b/.test(text)) return "CAD";
   if (/\bUSD\b/.test(text) || text.includes("$")) return "USD";
