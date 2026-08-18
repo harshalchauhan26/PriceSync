@@ -23,16 +23,18 @@ function productRefOf(url) {
 // The integration row rarely changes but was re-read from the DB (a remote
 // round-trip) for every single push — cache it and invalidate on save.
 // Keyed by mboId: one tenant's cached Shopify credentials must never be
-// served to another tenant's push.
+// served to another tenant's push. Only the STILL-ENCRYPTED row is cached —
+// the decrypted access_token must never sit in memory for 30s where a crash
+// dump, OOM kill, or --inspect session could read it. AES-256-GCM decryption
+// is ~0.5ms, negligible next to the DB round-trip this cache actually saves.
 const _cfgCache = new Map();
 export function invalidateShopifyCfg(mboId) { _cfgCache.delete(mboId); }
 async function cfg(mboId) {
   const cached = _cfgCache.get(mboId);
-  if (cached && Date.now() - cached.at < 30000) return cached.val;
-  const c = await getStoreIntegration(mboId);
-  const val = c ? { ...c, access_token: decrypt(c.access_token) } : null;
-  _cfgCache.set(mboId, { at: Date.now(), val });
-  return val;
+  let row;
+  if (cached && Date.now() - cached.at < 30000) row = cached.val;
+  else { row = await getStoreIntegration(mboId); _cfgCache.set(mboId, { at: Date.now(), val: row }); }
+  return row ? { ...row, access_token: decrypt(row.access_token) } : null;
 }
 
 // One serial push queue per tenant — otherwise tenant A's bulk push would
