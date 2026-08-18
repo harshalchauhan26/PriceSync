@@ -1,5 +1,5 @@
 import pLimit from "p-limit";
-import { Fetcher, extractRow, requestedCurrency } from "./engine.js";
+import { Fetcher, extractRow, requestedCurrency, shopifyMarketsUsd } from "./engine.js";
 import { toInr, toUsd } from "./fx.js";
 import { config } from "./config.js";
 import * as store from "./store.js";
@@ -177,8 +177,15 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   // usdFetchBrands, checked above via fetchCur/cur==="USD") -- it fetched its
   // normal native price, and we convert THAT to USD ourselves, the same
   // fx.js math brand-live-prices.mjs already uses for its offline sheets.
+  // EXCEPT cur may already be "USD" here: processOne's Shopify-Markets check
+  // (shopifyMarketsUsd, verified real via currency not just a differing
+  // number — BUG-025) can hand back a genuine USD price before this function
+  // ever runs. toUsd(x, "USD") is a same-currency round-trip through INR and
+  // back (multiply then divide by the same rate) -- mathematically a no-op
+  // but each leg rounds to 2 decimals, the exact needless-drift shape BUG-023
+  // already fixed elsewhere, so skip it here too rather than reintroduce it.
   if (cur !== "UNKNOWN" && eng.usdConvertBrands && eng.usdConvertBrands.has(normBrand(brand))) {
-    const liveUsd = await toUsd(mboId, live, cur);
+    const liveUsd = cur === "USD" ? live : await toUsd(mboId, live, cur);
     const baseUsd = prod.base_usd;
     let state, status, msg;
     if (baseUsd == null) {
@@ -272,6 +279,19 @@ async function processOne(eng, fetcher, prod, runId) {
         wooApi: (eng.wooApiBrands && eng.wooApiBrands.has(nb)) || undefined,
       });
   } catch (e) { errMsg = e.message; }
+  // Decision-006 follow-up: before falling back to fx.js conversion, check
+  // whether this Shopify brand has a REAL Shopify Markets USD price (verified
+  // by currency, not just a differing number — see BUG-025) rather than
+  // assuming none of the usd_convert_brand_set brands have one. If real,
+  // use it directly — it's Shopify's own authoritative number, not our
+  // estimate — and finalizeOne's existing USD-native branch takes it from here.
+  if (live != null && errMsg == null && platformKind === "shopify"
+    && eng.usdConvertBrands && eng.usdConvertBrands.has(nb)) {
+    try {
+      const marketsUsd = await shopifyMarketsUsd(f, new URL(url).host, url, live, preferHigh);
+      if (marketsUsd != null) { live = marketsUsd; currency = "USD"; }
+    } catch { /* fx.js fallback below handles it */ }
+  }
   return finalizeOne(eng, prod, live, currency, errMsg, runId);
 }
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -308,6 +328,7 @@ function runWorker(eng, rows, fetchOpts, runId, onDone) {
       workerData: {
         rows, fetch: fetchOpts,
         usdFetch: [...(eng.usdFetchBrands || [])],
+        usdConvert: [...(eng.usdConvertBrands || [])],
         rangeHigh: [...(eng.rangeHighBrands || [])],
         proxyBrands: [...(eng.proxyBrands || [])],
         proxyUrl: config.fetchProxyUrl || null,

@@ -3,13 +3,14 @@
 // finalizes (compare + save + log) so per-brand rules and writes stay in one place.
 import { workerData, parentPort } from "node:worker_threads";
 import pLimit from "p-limit";
-import { Fetcher, extractRow, requestedCurrency } from "./engine.js";
+import { Fetcher, extractRow, requestedCurrency, shopifyMarketsUsd } from "./engine.js";
 
-const { rows, fetch: fopts, usdFetch, rangeHigh, proxyBrands, proxyUrl, localOnly, relay,
+const { rows, fetch: fopts, usdFetch, usdConvert, rangeHigh, proxyBrands, proxyUrl, localOnly, relay,
   wooApi, relayParams, nativeCurrency } = workerData;
 
 const normBrand = (b) => String(b || "").toLowerCase().replace(/^www\./, "").trim();
 const usdSet = new Set(usdFetch || []);
+const usdConvertSet = new Set(usdConvert || []);
 const rangeSet = new Set(rangeHigh || []);
 const proxySet = new Set(proxyBrands || []);
 const localOnlySet = new Set(localOnly || []);
@@ -55,7 +56,18 @@ await Promise.all(rows.map((prod) => limit(async () => {
         wooApi: wooApiSet.has(brand) || undefined,
       }
     );
-    parentPort.postMessage({ type: "result", prod, live, currency });
+    // Decision-006 follow-up: same Shopify-Markets check as processOne's
+    // inline path (pipeline.js) -- verify a genuine USD Markets price
+    // (BUG-025: by currency, not just a differing number) before letting
+    // finalizeOne fall back to an fx.js estimate.
+    let finalLive = live, finalCurrency = currency;
+    if (live != null && platformKind === "shopify" && usdConvertSet.has(brand)) {
+      try {
+        const marketsUsd = await shopifyMarketsUsd(f, new URL(prod.url).host, (prod.url || "").trim(), live, preferHigh);
+        if (marketsUsd != null) { finalLive = marketsUsd; finalCurrency = "USD"; }
+      } catch { /* fx.js fallback on the main thread handles it */ }
+    }
+    parentPort.postMessage({ type: "result", prod, live: finalLive, currency: finalCurrency });
   } catch (e) {
     parentPort.postMessage({ type: "result", prod, live: null, currency: null, error: e.message });
   }

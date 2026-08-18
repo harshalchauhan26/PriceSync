@@ -33,7 +33,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { q, pool, ping } from "../src/db.js";
 import * as store from "../src/store.js";
-import { Fetcher, extractRow, extractShopify, requestedCurrency, withCurrencyParam, detectCurrency } from "../src/engine.js";
+import { Fetcher, extractRow, requestedCurrency, shopifyMarketsUsd } from "../src/engine.js";
 import { toUsd } from "../src/fx.js";
 import { config } from "../src/config.js";
 
@@ -42,37 +42,6 @@ import { config } from "../src/config.js";
 class LoggingFetcher extends Fetcher {
   constructor(o) { super(o); this.calls = []; }
   async get(url) { this.calls.push(url); return super.get(url); }
-}
-
-// Some Shopify stores have REAL multi-currency (Shopify Markets) enabled —
-// manijassal.com quotes CAD 350 natively but genuinely charges USD 270.47 to
-// a US buyer, which is NOT the same as 350 * a generic FX rate (Shopify adds
-// its own markup/rounding on top of the raw rate: 270.47/350 = 0.773, vs the
-// live market rate of ~0.719 fx.js would use — a ~7.5% gap). ?country=US on
-// the plain .js endpoint returns that exact authoritative number with zero
-// extra auth. Cached per-domain (not per-row) so a domain WITHOUT Markets
-// (the common case) only pays this extra request once, not on every product.
-const MARKETS_USD_CACHE = new Map();
-async function shopifyMarketsUsd(fetcher, domain, url, nativePrice, preferHigh) {
-  if (MARKETS_USD_CACHE.get(domain) === false) return null;
-  const usUrl = withCurrencyParam(url, "country", "US");
-  let usPrice = null, usCur = null;
-  try {
-    [usPrice] = await extractShopify(fetcher, usUrl, preferHigh);
-    // BUG-025: extractShopify's own returned currency is unreliable here —
-    // its DOMAIN_CURRENCY cache is keyed by hostname only, so once the
-    // NATIVE-price fetch for this domain caches a currency (e.g. CAD), this
-    // ?country=US fetch inherits that stale label instead of detecting its
-    // own, even for a genuine Markets store. Detected fresh, off this
-    // request's own HTML, ignoring that cache — the only way to tell a real
-    // Markets conversion (manijassal.com: price differs, currency genuinely
-    // USD) apart from a same-currency international markup (houseofarmuse.com:
-    // price differs 1.25x, currency still INR).
-    usCur = detectCurrency((await fetcher.get(usUrl)).data);
-  } catch { /* fall through */ }
-  const real = usPrice != null && usCur === "USD" && Math.abs(usPrice - nativePrice) > 0.01;
-  if (MARKETS_USD_CACHE.get(domain) === undefined) MARKETS_USD_CACHE.set(domain, real);
-  return real ? usPrice : null;
 }
 
 // Fetches every row.url for `brand`, resolves each price + currency + USD
