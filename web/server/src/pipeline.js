@@ -49,6 +49,22 @@ export function getEngine(mboId, uid) {
   if (!e) { e = newEngine(mboId); ENGINES.set(k, e); }
   return e;
 }
+export function anyRunning(mboId) {
+  for (const [k, e] of ENGINES) if (k.startsWith(`${mboId}:`) && e.state.running) return true;
+  return false;
+}
+
+// Chains onto the tenant's pending lock so overlapping POST /pipe/start
+// requests for the same mboId (from different users, hence different
+// engines) serialize their check-and-set of state.running instead of both
+// passing the "not running" check and starting duplicate runs.
+const MBO_LOCKS = new Map();
+export function withMboLock(mboId, fn) {
+  const prev = MBO_LOCKS.get(mboId) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  MBO_LOCKS.set(mboId, run.then(() => {}, () => {}));
+  return run;
+}
 export function runningCount() {
   let n = 0;
   for (const e of ENGINES.values()) if (e.state.running) n++;

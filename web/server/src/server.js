@@ -290,19 +290,23 @@ tenantRouter.post("/products/set_currency", wrap(async (req, res) => {
 tenantRouter.post("/pipe/start", wrap(async (req, res) => {
   const mboId = req.mboId;
   const eng = pipe.getEngine(mboId, req.session.uid);
-  if (eng.state.running) return res.status(409).json({ error: "already running" });
-  if (pipe.runningCount() >= MAX_CONCURRENT_RUNS) {
-    return res.status(429).json({ error: `too many runs in progress (max ${MAX_CONCURRENT_RUNS}) — try again shortly` });
-  }
-  const source = eng.config.data_source === 'imported' ? 'imported' : 'database';
-  const sourceCount = source === 'imported' ? await store.countImported(mboId) : (await store.counts(mboId)).total;
-  if (sourceCount === 0) {
-    return res.status(400).json({ error: source === 'imported'
-      ? "no uploaded sheet products - upload a sheet or turn the source toggle off"
-      : "no products in Supabase database" });
-  }
-  Object.assign(eng.state, { running: true, abort: false, phase: "main", completed: 0, matched: 0,
-    mismatch: 0, errors: 0, retry_total: 0, retry_completed: 0, retry_recovered: 0, started_at: Date.now() });
+  const denied = await pipe.withMboLock(mboId, async () => {
+    if (pipe.anyRunning(mboId)) return { status: 409, error: "already running" };
+    if (pipe.runningCount() >= MAX_CONCURRENT_RUNS) {
+      return { status: 429, error: `too many runs in progress (max ${MAX_CONCURRENT_RUNS}) — try again shortly` };
+    }
+    const source = eng.config.data_source === 'imported' ? 'imported' : 'database';
+    const sourceCount = source === 'imported' ? await store.countImported(mboId) : (await store.counts(mboId)).total;
+    if (sourceCount === 0) {
+      return { status: 400, error: source === 'imported'
+        ? "no uploaded sheet products - upload a sheet or turn the source toggle off"
+        : "no products in Supabase database" };
+    }
+    Object.assign(eng.state, { running: true, abort: false, phase: "main", completed: 0, matched: 0,
+      mismatch: 0, errors: 0, retry_total: 0, retry_completed: 0, retry_recovered: 0, started_at: Date.now() });
+    return null;
+  });
+  if (denied) return res.status(denied.status).json({ error: denied.error });
   eng.log.length = 0; eng.logmeta.offset = 0;
   // Pipeline lifecycle emails go to whoever started the run, not a fixed address.
   eng.userEmail = req.session.email;
