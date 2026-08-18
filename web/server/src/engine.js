@@ -249,7 +249,17 @@ export function extractPriceDetail(html, customRegex = null, preferHigh = false)
   // must capture the top of a variable-product price range.
   if (preferHigh) {
     const h = html.match(/"highPrice"\s*:\s*"?([0-9][0-9,.]*)"?/);
-    if (h) return { price: sanitizePrice(h[1]), source: "jsonld" };
+    if (h) {
+      const high = sanitizePrice(h[1]);
+      const l = html.match(/"lowPrice"\s*:\s*"?([0-9][0-9,.]*)"?/);
+      const low = l ? sanitizePrice(l[1]) : null;
+      // A highPrice with no matching lowPrice on the page, or one more than 5x
+      // it, is very likely a cross-selling/upsell widget's own JSON-LD block
+      // for a DIFFERENT product rather than this product's price range — that
+      // silently returns as a legitimate-looking price with no error raised,
+      // so reject it here and fall through to the other extraction methods.
+      if (high != null && low != null && high <= 5 * low) return { price: high, source: "jsonld" };
+    }
   }
   if (customRegex) {
     // No generic fallback on regex miss: removed/redirected product pages must

@@ -77,6 +77,28 @@ test("custom regex: match wins, miss returns null (no generic fallback)", () => 
   assert.equal(extractPriceDetail("no price here", 'data-amount="(\\d+)"').price, null);
 });
 
+test("BUG-004: preferHigh trusts a highPrice within 5x of the page's lowPrice", () => {
+  const html = '"lowPrice":"5000","highPrice":"12000"';
+  const det = extractPriceDetail(html, null, true);
+  assert.equal(det.source, "jsonld");
+  assert.equal(det.price, 12000);
+});
+
+test("BUG-004: preferHigh rejects a highPrice >5x lowPrice as widget contamination", () => {
+  // A cross-selling widget's own JSON-LD (e.g. a ₹2M styling package) sitting
+  // on the same page as this product's real ₹5,000-12,000 range must not be
+  // silently returned as this product's price.
+  const html = '"lowPrice":"5000","highPrice":"2000000"';
+  const det = extractPriceDetail(html, null, true);
+  assert.notEqual(det.source, "jsonld");
+});
+
+test("BUG-004: preferHigh rejects a highPrice with no lowPrice to verify against", () => {
+  const html = '"highPrice":"2000000"';
+  const det = extractPriceDetail(html, null, true);
+  assert.notEqual(det.source, "jsonld");
+});
+
 test("detectCurrency reads meta, symbols and JSON", () => {
   assert.equal(detectCurrency("₹1200"), "INR");
   assert.equal(detectCurrency("Rs 999"), "INR");
