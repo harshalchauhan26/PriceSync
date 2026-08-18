@@ -1062,12 +1062,15 @@ superRouter.patch("/users/role", wrap(async (req, res) => {
   await sec.superAdminSetRole(email, role);
   res.json({ ok: true });
 }));
+// Slugs a future route could collide with (e.g. GET /api/:slug-style routes).
+const RESERVED_SLUGS = new Set(["api", "admin", "health", "login", "register", "me", "auth", "docs"]);
 superRouter.post("/mbos", wrap(async (req, res) => {
   const slug = String(req.body.slug || "").trim().toLowerCase();
   const name = String(req.body.name || "").trim();
   const ownerEmail = String(req.body.ownerEmail || "").trim().toLowerCase();
   const ownerPassword = String(req.body.ownerPassword || "");
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) return res.status(400).json({ ok: false, error: "slug must be lowercase letters/digits/hyphens" });
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug) || slug.length > 32) return res.status(400).json({ ok: false, error: "slug must be lowercase letters/digits/hyphens, max 32 chars" });
+  if (RESERVED_SLUGS.has(slug)) return res.status(400).json({ ok: false, error: `'${slug}' is a reserved slug` });
   if (!name) return res.status(400).json({ ok: false, error: "name is required" });
   if (!ownerEmail) return res.status(400).json({ ok: false, error: "ownerEmail is required" });
   if (ownerPassword.length < 8) return res.status(400).json({ ok: false, error: "ownerPassword must be at least 8 characters" });
