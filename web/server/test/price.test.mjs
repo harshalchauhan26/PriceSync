@@ -298,11 +298,14 @@ test("computeFinal honours custom, ref and conversion", () => {
   assert.equal(computeFinal(5000, 8300, "base", 0, null, false, 83), 5000);
 });
 
-test("matchTol: flat 1.00 tolerance 2026-08-19, same for every currency/base size", () => {
+test("matchTol: flat 1.00 for an exact fetch, 0.5%-of-base for an fx.js estimate", () => {
   assert.equal(matchTol(10000, "INR"), 1.0);
   assert.equal(matchTol(10000, null), 1.0);
   assert.equal(matchTol(10000, "USD"), 1.0);
   assert.equal(matchTol(50, "USD"), 1.0);
+  // isEstimate=true -- a real fx.js conversion happened, wider band
+  assert.equal(matchTol(10000, "USD", true), 50);
+  assert.equal(matchTol(50, "USD", true), 1.0); // still floored at $1 for tiny bases
 });
 
 test("stateOf maps status prefixes", () => {

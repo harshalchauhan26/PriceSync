@@ -185,14 +185,19 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   // but each leg rounds to 2 decimals, the exact needless-drift shape BUG-023
   // already fixed elsewhere, so skip it here too rather than reintroduce it.
   if (cur !== "UNKNOWN" && eng.usdConvertBrands && eng.usdConvertBrands.has(normBrand(brand))) {
-    const liveUsd = cur === "USD" ? live : await toUsd(mboId, live, cur);
+    // cur === "USD" here means processOne's Shopify-Markets check handed back
+    // a genuine, currency-verified USD price (BUG-025) -- an exact fetch, not
+    // an estimate. Anything else is toUsd()'s fx.js conversion of the native
+    // fetch -- a real estimate, needs the wider tolerance band.
+    const wasEstimate = cur !== "USD";
+    const liveUsd = wasEstimate ? await toUsd(mboId, live, cur) : live;
     const baseUsd = prod.base_usd;
     let state, status, msg;
     if (baseUsd == null) {
       state = "matched"; status = "Price Matched (USD)"; msg = `USD baseline set @ ${liveUsd}`;
     } else {
       const delta = liveUsd - baseUsd;
-      if (Math.abs(delta) <= engTol(baseUsd, "USD")) { state = "matched"; status = "Price Matched (USD)"; }
+      if (Math.abs(delta) <= engTol(baseUsd, "USD", wasEstimate)) { state = "matched"; status = "Price Matched (USD)"; }
       else { state = "mismatch"; status = "Price Mismatch! (USD)"; }
       msg = `USD ${liveUsd} vs baseline ${baseUsd} (native ${cur} ${live})`;
     }
@@ -203,9 +208,13 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   }
   const liveInr = await toInr(mboId, live, cur);
   const delta = liveInr - base;
+  // toInr() is a passthrough (no real conversion, no estimate) for INR and
+  // UNKNOWN -- anything else went through a live fx.js rate and needs the
+  // wider tolerance band for the same reason as the usd_convert branch above.
+  const wasEstimate = !["INR", "UNKNOWN"].includes(cur);
   const disp = ["INR", "UNKNOWN"].includes(cur) ? cur : `${cur}->INR`;
   let state, status;
-  if (Math.abs(delta) <= engTol(base, prod.base_currency)) { state = "matched"; status = `Price Matched (${cur})`; }
+  if (Math.abs(delta) <= engTol(base, prod.base_currency, wasEstimate)) { state = "matched"; status = `Price Matched (${cur})`; }
   else { state = "mismatch"; status = `Price Mismatch! (${cur})`; }
   log(eng, { row: tag, domain: brand, url, currency: disp, price: liveInr.toFixed(2),
     status: state === "matched" ? "Price Matched" : "Price Mismatch!",
