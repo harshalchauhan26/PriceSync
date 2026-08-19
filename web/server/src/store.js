@@ -1081,7 +1081,7 @@ function rowToProduct(r, idx) {
   if (!url && !mbo) return null;
   const key = `${String(idx).padStart(5, "0")}|${(url || mbo).slice(0, 280)}`;
   let regex = r["Custom Regex"]; regex = regex == null ? "" : String(regex).trim();
-  const base = sanitizeNum(r["Studio East Price"]);
+  const base = ((n) => isPlausibleBasePrice(n) ? n : null)(sanitizeNum(r["Studio East Price"]));
   const live = sanitizeNum(r["Live Price"]);
   const currency = String(r["Detected Currency"] || "").trim();
   const status = String(r.Status || "").trim();
@@ -1096,6 +1096,18 @@ function sanitizeNum(v) {
   const m = String(v).replace(/[^0-9.]/g, "").match(/\d+(?:\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
 }
+// Found live 2026-08-19: ~196 products across 20 brands have a base_price of
+// 1-99 (several brands sharing the exact same value, e.g. 19 -- not a
+// coincidence of genuinely cheap items). sanitizeNum() takes the FIRST digit
+// run in a cell with no plausibility check, so a hand-typed/pasted cell with
+// stray non-price text before the real number (a percentage, a note, a size
+// count) silently parses as a tiny "price" instead of erroring. No couture
+// item in this catalog is genuinely priced this low in any currency this
+// import path handles. Existing corrupted rows are NOT touched by this --
+// owner is flagging/fixing those manually in Review; this only guards future
+// imports at the point base_price is accepted.
+const MIN_PLAUSIBLE_BASE_PRICE = 100;
+function isPlausibleBasePrice(n) { return n != null && n >= MIN_PLAUSIBLE_BASE_PRICE; }
 // ---- base-price-only sheet ----
 // A hand-made 2-column sheet (product URL + new base price) that rewrites
 // base_price and NOTHING else. Deliberately separate from importSheet, which
@@ -1139,6 +1151,7 @@ export function parseBaseSheet(buf) {
     // usually a full export with only a few cells filled in.
     else if (String(r[priceCol]).trim() === "") _error = "blank price (skipped)";
     else if (base_price == null || base_price <= 0) _error = `not a valid price: "${r[priceCol]}"`;
+    else if (!isPlausibleBasePrice(base_price)) _error = `implausibly low price: "${r[priceCol]}" parsed as ${base_price}`;
     return { row: i + 2, url, base_price, _error };
   });
   return { urlCol, priceCol, rows };
@@ -1215,6 +1228,7 @@ export function parseAddSheet(buf) {
     let _error = null;
     if (!url) _error = "missing Designer Product URL";
     else if (base_price == null || base_price <= 0) _error = "missing/invalid Studio East Price";
+    else if (!isPlausibleBasePrice(base_price)) _error = `implausibly low Studio East Price: "${r["Studio East Price"]}" parsed as ${base_price}`;
     return { url, mbo_url, platform, custom_regex, base_price, brand: brandOf(url), _error };
   });
 }
