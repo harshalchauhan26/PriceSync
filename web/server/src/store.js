@@ -1075,11 +1075,22 @@ export async function integrationBrands(mboId) {
 }
 
 // ---- import sheet (xlsx/csv) ----
-function rowToProduct(r, idx) {
+function rowToProduct(r) {
   const url = canonicalUrl(String(r["Designer Product URL"] || "").trim());
   const mbo = String(r["MBO Product URL"] || "").trim();
   if (!url && !mbo) return null;
-  const key = `${String(idx).padStart(5, "0")}|${(url || mbo).slice(0, 280)}`;
+  // Was `${idx}|${url}` -- idx being the row's POSITION in whatever sheet is
+  // currently being imported. Re-uploading the same catalog with rows in a
+  // different order (resorted, filtered, a product added/removed elsewhere)
+  // gives the same product a different key every time, so ON CONFLICT never
+  // matches the existing row -- it INSERTs a duplicate instead of UPDATEing,
+  // orphaning the old row forever. Found live: 1,181 duplicate URLs across
+  // the catalog this way, several showing a stale/wrong price on the
+  // dashboard next to the correct, freshly-updated copy. The URL itself is
+  // already the product's real identity (previewBaseSheet and others already
+  // match by canonical URL) -- keying off it directly is what makes ON
+  // CONFLICT actually update in place across every future re-import.
+  const key = (url || mbo).slice(0, 280);
   let regex = r["Custom Regex"]; regex = regex == null ? "" : String(regex).trim();
   const base = ((n) => isPlausibleBasePrice(n) ? n : null)(sanitizeNum(r["Studio East Price"]));
   const live = sanitizeNum(r["Live Price"]);
@@ -1361,7 +1372,7 @@ export function previewSheet(buf) {
   const missing = REQUIRED.filter((c) => !cols.includes(c));
   if (missing.length) throw new Error("missing required columns: " + missing.join(", "));
   const byDom = {}; let total = 0;
-  rows.forEach((r, i) => { const p = rowToProduct(r, i + 1); if (!p) return;
+  rows.forEach((r) => { const p = rowToProduct(r); if (!p) return;
     total++; byDom[p.brand] = (byDom[p.brand] || 0) + 1; });
   const domains = Object.entries(byDom).map(([d, c]) => ({ domain: d || "(none)", count: c }))
     .sort((a, b) => b.count - a.count);
@@ -1376,7 +1387,7 @@ export async function importSheet(mboId, buf, { replace = true, contains = '', d
   const hasStatus = rows.length > 0 && Object.hasOwn(rows[0], "Status");
   const needle = String(contains || '').trim().toLowerCase();
   const domainSet = new Set((domains || []).filter(Boolean));
-  const prods = rows.map((r, i) => rowToProduct(r, i + 1)).filter((p) => p &&
+  const prods = rows.map((r) => rowToProduct(r)).filter((p) => p &&
     (!needle || p.url.toLowerCase().includes(needle)) &&
     (!domainSet.size || domainSet.has(p.brand)));
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
