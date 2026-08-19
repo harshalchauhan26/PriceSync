@@ -343,22 +343,11 @@ export function stateOf(status) {
   if (s.startsWith("Fetch Error")) return "error";
   return "pending";
 }
-// Owner instruction 2026-08-19: flat 1.00 tolerance (100 cents/paise/etc, same
-// absolute unit regardless of currency or base size) -- replaces both the old
-// 0.5%-of-base scaling AND the brief same-day "0 tolerance" experiment. Just
-// enough to absorb FX-rounding noise without letting a real price drift hide.
-//
-// Follow-up same day: a flat $1 is right for an EXACT comparison (both sides
-// fetched in the same real currency, no conversion involved), but too tight
-// for an ESTIMATE comparison (base_usd/live went through fx.js's live market
-// rate, which itself drifts ~0.1%+ day to day against any other rate source
-// -- a $5 gap on a $5,000 item from pure rate movement is not a real price
-// change). isEstimate lets callers ask for the wider band only where an
-// actual toInr/toUsd conversion happened.
-export function matchTol(base, cur, isEstimate = false) {
-  if (!isEstimate) return 1.0;
-  return Math.max(1.0, 0.005 * Math.abs(base || 0));
-}
+// Owner instruction 2026-08-19 (final): flat 1.00 tolerance for every brand,
+// exact fetch or fx.js estimate alike -- no percentage widening. Supersedes
+// the same-day isEstimate experiment (kept the param so callers don't need
+// touching -- it's simply ignored now).
+export function matchTol() { return 1.0; }
 const num = (v) => (v == null ? 0 : Number(v));
 
 // ---- meta (per-tenant key/value store) ----
