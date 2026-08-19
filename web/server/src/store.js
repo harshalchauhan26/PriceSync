@@ -343,9 +343,11 @@ export function stateOf(status) {
   if (s.startsWith("Fetch Error")) return "error";
   return "pending";
 }
-// Owner instruction 2026-08-19: tolerance removed -- any non-zero difference
-// (down to rounding) is a mismatch now, not just anything past 0.5%/$1.
-export function matchTol() { return 0; }
+// Owner instruction 2026-08-19: flat 1.00 tolerance (100 cents/paise/etc, same
+// absolute unit regardless of currency or base size) -- replaces both the old
+// 0.5%-of-base scaling AND the brief same-day "0 tolerance" experiment. Just
+// enough to absorb FX-rounding noise without letting a real price drift hide.
+export function matchTol() { return 1.0; }
 const num = (v) => (v == null ? 0 : Number(v));
 
 // ---- meta (per-tenant key/value store) ----

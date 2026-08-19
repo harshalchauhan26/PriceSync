@@ -298,10 +298,11 @@ test("computeFinal honours custom, ref and conversion", () => {
   assert.equal(computeFinal(5000, 8300, "base", 0, null, false, 83), 5000);
 });
 
-test("matchTol: removed 2026-08-19 -- always 0, any difference is a mismatch", () => {
-  assert.equal(matchTol(10000, "INR"), 0);
-  assert.equal(matchTol(10000, null), 0);
-  assert.equal(matchTol(10000, "USD"), 0);
+test("matchTol: flat 1.00 tolerance 2026-08-19, same for every currency/base size", () => {
+  assert.equal(matchTol(10000, "INR"), 1.0);
+  assert.equal(matchTol(10000, null), 1.0);
+  assert.equal(matchTol(10000, "USD"), 1.0);
+  assert.equal(matchTol(50, "USD"), 1.0);
 });
 
 test("stateOf maps status prefixes", () => {
