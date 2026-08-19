@@ -343,10 +343,9 @@ export function stateOf(status) {
   if (s.startsWith("Fetch Error")) return "error";
   return "pending";
 }
-export function matchTol(base, cur) {
-  if (["INR", "UNKNOWN", null, ""].includes(cur)) return 1.0;
-  return Math.max(1.0, 0.005 * Math.abs(base || 0));
-}
+// Owner instruction 2026-08-19: tolerance removed -- any non-zero difference
+// (down to rounding) is a mismatch now, not just anything past 0.5%/$1.
+export function matchTol() { return 0; }
 const num = (v) => (v == null ? 0 : Number(v));
 
 // ---- meta (per-tenant key/value store) ----
