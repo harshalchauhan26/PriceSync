@@ -56,8 +56,7 @@ const SCHEMA = [
   // BUG-021: base_price alone is ambiguous — 3000 could be INR, USD or CAD.
   // Set at import/add time from the brand's usd/native-currency config, and
   // kept current by promoteLiveToBase() on every successful baseline update.
-  // matchTol() reads this instead of inferring tolerance scale from whatever
-  // currency happened to come back on the fetch that triggered the compare.
+  // (isPriceMatch() itself is currency-agnostic — see its definition below.)
   'ALTER TABLE products ADD COLUMN IF NOT EXISTS base_currency TEXT NOT NULL DEFAULT \'INR\'',
   'CREATE TABLE IF NOT EXISTS import_catalog (' +
     'key TEXT PRIMARY KEY, mbo_url TEXT, url TEXT, platform TEXT,' +
@@ -343,11 +342,14 @@ export function stateOf(status) {
   if (s.startsWith("Fetch Error")) return "error";
   return "pending";
 }
-// Owner instruction 2026-08-19 (final): flat 1.00 tolerance for every brand,
-// exact fetch or fx.js estimate alike -- no percentage widening. Supersedes
-// the same-day isEstimate experiment (kept the param so callers don't need
-// touching -- it's simply ignored now).
-export function matchTol() { return 1.0; }
+// Owner instruction 2026-09-08 (final): matched when the live/base gap is
+// exactly 0 (a genuine price match) OR falls in the $45-$60 band -- anything
+// else (0 < gap < 45, or gap > 60) is a mismatch. Global, every brand alike.
+// Supersedes the flat 1.00 tolerance (matchTol).
+export function isPriceMatch(delta) {
+  const d = Math.abs(delta);
+  return d === 0 || (d >= 45 && d <= 60);
+}
 const num = (v) => (v == null ? 0 : Number(v));
 
 // ---- meta (per-tenant key/value store) ----
@@ -947,9 +949,8 @@ export async function liveBaseValue(mboId, prow) {
     baseNew,
     baseUsd: isUsd ? Number(prow.live_price) : null,
     // BUG-021: the currency this promoted baseline is actually denominated
-    // in — feeds products.base_currency so matchTol() no longer has to infer
-    // tolerance scale from whatever currency the triggering fetch happened
-    // to return.
+    // in — feeds products.base_currency (display/reporting only; isPriceMatch
+    // itself doesn't use it).
     baseCurrency: isNative ? nativeCur : (isUsd ? "USD" : "INR"),
     statusLabel: `Price Matched (${isNative ? nativeCur : "INR"})`,
   };

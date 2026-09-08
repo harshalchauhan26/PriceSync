@@ -8,7 +8,7 @@ import {
   pickWooProduct, FETCH_ONLY_PARAMS, isUnsafeCustomRegex,
 } from "../src/engine.js";
 import {
-  roundFinal, computeFinal, matchTol, stateOf, brandOf, canonicalUrl,
+  roundFinal, computeFinal, isPriceMatch, stateOf, brandOf, canonicalUrl,
   normBrand, isPermanentError, liveBaseValue, productIdentity,
 } from "../src/store.js";
 import { toInr, setOverrides } from "../src/fx.js";
@@ -298,13 +298,15 @@ test("computeFinal honours custom, ref and conversion", () => {
   assert.equal(computeFinal(5000, 8300, "base", 0, null, false, 83), 5000);
 });
 
-test("matchTol: flat 1.00 for every brand, exact fetch or fx.js estimate alike", () => {
-  assert.equal(matchTol(10000, "INR"), 1.0);
-  assert.equal(matchTol(10000, null), 1.0);
-  assert.equal(matchTol(10000, "USD"), 1.0);
-  assert.equal(matchTol(50, "USD"), 1.0);
-  assert.equal(matchTol(10000, "USD", true), 1.0);
-  assert.equal(matchTol(50, "USD", true), 1.0);
+test("isPriceMatch: matched at exact 0 or inside the $45-$60 gap, either direction", () => {
+  assert.equal(isPriceMatch(0), true);
+  assert.equal(isPriceMatch(44.99), false);
+  assert.equal(isPriceMatch(45), true);
+  assert.equal(isPriceMatch(52.5), true);
+  assert.equal(isPriceMatch(60), true);
+  assert.equal(isPriceMatch(60.01), false);
+  assert.equal(isPriceMatch(-50), true);   // direction doesn't matter
+  assert.equal(isPriceMatch(-44), false);
 });
 
 test("stateOf maps status prefixes", () => {

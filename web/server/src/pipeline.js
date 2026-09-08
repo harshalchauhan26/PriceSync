@@ -9,7 +9,7 @@ import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-const engTol = store.matchTol;
+const isMatch = store.isPriceMatch;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const LOG_MAX = 5000;
@@ -154,7 +154,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
       state = "matched"; status = "Price Matched (USD)"; msg = `USD baseline set @ ${live}`;
     } else {
       const delta = live - baseUsd;
-      if (Math.abs(delta) <= engTol(baseUsd, prod.base_currency)) { state = "matched"; status = "Price Matched (USD)"; }
+      if (isMatch(delta)) { state = "matched"; status = "Price Matched (USD)"; }
       else { state = "mismatch"; status = "Price Mismatch! (USD)"; }
       msg = `USD ${live} vs baseline ${baseUsd}`;
     }
@@ -166,7 +166,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   if (nativeCur && cur === nativeCur) {
     const delta = live - base;
     let state, status;
-    if (Math.abs(delta) <= engTol(base, prod.base_currency)) { state = "matched"; status = `Price Matched (${nativeCur})`; }
+    if (isMatch(delta)) { state = "matched"; status = `Price Matched (${nativeCur})`; }
     else { state = "mismatch"; status = `Price Mismatch! (${nativeCur})`; }
     log(eng, { row: tag, domain: brand, url, currency: nativeCur, price: String(live),
       status: state === "matched" ? "Price Matched" : "Price Mismatch!", msg: `${nativeCur} ${live} vs baseline ${base}` });
@@ -197,7 +197,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
       state = "matched"; status = "Price Matched (USD)"; msg = `USD baseline set @ ${liveUsd}`;
     } else {
       const delta = liveUsd - baseUsd;
-      if (Math.abs(delta) <= engTol(baseUsd, "USD", wasEstimate)) { state = "matched"; status = "Price Matched (USD)"; }
+      if (isMatch(delta)) { state = "matched"; status = "Price Matched (USD)"; }
       else { state = "mismatch"; status = "Price Mismatch! (USD)"; }
       msg = `USD ${liveUsd} vs baseline ${baseUsd} (native ${cur} ${live})`;
     }
@@ -214,7 +214,7 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
   const wasEstimate = !["INR", "UNKNOWN"].includes(cur);
   const disp = ["INR", "UNKNOWN"].includes(cur) ? cur : `${cur}->INR`;
   let state, status;
-  if (Math.abs(delta) <= engTol(base, prod.base_currency, wasEstimate)) { state = "matched"; status = `Price Matched (${cur})`; }
+  if (isMatch(delta)) { state = "matched"; status = `Price Matched (${cur})`; }
   else { state = "mismatch"; status = `Price Mismatch! (${cur})`; }
   log(eng, { row: tag, domain: brand, url, currency: disp, price: liveInr.toFixed(2),
     status: state === "matched" ? "Price Matched" : "Price Mismatch!",
@@ -253,7 +253,7 @@ async function processOne(eng, fetcher, prod, runId) {
       Math.round(base * (Math.random() > 0.5 ? 1.1 : 0.9) * 100) / 100;
     currency = brand?.endsWith('.in') ? 'INR' : 'USD';
     const liveInr = await toInr(eng.mboId, live, currency);
-    const state = Math.abs(liveInr - base) <= engTol(base, currency) ? 'matched' : 'mismatch';
+    const state = isMatch(liveInr - base) ? 'matched' : 'mismatch';
     const status = state === 'matched' ? 'Price Matched (simulation)' : 'Price Mismatch! (simulation)';
     log(eng, { row: tag, domain: brand, url, currency, price: liveInr.toFixed(2),
       status: state === 'matched' ? 'Price Matched' : 'Price Mismatch!', msg: 'simulation' });
