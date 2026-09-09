@@ -343,12 +343,12 @@ export function stateOf(status) {
   return "pending";
 }
 // Owner instruction 2026-09-08 (final): matched when the live/base gap is
-// exactly 0 (a genuine price match) OR falls in the $45-$60 band -- anything
-// else (0 < gap < 45, or gap > 60) is a mismatch. Global, every brand alike.
+// exactly 0 (a genuine price match) OR falls in the $45-$65 band -- anything
+// else (0 < gap < 45, or gap > 65) is a mismatch. Global, every brand alike.
 // Supersedes the flat 1.00 tolerance (matchTol).
 export function isPriceMatch(delta) {
   const d = Math.abs(delta);
-  return d === 0 || (d >= 45 && d <= 60);
+  return d === 0 || (d >= 45 && d <= 65);
 }
 const num = (v) => (v == null ? 0 : Number(v));
 

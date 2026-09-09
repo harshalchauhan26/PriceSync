@@ -298,13 +298,13 @@ test("computeFinal honours custom, ref and conversion", () => {
   assert.equal(computeFinal(5000, 8300, "base", 0, null, false, 83), 5000);
 });
 
-test("isPriceMatch: matched at exact 0 or inside the $45-$60 gap, either direction", () => {
+test("isPriceMatch: matched at exact 0 or inside the $45-$65 gap, either direction", () => {
   assert.equal(isPriceMatch(0), true);
   assert.equal(isPriceMatch(44.99), false);
   assert.equal(isPriceMatch(45), true);
   assert.equal(isPriceMatch(52.5), true);
-  assert.equal(isPriceMatch(60), true);
-  assert.equal(isPriceMatch(60.01), false);
+  assert.equal(isPriceMatch(65), true);
+  assert.equal(isPriceMatch(65.01), false);
   assert.equal(isPriceMatch(-50), true);   // direction doesn't matter
   assert.equal(isPriceMatch(-44), false);
 });
