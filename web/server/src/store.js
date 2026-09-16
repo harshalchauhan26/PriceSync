@@ -342,13 +342,16 @@ export function stateOf(status) {
   if (s.startsWith("Fetch Error")) return "error";
   return "pending";
 }
-// Owner instruction 2026-09-08 (final): matched when the live/base gap is
-// exactly 0 (a genuine price match) OR falls in the $45-$65 band -- anything
-// else (0 < gap < 45, or gap > 65) is a mismatch. Global, every brand alike.
-// Supersedes the flat 1.00 tolerance (matchTol).
+// Owner instruction 2026-09-08, widened 2026-09-16: matched when the
+// live/base gap is under $1 (was: exactly 0 -- widened after the base_usd
+// refresh fix started producing correct but non-zero small gaps, e.g. $0.03,
+// from ordinary FX-rate rounding, that don't represent a real price change)
+// OR falls in the $45-$65 band -- anything else (1 <= gap < 45, or gap > 65)
+// is a mismatch. Global, every brand alike. Supersedes the flat 1.00
+// tolerance (matchTol).
 export function isPriceMatch(delta) {
   const d = Math.abs(delta);
-  return d === 0 || (d >= 45 && d <= 65);
+  return d < 1 || (d >= 45 && d <= 65);
 }
 const num = (v) => (v == null ? 0 : Number(v));
 
