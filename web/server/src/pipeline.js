@@ -469,6 +469,20 @@ export async function startPipeline(eng, runId) {
   try {
     eng.usdFetchBrands = await store.usdFetchBrandSet(mboId);
     eng.usdConvertBrands = await store.usdConvertBrandSet(mboId);
+    // Owner-proposed fix 2026-09-16: refresh base_usd from base_price right
+    // before this run's fetches start, so base and live are priced off the
+    // SAME fx.js rate snapshot -- otherwise a base_usd set hours/days ago
+    // drifts against a freshly-converted live_price on an unchanged real
+    // price, showing as a false mismatch. Best-effort: a refresh failure
+    // must never block the run itself (last run's base_usd just stays as-is).
+    try {
+      const { updated } = await store.refreshUsdBaselines(mboId);
+      if (updated) log(eng, { row: "—", domain: "usd-baseline-refresh", url: "", currency: "-", price: "-",
+        status: "Info", msg: `refreshed base_usd for ${updated} product(s) to today's fx rate` });
+    } catch (e) {
+      log(eng, { row: "—", domain: "usd-baseline-refresh", url: "", currency: "-", price: "-",
+        status: "Warning", msg: "base_usd refresh failed: " + e.message });
+    }
     eng.rangeHighBrands = await store.rangeHighBrandSet(mboId);
     eng.gentleBrands = await store.gentleBrandSet(mboId);
     eng.proxyBrands = await store.proxyBrandSet(mboId);

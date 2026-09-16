@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 import { pool, withTenant } from "./db.js";
-import { toInr } from "./fx.js";
+import { toInr, toUsd } from "./fx.js";
 import { FETCH_ONLY_PARAMS } from "./engine.js";
 
 const REQUIRED = ["MBO Product URL", "Designer Product URL", "Platform Type",
@@ -723,6 +723,50 @@ export async function setUsdConvertBrands(mboId, list) {
   await setMeta(mboId, "usd_convert_brands", uniq.join(","));
   _usdConvertCache.delete(mboId);
   return uniq;
+}
+
+// Owner-proposed fix 2026-09-16 for the recurring "false mismatch from FX
+// drift" pattern (found live on mahimamahajan.in's "ehlam"/"bhor" rows):
+// base_usd is set ONCE (at import/backfill time) and never touched again,
+// while live_price is converted fresh via fx.js on every pipeline run --
+// two snapshots of the same live-but-moving rate, taken at different times,
+// disagreeing by a few dollars on an UNCHANGED real INR price. This doesn't
+// (can't) make our number match a brand's own third-party currency widget
+// (that's a different, proxy-requiring problem -- see Decisions.md) but it
+// removes the self-inconsistency: refreshing base_usd from base_price right
+// before a run starts means base and live are both priced off the SAME rate
+// snapshot, so only a genuine INR price change produces a gap.
+// Called once per pipeline run (startPipeline), not per-row -- one rate
+// lookup for the whole batch (fx.js caches it anyway), not one per product.
+export async function refreshUsdBaselines(mboId) {
+  const brands = [...await usdConvertBrandSet(mboId)];
+  if (!brands.length) return { updated: 0 };
+  const rows = await withTenant(mboId, (db) => db.q(
+    `SELECT id, base_price, base_currency FROM products
+      WHERE mbo_id=$1 AND brand = ANY($2::text[]) AND base_price IS NOT NULL`,
+    [mboId, brands]));
+  if (!rows.length) return { updated: 0 };
+  // toUsd() itself is cheap (fx.js caches the rate for 6h -- this is just an
+  // in-memory multiply after the first call per currency), the bottleneck
+  // was ~9,885 sequential single-row UPDATE round-trips. Batch them instead:
+  // one UPDATE ... FROM UNNEST per chunk, not one per row.
+  const ids = [], usds = [];
+  for (const r of rows) {
+    const usd = await toUsd(mboId, r.base_price, r.base_currency || "INR");
+    if (usd == null) continue;
+    ids.push(r.id); usds.push(usd);
+  }
+  if (!ids.length) return { updated: 0 };
+  const CH = 2000;
+  for (let i = 0; i < ids.length; i += CH) {
+    const idChunk = ids.slice(i, i + CH), usdChunk = usds.slice(i, i + CH);
+    await withTenant(mboId, (db) => db.q(
+      `UPDATE products p SET base_usd = v.usd
+         FROM UNNEST($2::bigint[], $3::float8[]) AS v(id, usd)
+        WHERE p.mbo_id=$1 AND p.id = v.id`,
+      [mboId, idChunk, usdChunk]));
+  }
+  return { updated: ids.length };
 }
 
 // ---- per-brand RANGE price preference ----
