@@ -346,12 +346,12 @@ export function stateOf(status) {
 // live/base gap is under $1 (was: exactly 0 -- widened after the base_usd
 // refresh fix started producing correct but non-zero small gaps, e.g. $0.03,
 // from ordinary FX-rate rounding, that don't represent a real price change)
-// OR falls in the $45-$65 band -- anything else (1 <= gap < 45, or gap > 65)
+// OR falls in the $45-$70 band -- anything else (1 <= gap < 45, or gap > 70)
 // is a mismatch. Global, every brand alike. Supersedes the flat 1.00
 // tolerance (matchTol).
 export function isPriceMatch(delta) {
   const d = Math.abs(delta);
-  return d < 1 || (d >= 45 && d <= 65);
+  return d < 1 || (d >= 45 && d <= 70);
 }
 const num = (v) => (v == null ? 0 : Number(v));
 
