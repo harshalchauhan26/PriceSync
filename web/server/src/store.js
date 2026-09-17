@@ -777,6 +777,11 @@ const DEFAULT_RANGE_HIGH_BRANDS = new Set([
   // Masaba products can expose a low first variant/sale option while the
   // Studio East baseline tracks the full/high variant price.
   "houseofmasaba.com",
+  // Aisha Rao's "12 Panel / 16 Panel" style option puts the cheaper 12 Panel
+  // variant first (e.g. Tara Rust Tissue Lehenga: variants[0] = XS/12 Panel
+  // @ price_min, but the page defaults to and the baseline tracks 16 Panel
+  // @ price_max).
+  "aisharao.com",
 ]);
 export async function rangeHighBrandSet(mboId) {
   const cached = _rangeHighCache.get(mboId);
