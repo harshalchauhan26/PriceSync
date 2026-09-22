@@ -30,34 +30,57 @@ async function fetchRates() {
   return out;
 }
 
-export async function rates(mboId) {
+// marketOnly=true skips the tenant's manual Save-Rates override and returns
+// the live/fallback market rate only. The override exists for ONE purpose --
+// pricing what gets pushed to Shopify (final price = markup over the
+// converted baseline) -- and must never leak into mismatch DETECTION.
+// Before this flag existed, editing the override rate silently rewrote every
+// usd_convert_brand's base_usd on the next pipeline run (via refreshUsdBaselines),
+// flipping thousands of rows between matched/mismatch with no real price change
+// behind it. Comparison call sites (finalizeOne, refreshUsdBaselines, saveResult's
+// own delta recompute) pass true; push/preview call sites (computeFinal, the
+// Review page's live preview, promoteLiveToBase/update_base baseline-reset
+// actions) omit it and keep using the override, same as before.
+export async function rates(mboId, marketOnly = false) {
   if (Date.now() - cache.at > TTL || !Object.keys(cache.rates).length) {
     try { cache = { at: Date.now(), rates: await fetchRates() }; }
     catch { if (!Object.keys(cache.rates).length) cache = { at: Date.now(), rates: { ...FALLBACK } }; }
   }
-  return { ...cache.rates, ...(overrides.get(mboId) || {}) };
+  return marketOnly ? { ...cache.rates } : { ...cache.rates, ...(overrides.get(mboId) || {}) };
 }
 
-export async function rateOf(mboId, cur) {
+export async function rateOf(mboId, cur, marketOnly = false) {
   const c = (cur || "INR").trim().toUpperCase();
-  return (await rates(mboId))[c] || FALLBACK[c] || 1;
+  return (await rates(mboId, marketOnly))[c] || FALLBACK[c] || 1;
 }
 
-export async function toInr(mboId, amount, cur) {
+export async function toInr(mboId, amount, cur, marketOnly = false) {
   if (amount == null) return null;
   const c = (cur || "INR").trim().toUpperCase();
   if (["INR", "", "UNKNOWN", "RS", "₹"].includes(c)) return Math.round(amount * 100) / 100;
-  return Math.round(amount * (await rateOf(mboId, c)) * 100) / 100;
+  return Math.round(amount * (await rateOf(mboId, c, marketOnly)) * 100) / 100;
 }
 
 // Pivots any amount+currency through INR to USD — reuses toInr's passthrough
 // for INR/unknown-as-INR and rateOf's same cache/fallback/overrides, so this
 // stays consistent with every other currency figure the app shows.
-export async function toUsd(mboId, amount, cur) {
+export async function toUsd(mboId, amount, cur, marketOnly = false) {
   if (amount == null) return null;
-  const inr = await toInr(mboId, amount, cur);
+  const inr = await toInr(mboId, amount, cur, marketOnly);
   if (inr == null) return null;
-  return Math.round((inr / (await rateOf(mboId, "USD"))) * 100) / 100;
+  return Math.round((inr / (await rateOf(mboId, "USD", marketOnly))) * 100) / 100;
+}
+
+// Converts at a specific caller-supplied rate instead of any stored one --
+// for a brand's own derived rate (brandRate.js: median of 5 sampled products'
+// real INR price vs. that brand's own storefront-displayed USD price), so
+// the Live/Final $ figures match what the brand's own site shows, not
+// whatever a generic INR/USD source happens to quote that day.
+export async function toUsdAtRate(mboId, amount, cur, rate) {
+  if (amount == null || !rate) return null;
+  const inr = await toInr(mboId, amount, cur, true);
+  if (inr == null) return null;
+  return Math.round((inr / rate) * 100) / 100;
 }
 
 // EUR/GBP included because Review's per-row override currency select offers

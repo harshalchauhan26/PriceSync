@@ -939,7 +939,7 @@ function Review({admin}) {
   const [items,setItems]=useState([]);
   const [summary,setSummary]=useState({total:0,mismatch:0,error:0,matched:0});
   const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
-  const [usd,setUsd]=useState(""); const [cad,setCad]=useState("");
+  const [usd,setUsd]=useState("");
   const [rerunning,setRerunning]=useState(()=>new Set());
   const [pushBusy,setPushBusy]=useState(false); const [pushJob,setPushJob]=useState(null);
   const [onlyMismatch,setOnlyMismatch]=useState(false);
@@ -974,7 +974,7 @@ function Review({admin}) {
   // Reset to the first page only when the view scope changes — NOT on every
   // items change (row edits replace the items array and must not jump the page).
   useEffect(()=>{ setPage(0); },[stateFilter,brands,search]);
-  useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); setCad(d.overrides?.CAD??""); }); },[]);
+  useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); }); },[]);
 
   const liveInr=(it)=>{ if(it.live_price==null) return null; const c=(it.currency||"INR").toUpperCase(); if(c==="INR") return it.live_price; return it.live_price*(fxr[c]||1); };
   // Prefer the delta the pipeline stored — it already applies per-brand rules
@@ -984,7 +984,7 @@ function Review({admin}) {
   const targetRate=convCur==="INR"?1:(fxr[convCur]||1);
   const amtInr=(amount,currency)=>{ const n=Number(amount); if(!Number.isFinite(n)||n<=0) return null; const c=(currency||"INR").toUpperCase(); const r=(c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1); return Math.round(n*r*100)/100; };
   const previewFinal=(it)=>{ const manual=amtInr(it._amt,it._cur); if(manual!=null) return roundFinal(manual/targetRate); const refInr=liveInr(it)??it.base_price; if(refInr==null) return null; return roundFinal(refInr/targetRate+Number(gm||0)); };
-  const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,cad,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");setCad(r.overrides.CAD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
+  const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
   const reject=async(it)=>{ if(!admin) return toast("Admin only","err"); setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision:"rejected"}); r.ok?toast("Rejected","ok"):toast(r.error||"Failed","err"); load(); };
   const del=async(it)=>{ if(!admin) return toast("Admin only","err"); setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/hide",{row:it.id}); r.ok?toast("Cleared from Review — product & price data untouched","ok"):toast(r.error||"Failed","err"); load(); };
   const setBase=async(it)=>{ if(!admin) return toast("Admin only","err"); if(it.live_price==null) return toast("No live price on this row","err");
@@ -1086,12 +1086,10 @@ function Review({admin}) {
       <div className="toolbar-sep"/>
       <span style={{fontSize:12,color:"var(--on3)"}}>USD→₹</span>
       <input type="number" step=".01" className="inp mono" style={{width:80}} placeholder={fmt(fxr.USD)} value={usd} onChange={e=>setUsd(e.target.value)}/>
-      <span style={{fontSize:12,color:"var(--on3)"}}>CAD→₹</span>
-      <input type="number" step=".01" className="inp mono" style={{width:80}} placeholder={fmt(fxr.CAD)} value={cad} onChange={e=>setCad(e.target.value)}/>
       <button className="btn btn-ghost btn-sm" onClick={saveFx} disabled={!admin}><Icon n="check" s={12}/>Save rates</button>
       <div className="toolbar-sep"/>
       <div className="pill-group">
-        {[["INR","INR"],["USD","USD→₹"],["CAD","CAD→₹"]].map(([k,l])=><button key={k} className={`pill${convCur===k?" active":""}`} onClick={()=>setConvCur(k)}>{l}</button>)}
+        {[["INR","INR"],["USD","USD→₹"]].map(([k,l])=><button key={k} className={`pill${convCur===k?" active":""}`} onClick={()=>setConvCur(k)}>{l}</button>)}
       </div>
     </div>
 

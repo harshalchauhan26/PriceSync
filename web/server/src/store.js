@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 import { pool, withTenant } from "./db.js";
-import { toInr, toUsd } from "./fx.js";
+import { toInr, toUsd, toUsdAtRate } from "./fx.js";
 import { FETCH_ONLY_PARAMS } from "./engine.js";
 
 const REQUIRED = ["MBO Product URL", "Designer Product URL", "Platform Type",
@@ -473,6 +473,18 @@ export async function workRows(mboId, mode = "fresh", vendorList = null, source 
     : dbProducts(mboId, mode, vendorList);
 }
 
+// A handful of a brand's own products to sample for brandRate.js's rate
+// derivation -- not errored (a dead page can't show a price to read) and not
+// custom-regex/Woo (those aren't Shopify .js-fetchable the way the sampler
+// expects).
+export async function sampleProductUrls(mboId, brand, n = 5) {
+  return withTenant(mboId, (db) => db.q(
+    `SELECT url, platform, custom_regex FROM products
+      WHERE mbo_id=$1 AND brand=$2 AND state <> 'error' AND (custom_regex IS NULL OR custom_regex='')
+      ORDER BY id LIMIT $3`,
+    [mboId, brand, n]));
+}
+
 // ---- state buckets (mismatch/error/resolved) ----
 // Physical copy tables mirroring products.state: whenever a product's
 // state changes, its copy moves to the matching bucket table and is
@@ -509,9 +521,12 @@ export async function saveResult(mboId, prod, status, live, cur, state, runId, e
   const base = prod.base_price;
   const usdBaseline = extra.usdBaseline === true;
   const baseUsd = usdBaseline ? (prod.base_usd != null ? prod.base_usd : live) : null;
+  // marketOnly=true (fx.js) -- this delta drives mismatch state, so it must
+  // never move because someone edited the push-rate override, only because
+  // the real price changed.
   const delta = usdBaseline
     ? ((live != null && baseUsd != null) ? live - baseUsd : null)
-    : ((live != null && base != null) ? (await toInr(mboId, live, cur)) - base : null);
+    : ((live != null && base != null) ? (await toInr(mboId, live, cur, true)) - base : null);
   const baseUsdVal = usdBaseline ? live : null;
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const cleanUrl = canonicalUrl(prod.url);
@@ -739,13 +754,23 @@ export async function setUsdConvertBrands(mboId, list) {
 // removes the self-inconsistency: refreshing base_usd from base_price right
 // before a run starts means base and live are both priced off the SAME rate
 // snapshot, so only a genuine INR price change produces a gap.
+// Owner correction 2026-09-21: that rate snapshot must be the live MARKET
+// rate (fx.js marketOnly), never the admin's Save-Rates override -- that
+// override exists only to price the Shopify push, and editing it was
+// silently flipping thousands of rows between matched/mismatch on the next
+// pipeline run with no real price change behind it.
 // Called once per pipeline run (startPipeline), not per-row -- one rate
 // lookup for the whole batch (fx.js caches it anyway), not one per product.
-export async function refreshUsdBaselines(mboId) {
+// brandRates (owner request 2026-09-22): {normBrand -> rate}, from
+// brandRate.js sampling that brand's own storefront -- when a brand has one,
+// its baseline converts at ITS rate instead of the generic market rate, so
+// base_usd and the live fetch (finalizeOne uses the same map) land on the
+// same number the brand's own site would show, not just internally consistent.
+export async function refreshUsdBaselines(mboId, brandRates = {}) {
   const brands = [...await usdConvertBrandSet(mboId)];
   if (!brands.length) return { updated: 0 };
   const rows = await withTenant(mboId, (db) => db.q(
-    `SELECT id, base_price, base_currency FROM products
+    `SELECT id, brand, base_price, base_currency FROM products
       WHERE mbo_id=$1 AND brand = ANY($2::text[]) AND base_price IS NOT NULL`,
     [mboId, brands]));
   if (!rows.length) return { updated: 0 };
@@ -754,12 +779,28 @@ export async function refreshUsdBaselines(mboId) {
   // was ~9,885 sequential single-row UPDATE round-trips. Batch them instead:
   // one UPDATE ... FROM UNNEST per chunk, not one per row.
   const ids = [], usds = [];
+  let skipped = 0;
   for (const r of rows) {
-    const usd = await toUsd(mboId, r.base_price, r.base_currency || "INR");
+    // A usd_convert brand's baseline is by definition non-USD (that's what
+    // "convert" means) -- base_currency='USD' here is a stale mislabel from
+    // before the row's brand moved out of fetch_usd_brands. toUsd(x, "USD")
+    // on it is a same-currency round trip (INR then straight back) that
+    // leaves base_usd === base_price: a six-figure native-currency number
+    // silently relabeled as a USD baseline, producing a five/six-figure
+    // fake mismatch downstream. Skip and flag instead of writing that back;
+    // see tools/fix-usd-convert-currency-mislabel.mjs for the one-time fix.
+    if ((r.base_currency || "").toUpperCase() === "USD") { skipped++; continue; }
+    const rate = brandRates[normBrand(r.brand)];
+    // marketOnly=true -- absent a derived brand rate, this baseline feeds
+    // mismatch detection, not the push price, so it must track the real fx
+    // rate, not the admin's editable push-rate override (see fx.js).
+    const usd = rate
+      ? await toUsdAtRate(mboId, r.base_price, r.base_currency || "INR", rate)
+      : await toUsd(mboId, r.base_price, r.base_currency || "INR", true);
     if (usd == null) continue;
     ids.push(r.id); usds.push(usd);
   }
-  if (!ids.length) return { updated: 0 };
+  if (!ids.length) return { updated: 0, skipped };
   const CH = 2000;
   for (let i = 0; i < ids.length; i += CH) {
     const idChunk = ids.slice(i, i + CH), usdChunk = usds.slice(i, i + CH);
@@ -769,7 +810,7 @@ export async function refreshUsdBaselines(mboId) {
         WHERE p.mbo_id=$1 AND p.id = v.id`,
       [mboId, idChunk, usdChunk]));
   }
-  return { updated: ids.length };
+  return { updated: ids.length, skipped };
 }
 
 // ---- per-brand RANGE price preference ----
@@ -777,11 +818,6 @@ const DEFAULT_RANGE_HIGH_BRANDS = new Set([
   // Masaba products can expose a low first variant/sale option while the
   // Studio East baseline tracks the full/high variant price.
   "houseofmasaba.com",
-  // Aisha Rao's "12 Panel / 16 Panel" style option puts the cheaper 12 Panel
-  // variant first (e.g. Tara Rust Tissue Lehenga: variants[0] = XS/12 Panel
-  // @ price_min, but the page defaults to and the baseline tracks 16 Panel
-  // @ price_max).
-  "aisharao.com",
 ]);
 export async function rangeHighBrandSet(mboId) {
   const cached = _rangeHighCache.get(mboId);

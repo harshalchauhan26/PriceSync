@@ -1,6 +1,7 @@
 import pLimit from "p-limit";
 import { Fetcher, extractRow, requestedCurrency, shopifyMarketsUsd } from "./engine.js";
-import { toInr, toUsd } from "./fx.js";
+import { toInr, toUsd, toUsdAtRate } from "./fx.js";
+import { deriveBrandRate } from "./brandRate.js";
 import { config } from "./config.js";
 import * as store from "./store.js";
 import { sendPipelineStarted, sendPipelineProgress, sendErrorsResolved, sendPipelineComplete } from "./mailer.js";
@@ -190,7 +191,13 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
     // an estimate. Anything else is toUsd()'s fx.js conversion of the native
     // fetch -- a real estimate, needs the wider tolerance band.
     const wasEstimate = cur !== "USD";
-    const liveUsd = wasEstimate ? await toUsd(mboId, live, cur) : live;
+    // A derived brandRate (brandRate.js) tracks THIS brand's own storefront
+    // rate; otherwise marketOnly=true so mismatch detection tracks the real
+    // fx rate, not the admin's Save-Rates push-price override.
+    const brandRate = eng.brandRates && eng.brandRates[normBrand(brand)];
+    const liveUsd = wasEstimate
+      ? (brandRate ? await toUsdAtRate(mboId, live, cur, brandRate) : await toUsd(mboId, live, cur, true))
+      : live;
     const baseUsd = prod.base_usd;
     let state, status, msg;
     if (baseUsd == null) {
@@ -206,7 +213,8 @@ async function finalizeOne(eng, prod, live, currency, errMsg, runId) {
     await store.saveResult(mboId, prod, status, liveUsd, "USD", state, runId, { usdBaseline: true });
     return state;
   }
-  const liveInr = await toInr(mboId, live, cur);
+  // marketOnly=true -- same reasoning as the usd_convert branch above.
+  const liveInr = await toInr(mboId, live, cur, true);
   const delta = liveInr - base;
   // toInr() is a passthrough (no real conversion, no estimate) for INR and
   // UNKNOWN -- anything else went through a live fx.js rate and needs the
@@ -469,6 +477,33 @@ export async function startPipeline(eng, runId) {
   try {
     eng.usdFetchBrands = await store.usdFetchBrandSet(mboId);
     eng.usdConvertBrands = await store.usdConvertBrandSet(mboId);
+    // Owner request 2026-09-22: before touching base_usd/live prices, sample
+    // 5 of each usd_convert brand's own products and read what THEIR
+    // storefront actually shows in USD (brandRate.js -- a real browser, since
+    // that number is client-side JS a plain fetch never sees), so this run's
+    // conversion tracks that brand's own rate instead of a generic one.
+    // Slower (a real page load per sample) but requested explicitly; a
+    // brand's failure to derive (no USD widget, scrape error) just falls back
+    // to the market rate for that brand, same as before this existed.
+    eng.brandRates = {};
+    const rateBrands = [...eng.usdConvertBrands].filter((b) => !vendors || vendors.some((v) => store.normBrand(v) === b));
+    if (rateBrands.length) {
+      const rateFetcher = new Fetcher({});
+      for (const b of rateBrands) {
+        try {
+          const samples = await store.sampleProductUrls(mboId, b, 5);
+          const rate = await deriveBrandRate(rateFetcher, samples);
+          if (rate) {
+            eng.brandRates[b] = rate;
+            log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",
+              status: "Info", msg: `${b}: derived rate ${rate.toFixed(2)} from ${samples.length} sample(s)` });
+          }
+        } catch (e) {
+          log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",
+            status: "Warning", msg: `${b}: rate derivation failed — ${e.message}` });
+        }
+      }
+    }
     // Owner-proposed fix 2026-09-16: refresh base_usd from base_price right
     // before this run's fetches start, so base and live are priced off the
     // SAME fx.js rate snapshot -- otherwise a base_usd set hours/days ago
@@ -476,9 +511,11 @@ export async function startPipeline(eng, runId) {
     // price, showing as a false mismatch. Best-effort: a refresh failure
     // must never block the run itself (last run's base_usd just stays as-is).
     try {
-      const { updated } = await store.refreshUsdBaselines(mboId);
+      const { updated, skipped } = await store.refreshUsdBaselines(mboId, eng.brandRates);
       if (updated) log(eng, { row: "—", domain: "usd-baseline-refresh", url: "", currency: "-", price: "-",
         status: "Info", msg: `refreshed base_usd for ${updated} product(s) to today's fx rate` });
+      if (skipped) log(eng, { row: "—", domain: "usd-baseline-refresh", url: "", currency: "-", price: "-",
+        status: "Warning", msg: `${skipped} product(s) skipped -- base_currency mislabeled USD in a usd_convert brand, run tools/fix-usd-convert-currency-mislabel.mjs` });
     } catch (e) {
       log(eng, { row: "—", domain: "usd-baseline-refresh", url: "", currency: "-", price: "-",
         status: "Warning", msg: "base_usd refresh failed: " + e.message });
