@@ -866,6 +866,11 @@ tenantRouter.get("/fetch/usd", wrap(async (req, res) => res.json({ default: "nat
 tenantRouter.post("/fetch/usd", wrap(async (req, res) => res.json({ ok: true, usd_brands: await store.setUsdFetchBrands(req.mboId, req.body.brands ?? req.body.list ?? "") })));
 tenantRouter.get("/fetch/range_high", wrap(async (req, res) => res.json({ range_high_brands: [...(await store.rangeHighBrandSet(req.mboId))] })));
 tenantRouter.post("/fetch/range_high", wrap(async (req, res) => res.json({ ok: true, range_high_brands: await store.setRangeHighBrands(req.mboId, req.body.brands ?? req.body.list ?? "") })));
+// Review page's per-brand rate override (owner request 2026-09-23) -- takes
+// over that brand's ONE fx division from the auto-derived (5-10 sample)
+// rate; see store.brandRateOverrides for the reasoning.
+tenantRouter.get("/fetch/brand_rate", wrap(async (req, res) => res.json({ overrides: await store.brandRateOverrides(req.mboId) })));
+tenantRouter.post("/fetch/brand_rate", wrap(async (req, res) => res.json({ ok: true, overrides: await store.setBrandRateOverride(req.mboId, req.body.brand, req.body.rate) })));
 tenantRouter.get("/fetch/gentle", wrap(async (req, res) => res.json({ gentle_brands: [...(await store.gentleBrandSet(req.mboId))] })));
 tenantRouter.post("/fetch/gentle", wrap(async (req, res) => res.json({ ok: true, gentle_brands: await store.setGentleBrands(req.mboId, req.body.brands ?? req.body.list ?? "") })));
 tenantRouter.get("/fetch/proxy", wrap(async (req, res) => res.json({ proxy_configured: !!config.fetchProxyUrl, proxy_brands: [...(await store.proxyBrandSet(req.mboId))] })));

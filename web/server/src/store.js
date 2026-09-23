@@ -669,6 +669,7 @@ const _usdFetchCache = new Map();
 const _usdConvertCache = new Map();
 const _rangeHighCache = new Map();
 const _gentleCache = new Map();
+const _brandRateOverrideCache = new Map();
 const _proxyCache = new Map();
 const _localOnlyCache = new Map();
 const _cloudSkipCache = new Map();
@@ -834,6 +835,38 @@ export async function setRangeHighBrands(mboId, list) {
   await setMeta(mboId, "range_high_brands", uniq.join(","));
   _rangeHighCache.delete(mboId);
   return uniq;
+}
+
+// ---- per-brand RATE override (Review page, owner request 2026-09-23) ----
+// A brand's INR->USD rate is normally auto-derived every pipeline run
+// (brandRate.js: median of 5-10 sampled products vs. that brand's own
+// storefront-displayed price). This lets an admin substitute their OWN rate
+// for a specific brand instead -- ONE division, same as the auto-derived
+// path (startPipeline checks this map first and skips sampling entirely for
+// an overridden brand), not a second conversion layered on top. Scoped to
+// Review: it feeds the same eng.brandRates used by refreshUsdBaselines/
+// finalizeOne, so it's a deliberate, per-brand, admin-visible choice --
+// unlike the old bug where editing the GLOBAL push-rate override silently
+// rewrote every brand's baseline with no visible cause.
+export async function brandRateOverrides(mboId) {
+  const cached = _brandRateOverrideCache.get(mboId);
+  if (cached && Date.now() - cached.at < 30_000) return cached.map;
+  const raw = await getMeta(mboId, "brand_rate_overrides", "{}");
+  let map = {};
+  try { map = JSON.parse(raw) || {}; } catch { map = {}; }
+  _brandRateOverrideCache.set(mboId, { at: Date.now(), map });
+  return map;
+}
+export async function setBrandRateOverride(mboId, brand, rate) {
+  const nb = normBrand(brand);
+  if (!nb) throw new Error("brand required");
+  const map = { ...(await brandRateOverrides(mboId)) };
+  const n = Number(rate);
+  if (rate == null || rate === "" || !Number.isFinite(n) || n <= 0) delete map[nb];
+  else map[nb] = n;
+  await setMeta(mboId, "brand_rate_overrides", JSON.stringify(map));
+  _brandRateOverrideCache.delete(mboId);
+  return map;
 }
 
 // ---- per-brand GENTLE fetch (bot-protected domains) ----

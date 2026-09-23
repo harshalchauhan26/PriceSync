@@ -488,8 +488,18 @@ export async function startPipeline(eng, runId) {
     eng.brandRates = {};
     const rateBrands = [...eng.usdConvertBrands].filter((b) => !vendors || vendors.some((v) => store.normBrand(v) === b));
     if (rateBrands.length) {
+      // Owner request 2026-09-23: an admin-set rate for a brand (Review page)
+      // takes over that brand's ONE division outright -- skip sampling for
+      // it entirely rather than deriving a rate just to discard it.
+      const overrides = await store.brandRateOverrides(mboId);
       const rateFetcher = new Fetcher({});
       for (const b of rateBrands) {
+        if (overrides[b]) {
+          eng.brandRates[b] = overrides[b];
+          log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",
+            status: "Info", msg: `${b}: using admin override rate ${overrides[b]}` });
+          continue;
+        }
         try {
           const samples = await store.sampleProductUrls(mboId, b, 5);
           const rate = await deriveBrandRate(rateFetcher, samples);

@@ -940,6 +940,8 @@ function Review({admin}) {
   const [summary,setSummary]=useState({total:0,mismatch:0,error:0,matched:0});
   const [gm,setGm]=useState(0); const [convCur,setConvCur]=useState("USD"); const [fxr,setFxr]=useState({});
   const [usd,setUsd]=useState("");
+  const [brandRateOverrides,setBrandRateOverrides]=useState({});
+  const [brandRateInput,setBrandRateInput]=useState("");
   const [rerunning,setRerunning]=useState(()=>new Set());
   const [pushBusy,setPushBusy]=useState(false); const [pushJob,setPushJob]=useState(null);
   const [onlyMismatch,setOnlyMismatch]=useState(false);
@@ -975,6 +977,16 @@ function Review({admin}) {
   // items change (row edits replace the items array and must not jump the page).
   useEffect(()=>{ setPage(0); },[stateFilter,brands,search]);
   useEffect(()=>{ api("/api/fx").then(d=>{ if(d.rates) setFxr(d.rates); if(d.markup!=null) setGm(d.markup); setUsd(d.overrides?.USD??""); }); },[]);
+  useEffect(()=>{ api("/api/fetch/brand_rate").then(d=>setBrandRateOverrides(d.overrides||{})); },[]);
+  // Reflects the single selected brand's saved override (blank when none, or
+  // when multiple/no brands are picked — the control only applies to one).
+  useEffect(()=>{ setBrandRateInput(brands.length===1?(brandRateOverrides[brands[0].toLowerCase().replace(/^www\./,"")]??""):""); },[brands,brandRateOverrides]);
+  const saveBrandRate=async()=>{
+    if (brands.length!==1) return;
+    const r=await aj("/api/fetch/brand_rate",{brand:brands[0],rate:brandRateInput});
+    if(r.ok){ setBrandRateOverrides(r.overrides); toast(brandRateInput?`Rate override saved for ${brands[0]} — takes effect on its next pipeline run`:`Rate override cleared for ${brands[0]}`,"ok"); }
+    else toast(r.error||"Failed","err");
+  };
 
   const liveInr=(it)=>{ if(it.live_price==null) return null; const c=(it.currency||"INR").toUpperCase(); if(c==="INR") return it.live_price; return it.live_price*(fxr[c]||1); };
   // Prefer the delta the pipeline stored — it already applies per-brand rules
@@ -1091,6 +1103,20 @@ function Review({admin}) {
       <div className="pill-group">
         {[["INR","INR"],["USD","USD→₹"]].map(([k,l])=><button key={k} className={`pill${convCur===k?" active":""}`} onClick={()=>setConvCur(k)}>{l}</button>)}
       </div>
+      {/* Per-brand rate override -- only meaningful with exactly one brand
+          picked up top. Replaces that brand's auto-derived (5-10 sample)
+          rate outright on its next pipeline run; doesn't touch any other
+          brand or the global Save-Rates field above. */}
+      {brands.length===1&&<>
+        <div className="toolbar-sep"/>
+        <span style={{fontSize:12,color:"var(--on3)"}}>{brands[0]} rate override</span>
+        <input type="number" step=".01" className="inp mono" style={{width:80}}
+          placeholder={brandRateOverrides[brands[0].toLowerCase().replace(/^www\./,"")]==null?"auto":""}
+          value={brandRateInput} onChange={e=>setBrandRateInput(e.target.value)}/>
+        <button className="btn btn-ghost btn-sm" onClick={saveBrandRate} disabled={!admin}>
+          <Icon n="check" s={12}/>{brandRateInput?"Save":"Clear"}
+        </button>
+      </>}
     </div>
 
     {/* Table — paginated so the DOM stays bounded. Rendering all rows at once
