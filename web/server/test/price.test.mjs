@@ -298,18 +298,18 @@ test("computeFinal honours custom, ref and conversion", () => {
   assert.equal(computeFinal(5000, 8300, "base", 0, null, false, 83), 5000);
 });
 
-test("isPriceMatch: matched under $1, or inside the $45-$70 gap, either direction", () => {
+test("isPriceMatch: matched under $1, or inside the $47-$70 gap, either direction", () => {
   assert.equal(isPriceMatch(0), true);
   assert.equal(isPriceMatch(0.99), true);
   assert.equal(isPriceMatch(1), false);
-  assert.equal(isPriceMatch(44.99), false);
-  assert.equal(isPriceMatch(45), true);
+  assert.equal(isPriceMatch(46.99), false);
+  assert.equal(isPriceMatch(47), true);
   assert.equal(isPriceMatch(52.5), true);
   assert.equal(isPriceMatch(70), true);
   assert.equal(isPriceMatch(70.01), false);
   assert.equal(isPriceMatch(-50), true);   // direction doesn't matter
   assert.equal(isPriceMatch(-0.5), true);
-  assert.equal(isPriceMatch(-44), false);
+  assert.equal(isPriceMatch(-46), false);
 });
 
 test("stateOf maps status prefixes", () => {
