@@ -390,7 +390,17 @@ export async function extractShopify(fetcher, url, preferHigh = false) {
     // include the product-level maxima for them.
     const src = v0 || data;
     const cands = [src.compare_at_price, src.price];
-    if (preferHigh) cands.push(data.compare_at_price_max, data.price_max);
+    // Range-high brands track the top variant (e.g. "with pants" sets), but a
+    // "Two Dupattas" variant isn't a bigger/fuller version of the product --
+    // it's a different accessory count the MBO baseline doesn't price against.
+    // Excluding it keeps the high-price pick meaningful; products without a
+    // dupatta option are untouched (nothing matches, so all variants remain).
+    if (preferHigh) {
+      const eligible = variants.filter((v) => !/two\s*dupattas?/i.test(v.title || v.public_title || ""));
+      const pool = eligible.length ? eligible : variants;
+      if (pool.length) for (const v of pool) cands.push(v.compare_at_price, v.price);
+      else cands.push(data.compare_at_price_max, data.price_max);
+    }
     const price = Math.max(...cands.map((x) => shopifyNum(x) || 0)) || null;
     let currency = DOMAIN_CURRENCY.get(domain) || null;
     if (price != null && !currency) {

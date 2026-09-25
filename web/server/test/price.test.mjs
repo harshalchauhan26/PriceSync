@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import {
   sanitizePrice, descaleIfCents, detectCurrency, extractPriceDetail,
   redirectedOffProduct, withCurrencyParam, wooApiUrl, extractRow,
-  pickWooProduct, FETCH_ONLY_PARAMS, isUnsafeCustomRegex,
+  pickWooProduct, FETCH_ONLY_PARAMS, isUnsafeCustomRegex, extractShopify,
 } from "../src/engine.js";
 import {
   roundFinal, computeFinal, isPriceMatch, stateOf, brandOf, canonicalUrl,
@@ -164,6 +164,35 @@ test("Moledro Shopify fetch is pinned to the India market", async () => {
   assert.equal(price, 265000);
   assert.equal(currency, "INR");
   assert.equal(seen[0], "https://www.mymoledro.com/products/azura-lehenga-set.js?country=IN");
+});
+
+// houseofmasaba.com bridal sets add a "Dupatta Option" variant axis (One vs
+// Two Dupattas) on top of Trail/Size. preferHigh used to take data.price_max
+// across ALL variants, which could land on a "Two Dupattas" combo -- a
+// different accessory count, not a bigger/fuller version of the product the
+// MBO baseline prices against -- inflating the live price into a phantom
+// mismatch. It must pick the top price among the "one dupatta" variants
+// instead, and fall back to the full set for products with no dupatta option.
+test("preferHigh excludes Two Dupattas variants from the range-high pick", async () => {
+  const fetcher = { async get() {
+    return { data: JSON.stringify({ variants: [
+      { title: "Without Trail / With One Dupatta / XS", price: 400000, compare_at_price: null },
+      { title: "With Trail / With One Dupatta / XS", price: 450000, compare_at_price: null },
+      { title: "With Trail / With Two Dupattas / XS", price: 600000, compare_at_price: null },
+    ] }) };
+  } };
+  const [price] = await extractShopify(fetcher, "https://houseofmasaba.com/products/red-bag-e-bahar-lehenga", true);
+  assert.equal(price, 4500);
+});
+test("preferHigh falls back to all variants when none carry a dupatta option", async () => {
+  const fetcher = { async get() {
+    return { data: JSON.stringify({ variants: [
+      { title: "XS", price: 400000, compare_at_price: null },
+      { title: "M", price: 500000, compare_at_price: null },
+    ] }) };
+  } };
+  const [price] = await extractShopify(fetcher, "https://houseofmasaba.com/products/some-set", true);
+  assert.equal(price, 5000);
 });
 
 // labelanushree runs WooCommerce "Price Based on Country" (WCPBC) \u2014 not WOOCS,
