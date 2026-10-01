@@ -1344,6 +1344,97 @@ export async function applyBaseSheet(mboId, buf) {
   return { ...pre, updated: changes.length };
 }
 
+// ---- delete products (manual multi-select, or a sheet of links/handles) ----
+// Permanent — removes the product row, its import_catalog copy, and any
+// review-bucket copy. Price history / review_history / base_price_audit are
+// left alone (they're the audit trail, not live state) so a deleted
+// product's past still shows up in those tables by key.
+export async function deletableProducts(mboId, { brands = [], search = "" } = {}) {
+  const cl = ["mbo_id=$1"]; const p = [mboId];
+  if (brands && brands.length) { cl.push(`brand = ANY($${p.length + 1}::text[])`); p.push(brands); }
+  if (search.trim()) { cl.push(`(url ILIKE $${p.length + 1} OR mbo_url ILIKE $${p.length + 1} OR brand ILIKE $${p.length + 1})`); p.push(`%${search.trim()}%`); }
+  return withTenant(mboId, (db) => db.q(
+    `SELECT id,key,brand,url,mbo_url,base_price,base_currency,state,status
+     FROM products WHERE ${cl.join(" AND ")} ORDER BY brand, key LIMIT 5000`, p));
+}
+export async function deleteProductsByIds(mboId, ids) {
+  if (!ids?.length) return { deleted: 0 };
+  return withTenant(mboId, async (db) => {
+    const rows = await db.q(`DELETE FROM products WHERE mbo_id=$1 AND id = ANY($2::bigint[]) RETURNING key`, [mboId, ids]);
+    const keys = rows.map((r) => r.key);
+    if (keys.length) {
+      await db.q(`DELETE FROM import_catalog WHERE mbo_id=$1 AND key = ANY($2::text[])`, [mboId, keys]);
+      for (const t of Object.values(BUCKET_TABLE)) await db.q(`DELETE FROM ${t} WHERE mbo_id=$1 AND key = ANY($2::text[])`, [mboId, keys]);
+    }
+    return { deleted: rows.length };
+  });
+}
+
+const DELETE_HANDLE_HEADERS = ["handle", "studio east handle", "mbo handle"];
+export function parseDeleteSheet(buf) {
+  const wb = XLSX.read(buf, { type: "buffer" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  const cols = raw.length ? Object.keys(raw[0]) : [];
+  const urlCol = pickHeader(cols, BASE_URL_HEADERS);
+  const handleCol = pickHeader(cols, DELETE_HANDLE_HEADERS);
+  if (!urlCol && !handleCol) {
+    throw new Error(`sheet needs a URL column or a Handle column — found: ${cols.join(", ") || "(no columns)"}`);
+  }
+  const seen = new Set();
+  const rows = [];
+  for (let i = 0; i < raw.length; i++) {
+    const r = raw[i];
+    const url = urlCol ? String(r[urlCol] || "").trim() : "";
+    const handle = handleCol ? String(r[handleCol] || "").trim() : "";
+    if (!url && !handle) continue;
+    const dedupeKey = `${url}||${handle}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    rows.push({ row: i + 2, url, handle });
+  }
+  return { urlCol, handleCol, rows };
+}
+const tailOf = (u) => String(u || "").trim().replace(/\/+$/, "").split("/").pop().toLowerCase();
+
+// Matches each sheet row against url, mbo_url, OR a bare Studio East handle
+// (the tail of mbo_url) -- a sheet can carry whichever link is on hand.
+// Never writes.
+export async function previewDeleteSheet(mboId, buf) {
+  const { urlCol, handleCol, rows } = parseDeleteSheet(buf);
+  const prods = await withTenant(mboId, (db) =>
+    db.q("SELECT id,key,brand,url,mbo_url,base_price FROM products WHERE mbo_id=$1", [mboId]));
+  const byUrl = new Map(), byMboUrl = new Map(), byMboHandle = new Map();
+  for (const p of prods) {
+    if (p.url) byUrl.set(canonicalUrl(p.url).replace(/\/+$/, "").toLowerCase(), p);
+    if (p.mbo_url) {
+      byMboUrl.set(String(p.mbo_url).trim().replace(/\/+$/, "").toLowerCase(), p);
+      byMboHandle.set(tailOf(p.mbo_url), p);
+    }
+  }
+  const matched = [], unmatched = [];
+  const seenIds = new Set();
+  for (const r of rows) {
+    let hit = null;
+    if (r.url) {
+      const c = canonicalUrl(r.url).replace(/\/+$/, "").toLowerCase();
+      hit = byUrl.get(c) || byMboUrl.get(c) || byMboHandle.get(tailOf(r.url));
+    }
+    if (!hit && r.handle) hit = byMboHandle.get(r.handle.toLowerCase());
+    if (!hit) { unmatched.push({ row: r.row, url: r.url, handle: r.handle }); continue; }
+    if (seenIds.has(hit.id)) continue;
+    seenIds.add(hit.id);
+    matched.push({ row: r.row, id: hit.id, key: hit.key, brand: hit.brand, url: hit.url, mbo_url: hit.mbo_url, base_price: hit.base_price });
+  }
+  return { urlCol, handleCol, total: rows.length, matched, unmatched };
+}
+export async function applyDeleteSheet(mboId, buf) {
+  const pre = await previewDeleteSheet(mboId, buf);
+  if (!pre.matched.length) return { ...pre, deleted: 0 };
+  const { deleted } = await deleteProductsByIds(mboId, pre.matched.map((m) => m.id));
+  return { ...pre, deleted };
+}
+
 // ---- add products directly (manual entry or a standalone sheet) ----
 // Purely additive: always INSERTs new rows with a fresh key, never updates
 // or deletes an existing product. Distinct from importSheet/commitImportToProducts,

@@ -608,13 +608,19 @@ tenantRouter.post("/review/update_base", wrap(async (req, res) => {
   // USD baseline only makes sense when the live price itself is USD; otherwise
   // clear it so the next USD-fetch run freezes a fresh baseline.
   const baseUsd = !isNative && cur === "USD" ? it.live_price : null;
+  // base_currency must track what base_price actually got stored as (BUG-021
+  // territory): leaving a stale label here — e.g. 'USD' surviving from an
+  // earlier native-currency reclassification — made a correctly-computed INR
+  // number read as a six-figure USD baseline, producing a bogus mismatch the
+  // size of the whole conversion factor.
+  const baseCurrency = isNative ? nativeCur : "INR";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  await q(`UPDATE products SET base_price=$1, base_usd=$2, live_price=NULL, currency=NULL,
-      delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$3
-    WHERE mbo_id=$4 AND id=$5`, [baseInr, baseUsd, now, mboId, it.id]);
-  await q("UPDATE import_catalog SET base_price=$1 WHERE mbo_id=$2 AND key=$3", [baseInr, mboId, it.key]);
+  await q(`UPDATE products SET base_price=$1, base_usd=$2, base_currency=$3, live_price=NULL, currency=NULL,
+      delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$4
+    WHERE mbo_id=$5 AND id=$6`, [baseInr, baseUsd, baseCurrency, now, mboId, it.id]);
+  await q("UPDATE import_catalog SET base_price=$1, base_currency=$2 WHERE mbo_id=$3 AND key=$4", [baseInr, baseCurrency, mboId, it.key]);
   await store.clearBuckets(mboId, q, it.key);
-  res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, currency: cur, native: isNative, counts: await store.counts(mboId) });
+  res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, base_currency: baseCurrency, currency: cur, native: isNative, counts: await store.counts(mboId) });
 }));
 tenantRouter.post("/review/update_base_all", wrap(async (req, res) => {
   const mboId = req.mboId;
@@ -633,10 +639,11 @@ tenantRouter.post("/review/update_base_all", wrap(async (req, res) => {
     const baseInr = isNative ? Number(r.live_price) : await toInr(mboId, r.live_price, cur);
     if (baseInr == null || !Number.isFinite(baseInr) || baseInr <= 0) continue;
     const baseUsd = !isNative && cur === "USD" ? r.live_price : null;
-    await q(`UPDATE products SET base_price=$1, base_usd=$2, live_price=NULL, currency=NULL,
-        delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$3
-      WHERE mbo_id=$4 AND id=$5`, [baseInr, baseUsd, now, mboId, r.id]);
-    await q("UPDATE import_catalog SET base_price=$1 WHERE mbo_id=$2 AND key=$3", [baseInr, mboId, r.key]);
+    const baseCurrency = isNative ? cur : "INR";
+    await q(`UPDATE products SET base_price=$1, base_usd=$2, base_currency=$3, live_price=NULL, currency=NULL,
+        delta=NULL, state='pending', status='', decision='pending', decided_at=NULL, updated_at=$4
+      WHERE mbo_id=$5 AND id=$6`, [baseInr, baseUsd, baseCurrency, now, mboId, r.id]);
+    await q("UPDATE import_catalog SET base_price=$1, base_currency=$2 WHERE mbo_id=$3 AND key=$4", [baseInr, baseCurrency, mboId, r.key]);
     await store.clearBuckets(mboId, q, r.key);
     updated++;
   }
@@ -650,6 +657,29 @@ tenantRouter.post("/review/delete", wrap(async (req, res) => {
   await q("DELETE FROM import_catalog WHERE mbo_id=$1 AND key=$2", [mboId, it.key]);
   await store.clearBuckets(mboId, q, it.key);
   res.json({ ok: true, counts: await store.counts(mboId) });
+}));
+
+// ---------- Delete tab: browse/select/permanently delete, or delete by sheet ----------
+tenantRouter.get("/delete/items", wrap(async (req, res) => {
+  const brands = (req.query.brands || "").split(",").map((s) => s.trim()).filter(Boolean);
+  res.json({ items: await store.deletableProducts(req.mboId, { brands, search: req.query.search || "" }) });
+}));
+tenantRouter.post("/delete/selected", wrap(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.filter(Boolean) : [];
+  if (!ids.length) return res.status(400).json({ ok: false, error: "no products selected" });
+  res.json({ ok: true, ...(await store.deleteProductsByIds(req.mboId, ids)) });
+}));
+// Two steps, same reason as /base/sheet_preview — a delete sheet must never
+// write on the strength of a file nobody has looked at the parsed result of.
+tenantRouter.post("/delete/sheet_preview", upload.single("file"), wrap(async (req, res) => {
+  if (!req.file) return res.status(400).json({ ok: false, error: "no file" });
+  try { res.json({ ok: true, ...(await store.previewDeleteSheet(req.mboId, req.file.buffer)) }); }
+  catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+}));
+tenantRouter.post("/delete/sheet_apply", upload.single("file"), wrap(async (req, res) => {
+  if (!req.file) return res.status(400).json({ ok: false, error: "no file" });
+  try { res.json({ ok: true, ...(await store.applyDeleteSheet(req.mboId, req.file.buffer)) }); }
+  catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 }));
 // Re-fetches a single product's live price right now, using the exact same
 // per-brand extraction rules as a real pipeline run (see pipe.rerunOne) —

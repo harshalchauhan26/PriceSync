@@ -3,8 +3,19 @@ import ExcelJS from "exceljs";
 import { q } from "./db.js";
 import { config } from "./config.js";
 
-const COLS = ["brand", "url", "base_price", "live_price", "currency", "status", "state",
-  "delta", "decision", "final_price"];
+// designer_url/mbo_url: the two source links side by side, so a reviewer
+// never has to cross-reference the app to know which Studio East listing a
+// row is about. studio_east_price/studio_east_currency: base_price is, for
+// every brand this sheet import has touched, literally the price read off
+// Studio East's own store -- labeled plainly instead of the more generic
+// "base_price" so the sheet reads the same way the business already talks
+// about it. price_usd: base_usd, the dollar figure mismatch detection
+// actually compares against.
+const COLS = ["brand", "designer_url", "mbo_url", "studio_east_price", "studio_east_currency",
+  "price_usd", "live_price", "currency", "status", "state", "delta", "decision", "final_price"];
+const SELECT_COLS = "brand,url AS designer_url,mbo_url,base_price AS studio_east_price," +
+  "base_currency AS studio_east_currency,base_usd AS price_usd,live_price,currency,status," +
+  "state,delta,decision,final_price";
 
 async function stateRows(mboId, states, brands) {
   const p = [mboId, ...states];
@@ -13,8 +24,7 @@ async function stateRows(mboId, states, brands) {
     where += ` AND brand IN (${brands.map((_, i) => `$${i + 2 + states.length}`).join(",")})`;
     p.push(...brands);
   }
-  return q(`SELECT brand,url,base_price,live_price,currency,status,state,delta,
-    decision,final_price FROM products WHERE ${where}
+  return q(`SELECT ${SELECT_COLS} FROM products WHERE ${where}
     ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, p);
 }
 const mismatchRows = (mboId, brands) => stateRows(mboId, ["mismatch"], brands);
@@ -413,8 +423,9 @@ export async function sendErrorsResolved({ mboId, to, stats } = {}) {
   const rows = await stateRows(mboId, ["error"]);
   const wb = new ExcelJS.Workbook();
   flatSheet(wb, "Remaining Errors", [
-    { key: "brand", header: "brand" }, { key: "url", header: "url" },
-    { key: "base_price", header: "base_price" }, { key: "status", header: "status" },
+    { key: "brand", header: "brand" }, { key: "designer_url", header: "designer_url" },
+    { key: "mbo_url", header: "mbo_url" },
+    { key: "studio_east_price", header: "studio_east_price" }, { key: "status", header: "status" },
   ], rows);
   const attach = rows.length
     ? [{ filename: `remaining_errors_${today()}.xlsx`, content: Buffer.from(await wb.xlsx.writeBuffer()) }]

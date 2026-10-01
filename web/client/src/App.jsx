@@ -1162,7 +1162,7 @@ function Review({admin}) {
               ref={el=>{ if(el) el.indeterminate=pageRows.some(it=>sel.has(it.id))&&!pageRows.every(it=>sel.has(it.id)); }}
               onChange={e=>{ const on=e.target.checked; setSel(s=>{ const n=new Set(s); pageRows.forEach(it=>on?n.add(it.id):n.delete(it.id)); return n; }); }}/>
           </th>
-          {["Product","State","Base","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}
+          {["Product","State","Studio East Price","Live","Δ","Override",`Final ${convCur}`,""].map((h,i)=><th key={i}>{h}</th>)}
         </tr></thead>
         <tbody>
           {pageRows.map(it=>{ const li=liveInr(it),dl=dInr(it),up=(dl||0)>0; const [pl,pc]=STATE_PILL[it.state]||["",""]; const isUsdRow=(it.currency||"").toUpperCase()==="USD"&&it.base_usd!=null; const showConv=(it.currency||"INR").toUpperCase()!=="INR"&&!isUsdRow; const picked=sel.has(it.id); return <tr key={it.id} style={picked?{background:"var(--sel,rgba(90,140,255,.10))"}:undefined}>
@@ -1295,6 +1295,174 @@ function History({admin}) {
           {!d.items.length&&<tr><td colSpan={9} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>No approvals yet.</td></tr>}
         </tbody>
       </table>
+    </div>
+  </div>;
+}
+
+/* ═════════════════════════════════════════════════════════════
+   DELETE — permanently remove products from the database. Either tick
+   individual rows, or upload a sheet of URLs/handles to match and remove in
+   bulk. Nothing here is reversible from the UI (the server keeps a snapshot
+   table before any bulk sheet delete, but there's no "undo" button).
+═════════════════════════════════════════════════════════════ */
+function DeleteTab({admin}) {
+  const [brands,setBrands]=useState([]);
+  const [q,setQ]=useState("");
+  const [items,setItems]=useState([]); const [busy,setBusy]=useState(true);
+  const [sel,setSel]=useState(new Set());
+  const [page,setPage]=useState(0); const PAGE_SIZE=500;
+  const [deleting,setDeleting]=useState(false);
+  // Sheet upload, same preview-then-commit shape as Base Price's.
+  const [file,setFile]=useState(null); const [prev,setPrev]=useState(null); const [applying,setApplying]=useState(false);
+
+  const load=useCallback(()=>{
+    setBusy(true);
+    api(`/api/delete/items?brands=${encodeURIComponent(brands.join(","))}&search=${encodeURIComponent(q)}`)
+      .then(r=>setItems(r&&r.items?r.items:[])).finally(()=>setBusy(false));
+  },[brands,q]);
+  useEffect(()=>{ const t=setTimeout(load,q?350:0); return()=>clearTimeout(t); },[load,q]);
+  useEffect(()=>{ setPage(0); setSel(new Set()); },[brands,q]);
+
+  const toggleRow=(id)=>setSel(s=>{ const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; });
+  const deleteIds=async(ids,label)=>{
+    if(!admin) return toast("Admin only","err");
+    if(!ids.length) return;
+    if(!confirm(`Permanently delete ${label}?\n\nThis removes the product row entirely — not just from Review. This cannot be undone from here.`)) return;
+    setDeleting(true);
+    const r=await aj("/api/delete/selected",{ids});
+    setDeleting(false);
+    if(!r.ok) return toast(r.error||"Delete failed","err");
+    toast(`Deleted ${r.deleted} product(s)`,"ok");
+    setSel(new Set()); load();
+  };
+
+  const onSheet=async(f)=>{
+    if(!f||!admin) return;
+    setFile(f); setPrev(null);
+    const fd=new FormData(); fd.append("file",f);
+    toast("Reading "+f.name+"…");
+    const r=await api("/api/delete/sheet_preview",{method:"POST",body:fd});
+    if(!r.ok){ setFile(null); return toast(r.error||"Could not read sheet","err"); }
+    setPrev(r);
+    toast(`${r.matched.length} product(s) matched for deletion`,r.matched.length?"ok":"err");
+  };
+  const applySheet=async()=>{
+    if(!admin||!file||!prev) return;
+    if(!prev.matched.length) return toast("Nothing matched — nothing to delete","err");
+    if(!confirm(`Permanently delete ${prev.matched.length} product(s) matched by this sheet?\n\n${prev.unmatched.length} unmatched row(s) will be ignored. This cannot be undone from here.`)) return;
+    setApplying(true);
+    const fd=new FormData(); fd.append("file",file);
+    const r=await api("/api/delete/sheet_apply",{method:"POST",body:fd});
+    setApplying(false);
+    if(!r.ok) return toast(r.error||"Failed","err");
+    toast(`Deleted ${r.deleted} product(s)`,"ok");
+    setFile(null); setPrev(null); load();
+  };
+
+  const pageCount=Math.max(1,Math.ceil(items.length/PAGE_SIZE));
+  const safePage=Math.min(page,pageCount-1);
+  const pageRows=items.slice(safePage*PAGE_SIZE,safePage*PAGE_SIZE+PAGE_SIZE);
+
+  return <div style={{height:"100%",minHeight:0,display:"flex",flexDirection:"column"}}>
+    <PageBar title="Delete Products" subtitle="Permanently remove products from the database — ticked individually, or matched from an uploaded sheet."
+      brands={brands} setBrands={setBrands} brandScope="review"
+      onClear={(q||brands.length)?()=>{setQ("");setBrands([]);}:undefined}
+      extraLeft={<>
+        <button className="btn btn-ghost btn-sm" onClick={load}><Icon n="refresh" s={12}/>Refresh</button>
+        <input className="inp" placeholder="Search URL, Studio East URL, or brand…" value={q} onChange={e=>setQ(e.target.value)} style={{width:280}}/>
+      </>}/>
+
+    {/* Delete-by-sheet */}
+    <div className="card" style={{padding:"10px 16px",marginBottom:10,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <span className="lbl">Delete from sheet</span>
+      <input id="del-fi" type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}}
+        onChange={e=>{ onSheet(e.target.files[0]); e.target.value=""; }}/>
+      <button className="btn btn-ghost btn-sm" disabled={!admin} onClick={()=>document.getElementById("del-fi").click()}>
+        <Icon n="up" s={12}/>Choose sheet…
+      </button>
+      <span style={{fontSize:11,color:"var(--on3)"}}>
+        Needs a <b>URL</b> column (designer or Studio East link) or a <b>Handle</b> column — every matched row is deleted.
+      </span>
+      {file&&<span className="mono" style={{fontSize:11,color:"var(--on2)"}}>{file.name}</span>}
+      {(file||prev)&&<button className="btn btn-ghost btn-sm" onClick={()=>{setFile(null);setPrev(null);}}><Icon n="x" s={12}/>Cancel</button>}
+    </div>
+
+    {prev&&<div className="card" style={{padding:"12px 16px",marginBottom:10}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:8}}>
+        <span style={{fontSize:12,color:"var(--on2)"}}>
+          {fmtInt(prev.total)} row(s) read —
+          {" "}<b style={{color:"var(--red)"}}>{fmtInt(prev.matched.length)} will be deleted</b>,
+          {" "}<b style={{color:"var(--on3)"}}>{fmtInt(prev.unmatched.length)} unmatched (ignored)</b>
+        </span>
+        <div style={{flex:1}}/>
+        <button className="btn btn-danger btn-sm" onClick={applySheet} disabled={!admin||applying||!prev.matched.length}>
+          <Icon n="trash" s={12}/>{applying?"Deleting…":`Delete ${fmtInt(prev.matched.length)} product(s)`}
+        </button>
+      </div>
+      <div style={{maxHeight:240,overflow:"auto"}}>
+        <table className="tbl">
+          <thead><tr>{["Row","Product","Brand","Studio East Price",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+          <tbody>
+            {prev.matched.map((m,i)=><tr key={"m"+i}>
+              <td className="mono" style={{color:"var(--on3)",fontSize:11}}>{m.row}</td>
+              <td style={{maxWidth:380}}><span style={{...URL_WRAP,fontSize:11}}>{fullUrl(m.url||m.mbo_url)}</span></td>
+              <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(m.brand||"").replace(/^www\./,"")}</td>
+              <td className="mono" style={{textAlign:"right"}}>{fmt(m.base_price)}</td>
+              <td/>
+            </tr>)}
+            {prev.unmatched.map((u,i)=><tr key={"u"+i}>
+              <td className="mono" style={{color:"var(--on3)",fontSize:11}}>{u.row}</td>
+              <td colSpan={4} style={{fontSize:11,color:"var(--on3)"}}>{u.url||u.handle||"(blank)"} — no matching product</td>
+            </tr>)}
+            {!prev.matched.length&&!prev.unmatched.length&&
+              <tr><td colSpan={5} style={{textAlign:"center",padding:"20px 0",color:"var(--on3)"}}>Nothing readable in this sheet.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>}
+
+    {/* Manual browse + select */}
+    <div className="card" style={{flex:1,minHeight:0,overflow:"auto"}}>
+      <table className="tbl">
+        <thead><tr>
+          <th style={{width:28}}>
+            <input type="checkbox" title="Select every product on this page"
+              checked={pageRows.length>0&&pageRows.every(it=>sel.has(it.id))}
+              ref={el=>{ if(el) el.indeterminate=pageRows.some(it=>sel.has(it.id))&&!pageRows.every(it=>sel.has(it.id)); }}
+              onChange={e=>{ const on=e.target.checked; setSel(s=>{ const n=new Set(s); pageRows.forEach(it=>on?n.add(it.id):n.delete(it.id)); return n; }); }}/>
+          </th>
+          {["Product","Brand","Studio East Price","State",""].map((h,i)=><th key={i}>{h}</th>)}
+        </tr></thead>
+        <tbody>
+          {pageRows.map(it=>{ const picked=sel.has(it.id); return <tr key={it.id} style={picked?{background:"var(--sel,rgba(90,140,255,.10))"}:undefined}>
+            <td><input type="checkbox" checked={picked} onChange={()=>toggleRow(it.id)}/></td>
+            <td style={{maxWidth:420}}>
+              <a href={it.url||it.mbo_url} target="_blank" rel="noopener" title={it.url||it.mbo_url} style={{color:"var(--blue)",...URL_WRAP}}>{fullUrl(it.url||it.mbo_url)}</a>
+              <div className="mono" style={{fontSize:10,color:"var(--on3)"}}>{(it.brand||"").replace(/^www\./,"")}</div>
+            </td>
+            <td className="mono" style={{fontSize:11,color:"var(--on2)"}}>{(it.brand||"").replace(/^www\./,"")}</td>
+            <td className="mono" style={{textAlign:"right"}}>{fmt(it.base_price)} <span style={{color:"var(--on3)",fontSize:10}}>{it.base_currency}</span></td>
+            <td style={{fontSize:11,color:"var(--on3)"}}>{it.state||"—"}</td>
+            <td><button className="btn btn-danger btn-sm" title="Delete this product permanently" onClick={()=>deleteIds([it.id],"this product")} disabled={!admin||deleting}>
+              <Icon n="trash" s={12}/>Delete
+            </button></td>
+          </tr>;})}
+          {!pageRows.length&&!busy&&<tr><td colSpan={6} style={{textAlign:"center",padding:"48px 0",color:"var(--on3)"}}>No products match.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+    {items.length>PAGE_SIZE&&<div style={{marginTop:8,display:"flex",alignItems:"center",gap:10}}>
+      <button className="btn btn-ghost btn-sm" onClick={()=>setPage(p=>Math.max(0,p-1))} disabled={safePage<=0}>‹ Prev</button>
+      <span style={{fontSize:12,color:"var(--on2)"}}>Page {safePage+1} / {pageCount}</span>
+      <button className="btn btn-ghost btn-sm" onClick={()=>setPage(p=>Math.min(pageCount-1,p+1))} disabled={safePage>=pageCount-1}>Next ›</button>
+    </div>}
+
+    <div style={{marginTop:12,flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
+      <button className="btn btn-danger" onClick={()=>deleteIds([...sel],`${sel.size} selected product${sel.size===1?"":"s"}`)} disabled={!admin||deleting||!sel.size}>
+        <Icon n="trash" s={14}/>{deleting?"Deleting…":`Delete selected (${fmtInt(sel.size)})`}
+      </button>
+      {sel.size>0&&<button className="btn btn-ghost btn-sm" onClick={()=>setSel(new Set())}><Icon n="x" s={12}/>Clear selection</button>}
+      <span style={{fontSize:11,color:"var(--on3)"}}>{fmtInt(items.length)} product(s) shown</span>
     </div>
   </div>;
 }
@@ -2216,6 +2384,7 @@ export default function App() {
     ["add","Add Products","plus"],
     ["review","Review","review"],
     ["base","Base Price","up"],
+    ["delete","Delete","trash"],
     ["history","History","clock"],
     ["export","Export","dl"],
     ["integrations","Integrations","plug"],
@@ -2304,6 +2473,7 @@ export default function App() {
         {view==="review"      && <Review      admin={admin}/>}
         {view==="history"     && <History     admin={admin}/>}
         {view==="base"        && <BasePrice   admin={admin}/>}
+        {view==="delete"      && <DeleteTab   admin={admin}/>}
         {view==="export"      && <ExportData  />}
         {view==="integrations"&& <Integrations admin={admin}/>}
         {view==="home"        && <Home        go={setView} admin={admin}/>}
