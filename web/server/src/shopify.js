@@ -112,6 +112,26 @@ export async function fetchAllVariants(run, ref) {
   return { productGid, variants };
 }
 
+// Read-only: current variant price(s) as they stand on the Studio East store
+// right now. Never mutates. Used for bulk audit/reporting, not the push path.
+export async function fetchLiveVariants(mboId, url) {
+  const c = await cfg(mboId);
+  if (!c || !c.shop_domain || !c.access_token) return { ok: false, error: "no store connected" };
+  const ref = productRefOf(url);
+  if (!ref.handle && !ref.productId) return { ok: false, error: "url has no product handle/id" };
+  const ver = c.api_version || "2024-10";
+  const endpoint = `https://${c.shop_domain}/admin/api/${ver}/graphql.json`;
+  const headers = { "X-Shopify-Access-Token": c.access_token, "Content-Type": "application/json" };
+  const run = (query, variables) => gql(endpoint, headers, query, variables);
+  try {
+    const pv = await fetchAllVariants(run, ref);
+    if (!pv) return { ok: false, error: "not found in store" };
+    return { ok: true, product_id: gidNum(pv.productGid), prices: pv.variants.map((v) => Number(v.price)) };
+  } catch (e) {
+    return { ok: false, error: "Shopify API error: " + (e.response?.status || e.message) };
+  }
+}
+
 export function pushPrice(mboId, url, price) {
   return enqueuePush(mboId, () => _pushPrice(mboId, url, price));
 }
