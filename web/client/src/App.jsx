@@ -988,13 +988,15 @@ function Review({admin}) {
     else toast(r.error||"Failed","err");
   };
 
-  const liveInr=(it)=>{ if(it.live_price==null) return null; const c=(it.currency||"INR").toUpperCase(); if(c==="INR") return it.live_price; return it.live_price*(fxr[c]||1); };
+  // Rate typed in the USD→₹ box applies to every preview immediately (before Save).
+  const fx={...fxr,...(Number(usd)>0?{USD:Number(usd)}:{})};
+  const liveInr=(it)=>{ if(it.live_price==null) return null; const c=(it.currency||"INR").toUpperCase(); if(c==="INR") return it.live_price; return it.live_price*(fx[c]||1); };
   // Prefer the delta the pipeline stored — it already applies per-brand rules
   // (USD baseline via base_usd, native-currency no-FX compare) that a plain
   // liveInr − base recompute gets wrong for those brands.
   const dInr=(it)=>{ if(it.delta!=null&&it.delta!=="") return Number(it.delta); const li=liveInr(it); return li!=null&&it.base_price!=null?li-it.base_price:null; };
-  const targetRate=convCur==="INR"?1:(fxr[convCur]||1);
-  const amtInr=(amount,currency)=>{ const n=Number(amount); if(!Number.isFinite(n)||n<=0) return null; const c=(currency||"INR").toUpperCase(); const r=(c==="INR"||c==="UNKNOWN")?1:(fxr[c]||1); return Math.round(n*r*100)/100; };
+  const targetRate=convCur==="INR"?1:(fx[convCur]||1);
+  const amtInr=(amount,currency)=>{ const n=Number(amount); if(!Number.isFinite(n)||n<=0) return null; const c=(currency||"INR").toUpperCase(); const r=(c==="INR"||c==="UNKNOWN")?1:(fx[c]||1); return Math.round(n*r*100)/100; };
   const previewFinal=(it)=>{ const manual=amtInr(it._amt,it._cur); if(manual!=null) return roundFinal(manual/targetRate); const refInr=liveInr(it)??it.base_price; if(refInr==null) return null; return roundFinal(refInr/targetRate+Number(gm||0)); };
   const saveFx=async()=>{ const r=await aj("/api/fx/override",{usd,markup:gm}); if(r.rates) setFxr(r.rates); if(r.overrides){setUsd(r.overrides.USD??"");} toast(r.ok?"Rates & markup saved":"Save failed",r.ok?"ok":"err"); };
   const reject=async(it)=>{ if(!admin) return toast("Admin only","err"); setItems(xs=>xs.filter(x=>x.id!==it.id)); const r=await aj("/api/review/decide",{row:it.id,decision:"rejected"}); r.ok?toast("Rejected","ok"):toast(r.error||"Failed","err"); load(); };

@@ -11,11 +11,11 @@ import { config } from "./config.js";
 // "base_price" so the sheet reads the same way the business already talks
 // about it. price_usd: base_usd, the dollar figure mismatch detection
 // actually compares against.
-const COLS = ["brand", "designer_url", "mbo_url", "studio_east_price", "studio_east_currency",
-  "price_usd", "live_price", "currency", "status", "state", "delta", "decision", "final_price"];
-const SELECT_COLS = "brand,url AS designer_url,mbo_url,base_price AS studio_east_price," +
+const COLS = ["brand", "platform", "designer_url", "mbo_url", "studio_east_price", "studio_east_currency",
+  "price_usd", "live_price", "currency", "status", "state", "delta", "decision", "markup_pct", "final_price", "updated_at"];
+const SELECT_COLS = "brand,platform,url AS designer_url,mbo_url,base_price AS studio_east_price," +
   "base_currency AS studio_east_currency,base_usd AS price_usd,live_price,currency,status," +
-  "state,delta,decision,final_price";
+  "state,delta,decision,final_price,markup_pct,updated_at";
 
 async function stateRows(mboId, states, brands) {
   const p = [mboId, ...states];
@@ -27,7 +27,6 @@ async function stateRows(mboId, states, brands) {
   return q(`SELECT ${SELECT_COLS} FROM products WHERE ${where}
     ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, p);
 }
-const mismatchRows = (mboId, brands) => stateRows(mboId, ["mismatch"], brands);
 
 async function alertRows(mboId, threshold = 5) {
   try {
@@ -73,29 +72,19 @@ function buildWorkbook(rows, alerts) {
   const wb = new ExcelJS.Workbook();
   const used = new Set();
 
-  const byBrand = new Map();
-  for (const r of rows) {
-    const b = (r.brand || "(no brand)").replace(/^www\./, "");
-    if (!byBrand.has(b)) byBrand.set(b, []);
-    byBrand.get(b).push(r);
-  }
-
-  const nMis = (list) => list.filter((r) => r.state === "mismatch").length;
-  const nErr = (list) => list.filter((r) => r.state === "error").length;
+  const sheets = [["Matched", "matched"], ["Mismatched", "mismatch"], ["Errors", "error"]];
+  const by = (st) => rows.filter((r) => r.state === st);
   const summary = wb.addWorksheet(safeSheetName("Summary", used));
-  summary.addRow(["brand", "mismatches", "errors"]);
+  summary.addRow(["sheet", "products"]);
   styleHeader(summary);
-  [...byBrand.entries()]
-    .sort((a, b) => b[1].length - a[1].length)
-    .forEach(([b, list]) => summary.addRow([b, nMis(list), nErr(list)]));
-  summary.addRow([]);
-  summary.addRow(["TOTAL", nMis(rows), nErr(rows)]);
+  sheets.forEach(([name, st]) => summary.addRow([name, by(st).length]));
+  summary.addRow(["TOTAL", rows.length]);
 
-  for (const [b, list] of byBrand) {
-    const ws = wb.addWorksheet(safeSheetName(b, used));
+  for (const [name, st] of sheets) {
+    const ws = wb.addWorksheet(safeSheetName(name, used));
     ws.addRow(COLS);
     styleHeader(ws);
-    addDataRows(ws, list);
+    addDataRows(ws, by(st));
   }
 
   if (alerts && alerts.length) {
@@ -566,14 +555,15 @@ export async function sendMismatchReport(mboId, to, brands) {
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
   to = g.to;
-  const rows = await mismatchRows(mboId, brands);
-  const wb = buildWorkbook(rows, []);
+  const all = await stateRows(mboId, ["matched", "mismatch", "error"], brands);
+  const rows = all.filter((r) => r.state === "mismatch");
+  const wb = buildWorkbook(all, []);
   const today = new Date().toISOString().slice(0, 10);
   const scope = brands && brands.length ? ` for ${brands.length} brand(s)` : "";
   await deliver({
     from, to, subject: `MBO Tracker — ${rows.length} price mismatches${scope} (${today})`,
     text: `MBO Tracker detected ${rows.length} price mismatch(es)${scope} awaiting review.\n\n` +
-      `The attached workbook has one sheet per brand (plus a Summary tab). These are ` +
+      `The attached workbook has Matched, Mismatched and Errors sheets (plus a Summary tab). Mismatches are ` +
       `PENDING APPROVAL — nothing has been pushed to any store.\n\n— MBO Tracker`,
     attachments: [{ filename: `price_mismatches_${today}.xlsx`, content: Buffer.from(await wb.xlsx.writeBuffer()) }],
   });
@@ -586,11 +576,11 @@ export async function sendPipelineReport({ mboId, to, threshold = 5, stats = nul
   const g = mailGuard(to); if (!g.ok) return g;
   const { from } = config.smtp;
   to = g.to;
-  const [rows, alerts] = await Promise.all([stateRows(mboId, ["mismatch", "error"]), alertRows(mboId, threshold)]);
+  const [rows, alerts] = await Promise.all([stateRows(mboId, ["matched", "mismatch", "error"]), alertRows(mboId, threshold)]);
   const mism = rows.filter((r) => r.state === "mismatch").length;
   const errs = rows.filter((r) => r.state === "error").length;
   const today = new Date().toISOString().slice(0, 10);
-  const brandCount = new Set(rows.map((r) => (r.brand || "").replace(/^www\./, ""))).size;
+  const brandCount = new Set(rows.filter((r) => r.state !== "matched").map((r) => (r.brand || "").replace(/^www\./, ""))).size;
   const parts = [];
   if (stats) parts.push(
     `${stats.completed ?? 0} product(s) checked — ${stats.matched ?? 0} matched, ` +
@@ -611,7 +601,7 @@ export async function sendPipelineReport({ mboId, to, threshold = 5, stats = nul
     text: `A pricing pipeline run just finished.\n\n` +
       parts.map((p) => `• ${p}`).join("\n") + `\n\n` +
       (attach.length
-        ? `The attached workbook has one sheet per brand covering every mismatch and fetch error (plus a Summary tab` +
+        ? `The attached workbook has Matched, Mismatched and Errors sheets with every product's URLs and prices (plus a Summary tab` +
           (alerts.length ? ` and a Price Alerts tab` : ``) + `). Mismatches are PENDING APPROVAL ` +
           `— nothing has been pushed to any store.`
         : `No attachment — there were no mismatches, errors or alerts.`) +

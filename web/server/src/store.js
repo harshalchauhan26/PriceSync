@@ -727,11 +727,20 @@ export async function fetchCurrencyFor(mboId, brand) {
 // already uses for its offline USD sheets. A brand in native_currency_brands
 // or usd_fetch_brand_set should not also be in this set — finalizeOne()
 // checks those first and returns before reaching the convert branch.
+// Brands that always stay INR-to-INR (no USD conversion). us.anitadongre.com's
+// base_price is already USD, so converting it again would corrupt it.
+const INR_ONLY_BRANDS = ["saakshakinni.com", "vvanivats.com", "us.anitadongre.com"];
 export async function usdConvertBrandSet(mboId) {
   const cached = _usdConvertCache.get(mboId);
   if (cached && Date.now() - cached.at < 30_000) return cached.set;
-  const raw = await getMeta(mboId, "usd_convert_brands", "");
-  const set = new Set(String(raw || "").split(",").map(normBrand).filter(Boolean));
+  // Every brand with products is USD-convert BY DEFAULT, so a newly added
+  // brand needs no manual list edit; only these opt out. The stored
+  // usd_convert_brands meta is no longer consulted.
+  const [rows, native, usdFetch] = await Promise.all([
+    withTenant(mboId, (db) => db.q("SELECT DISTINCT brand FROM products WHERE mbo_id=$1 AND brand IS NOT NULL AND brand<>''", [mboId])),
+    nativeCurrencyBrands(mboId), usdFetchBrandSet(mboId)]);
+  const skip = new Set([...INR_ONLY_BRANDS, ...Object.keys(native), ...usdFetch]);
+  const set = new Set(rows.map((r) => normBrand(r.brand)).filter((b) => b && !skip.has(b)));
   _usdConvertCache.set(mboId, { at: Date.now(), set });
   return set;
 }
