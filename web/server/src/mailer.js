@@ -469,14 +469,14 @@ export async function sendPipelineComplete({ mboId, to, stats, runId } = {}) {
     ` ORDER BY rh.approved_at DESC`, params));
   const allRows = await rowsOrLog("price_fetch_all", q(scoped
     ? `SELECT * FROM (
-         SELECT DISTINCT ON (ph.key) ph.brand, ph.url, ph.base_price, ph.live_price,
+         SELECT DISTINCT ON (ph.key) ph.brand, ph.url, p.mbo_url, ph.base_price, ph.live_price,
                 p.currency, ph.state, ph.status, ph.delta
            FROM price_history ph
            LEFT JOIN products p ON p.mbo_id = ph.mbo_id AND p.key = ph.key
           WHERE ph.mbo_id=$1 AND ph.run_id=$2
           ORDER BY ph.key, ph.id DESC
        ) t ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`
-    : `SELECT brand, url, base_price, live_price, currency, state, status, delta
+    : `SELECT brand, url, mbo_url, base_price, live_price, currency, state, status, delta
          FROM products WHERE mbo_id=$1
         ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, params));
 
@@ -490,7 +490,7 @@ export async function sendPipelineComplete({ mboId, to, stats, runId } = {}) {
 
   const wbAll = new ExcelJS.Workbook();
   flatSheet(wbAll, "All Fetched", [
-    { key: "brand", header: "brand" }, { key: "url", header: "url" },
+    { key: "brand", header: "brand" }, { key: "url", header: "url" }, { key: "mbo_url", header: "mbo_url" },
     { key: "base_price", header: "base_price" }, { key: "live_price", header: "live_price" },
     { key: "currency", header: "currency" }, { key: "state", header: "state" },
     { key: "delta", header: "delta" }, { key: "status", header: "status" },

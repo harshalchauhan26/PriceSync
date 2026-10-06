@@ -940,7 +940,7 @@ async function sendXlsx(res, name, rows) {
 // Builds the row query AND a matching COUNT for the same filter, so the total
 // previewed on the Export page can never drift from what the download holds
 // (one WHERE, two uses — not two hand-kept-in-sync queries).
-const EXPORT_COLS = "id,brand,platform,url,base_price,live_price,currency,status,state,delta,decision,markup_pct,final_price";
+const EXPORT_COLS = "id,brand,platform,url,mbo_url,base_price,live_price,currency,status,state,delta,decision,markup_pct,final_price";
 function exportQuery(req) {
   const kind = req.query.kind || "all";
   const stateWhere = { all: "1=1", mismatch: "state='mismatch'", error: "state='error'", approved: "decision='approved'" }[kind] || "1=1";
