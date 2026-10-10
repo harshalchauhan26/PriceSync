@@ -17,7 +17,8 @@ import { encrypt, decrypt } from "./crypto.js";
 import { snapshot, rates, toInr, setOverrides, getOverrides } from "./fx.js";
 import * as pipe from "./pipeline.js";
 import * as tenant from "./tenant.js";
-import { sendNewSignup, mailProvider, sendTestEmail, mailQueueBacklog, startMailQueueWorker } from "./mailer.js";
+import { startScheduler } from "./scheduler.js";
+import { sendNewSignup,mailProvider, sendTestEmail, mailQueueBacklog, startMailQueueWorker } from "./mailer.js";
 import { pushPrice, verifyStore, invalidateShopifyCfg } from "./shopify.js";
 import { getPriceUrlSource, setPriceUrlSource, pushRowPrice } from './price-update.js';
 import { startPushJob, getPushJob, runningPushJob, startReviewPushJob } from './push-job.js';
@@ -1260,6 +1261,7 @@ await store.initStore();
 const interrupted = await store.markStaleRunsInterrupted().catch((e) => { console.error("[MBO] pipeline_runs interrupt sweep failed:", e.message); return []; });
 if (interrupted.length) console.log(`[MBO] marked ${interrupted.length} stale pipeline run(s) interrupted on boot`);
 startMailQueueWorker(); // BUG-015: retries queued mail every 5 minutes.
+startScheduler(process.env.SCHEDULE_MAIL_TO); // Mon+Thu auto-run; off when unset.
 pipe.setDefault('data_source', 'database');
 // Restore Tenant #1's saved FX overrides (pre-existing behavior, preserved
 // exactly). Other tenants start with no override until they explicitly set
