@@ -91,7 +91,10 @@ export async function deriveBrandRate(fetcher, samples) {
   let browser;
   const ratios = [];
   try {
-    browser = await puppeteer.launch({ headless: "new" });
+    browser = await puppeteer.launch({ headless: "new",
+      // Containers (Render) run as root with a tiny /dev/shm: Chrome refuses to start
+      // without these. Harmless on a desktop.
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] });
     for (const s of samples) {
       try {
         const [native, cur] = await extractRow(fetcher, s.url, s.platform, s.custom_regex, {});

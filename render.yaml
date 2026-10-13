@@ -18,7 +18,7 @@ services:
                                  #    state mid-run. Upgrade to "starter" before relying on it.
     branch: main
     numInstances: 1              # do not increase — in-memory state breaks with 2+ instances
-    buildCommand: cd web/client && npm ci && npm run build && cd ../server && npm ci
+    buildCommand: cd web/client && npm ci && npm run build && cd ../server && npm ci && npx puppeteer browsers install chrome
     startCommand: cd web/server && npm start
     healthCheckPath: /api/health
     autoDeploy: true             # redeploy on every push to main
@@ -112,6 +112,12 @@ services:
         sync: false
       - key: FETCH_RELAY_SECRET
         sync: false
+      # Chrome for brandRate.js (each brand's own INR->USD rate). Without a
+      # cache dir INSIDE the project, Render deletes the build-time download
+      # before the server starts and every run silently falls back to the
+      # market rate. Must match the build step's download location.
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/project/.render/chrome
       # --- optional ---
       - key: GOOGLE_CLIENT_ID
         sync: false
