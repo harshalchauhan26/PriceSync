@@ -507,6 +507,9 @@ export async function startPipeline(eng, runId) {
             eng.brandRates[b] = rate;
             log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",
               status: "Info", msg: `${b}: derived rate ${rate.toFixed(2)} from ${samples.length} sample(s)` });
+          } else {
+            log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",
+              status: "Warning", msg: `${b}: no brand rate derived (site shows no USD / browser unavailable) — using market rate, expect ~1% USD gaps` });
           }
         } catch (e) {
           log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",

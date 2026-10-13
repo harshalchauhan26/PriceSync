@@ -8,8 +8,8 @@ import * as store from "./store.js";
 const MBO_ID = 1;
 const DAYS = new Set(["Mon", "Thu"]);
 const HOUR_IST = 10;
-const MIN_GAP_MS = 6 * 3600_000; // survives redeploys: no second run if one started recently
 
+const istDate = (d) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 const ist = () => {
   const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata",
     weekday: "short", hour: "numeric", hour12: false }).formatToParts(new Date()).map((x) => [x.type, x.value]));
@@ -20,8 +20,12 @@ async function tick(to) {
   const { day, hour } = ist();
   if (!DAYS.has(day) || hour < HOUR_IST) return;
   if (pipe.anyRunning(MBO_ID)) return;
-  const [last] = await store.recentPipelineRuns(MBO_ID, 1);
-  if (last && Date.now() - new Date(last.started_at).getTime() < MIN_GAP_MS) return;
+  // Once per IST day, judged from the DB so redeploys can't repeat it. Only
+  // scheduled runs (started_by null) count — a long run (4.5h+) must not be
+  // re-fired later the same day just because a fixed gap since its start elapsed.
+  const today = istDate(new Date());
+  const runs = await store.recentPipelineRuns(MBO_ID, 10);
+  if (runs.some((r) => r.started_by == null && istDate(new Date(r.started_at)) === today)) return;
 
   const eng = pipe.getEngine(MBO_ID, "scheduler");
   Object.assign(eng.config, { vendors: [], data_source: "database", fresh_start: true, simulation: false });
