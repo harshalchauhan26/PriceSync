@@ -97,10 +97,33 @@ const MIN_PLAUSIBLE_RATE = 50, MAX_PLAUSIBLE_RATE = 150;
 // samples: [{ url, platform, custom_regex }]. Returns the median ratio
 // (native INR / displayed USD), or null if fewer than 2 samples yielded a
 // usable, plausible pair -- a single outlier shouldn't set a brand-wide rate.
+// The currency widget on a Shopify storefront converts with Currency.rates from
+// <store>/services/javascripts/currencies.js -- a plain static file, so the brand's
+// own INR->USD rate can be read with ONE HTTP GET: no browser, no 512MB Chrome, no
+// page-load timeouts. Verified 2026-10-13: aisharao.com gives 96.769, exactly what a
+// real browser read off the widget (96.77). Returns null when the file is absent or
+// has no usable INR entry, and the caller falls back to the browser method.
+async function storeWidgetRate(sampleUrl, diag) {
+  try {
+    const origin = new URL(sampleUrl).origin;
+    const res = await fetch(`${origin}/services/javascripts/currencies.js`,
+      { headers: { "user-agent": UA }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) { diag.push(`currencies.js HTTP ${res.status}`); return null; }
+    const m = (await res.text()).match(/"?INR"?\s*:\s*([0-9.]+)/);
+    const usdPerInr = m ? Number(m[1]) : 0;
+    const rate = usdPerInr > 0 ? 1 / usdPerInr : null;
+    if (rate && rate >= MIN_PLAUSIBLE_RATE && rate <= MAX_PLAUSIBLE_RATE) return rate;
+    diag.push("currencies.js has no plausible INR rate");
+  } catch (e) { diag.push("currencies.js: " + String(e.message).slice(0, 60)); }
+  return null;
+}
+
 // diag (optional array) collects one short reason per skipped sample, so a null result
 // can say WHY (non-INR native fetch, no $ on page, implausible/scattered ratio, error).
 export async function deriveBrandRate(fetcher, samples, diag = []) {
   if (!samples.length) return null;
+  const direct = await storeWidgetRate(samples[0].url, diag);
+  if (direct) return direct;
   let browser;
   const ratios = [];
   try {
