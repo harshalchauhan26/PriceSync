@@ -4,7 +4,7 @@ import { toInr, toUsd, toUsdAtRate } from "./fx.js";
 import { deriveBrandRate } from "./brandRate.js";
 import { config } from "./config.js";
 import * as store from "./store.js";
-import { sendPipelineStarted, sendPipelineProgress, sendErrorsResolved, sendPipelineComplete } from "./mailer.js";
+import { sendPipelineStarted, sendPipelineProgress, sendErrorsResolved, sendPipelineComplete, sendMainPassSheet } from "./mailer.js";
 
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
@@ -613,6 +613,9 @@ export async function startPipeline(eng, runId) {
       }
     });
     if (!st.abort && cfg.safe_retry) {
+      // Sheet as of the end of the main pass, before any error is retried.
+      if (!cfg.simulation) await mailLog(eng, sendMainPassSheet({ mboId, to: eng.userEmail, runId,
+        stats: { completed: st.completed, matched: st.matched, mismatch: st.mismatch, errors: st.errors } }), "main-pass sheet");
       const errKeys = new Set((await store.dbProducts(mboId, "update", vendors))
         .filter((r) => r.state === "error" && r.base_price != null).map((r) => r.key));
       const err = rows.filter((p) => errKeys.has(p.key));

@@ -431,6 +431,61 @@ export async function sendErrorsResolved({ mboId, to, stats } = {}) {
   return { ok: true, to: g.to, dropped: g.dropped, usedFallback: g.usedFallback, recovered, remaining };
 }
 
+// Snapshot of every product in a run (or the whole tenant when runId is absent)
+// as the "All Fetched" sheet. Shared by the mid-run main-pass mail and the final
+// completion mail so the two sheets can never drift apart.
+async function fetchAllSheet(mboId, runId) {
+  const scoped = !!runId;
+  const params = scoped ? [mboId, runId] : [mboId];
+  const rows = await rowsOrLog("price_fetch_all", q(scoped
+    ? `SELECT * FROM (
+         SELECT DISTINCT ON (ph.key) ph.brand, ph.url, p.mbo_url, ph.base_price, ph.live_price,
+                p.currency, ph.state, ph.status, ph.delta
+           FROM price_history ph
+           LEFT JOIN products p ON p.mbo_id = ph.mbo_id AND p.key = ph.key
+          WHERE ph.mbo_id=$1 AND ph.run_id=$2
+          ORDER BY ph.key, ph.id DESC
+       ) t ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`
+    : `SELECT brand, url, mbo_url, base_price, live_price, currency, state, status, delta
+         FROM products WHERE mbo_id=$1
+        ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, params));
+
+  const wb = new ExcelJS.Workbook();
+  flatSheet(wb, "All Fetched", [
+    { key: "brand", header: "brand" }, { key: "url", header: "url" }, { key: "mbo_url", header: "mbo_url" },
+    { key: "base_price", header: "base_price" }, { key: "live_price", header: "live_price" },
+    { key: "currency", header: "currency" }, { key: "state", header: "state" },
+    { key: "delta", header: "delta" }, { key: "status", header: "status" },
+  ], rows);
+  return { rows, wb };
+}
+
+// Sent when the main pass ends, BEFORE the safe-retry pass starts: the sheet as
+// it stands (errors still in error), so it can be reviewed while the gentle
+// retry of failed products continues. The completion mail follows later.
+export async function sendMainPassSheet({ mboId, to, stats, runId } = {}) {
+  const g = mailGuard(to); if (!g.ok) return g;
+  const { from } = config.smtp;
+  const { rows, wb } = await fetchAllSheet(mboId, runId);
+  await deliver({
+    from, to: g.to,
+    subject: `MBO Tracker — main pass done, before error retry: ${rows.length} product(s), ` +
+      `${stats?.mismatch ?? 0} mismatch, ${stats?.errors ?? 0} error (${today()})`,
+    text: `The main pass finished. This sheet is the state BEFORE the safe-retry pass.
+
+` +
+      `• ${stats?.completed ?? 0} checked — ${stats?.matched ?? 0} matched, ${stats?.mismatch ?? 0} mismatched, ` +
+      `${stats?.errors ?? 0} error(s)
+
+The failed products are now being retried gently; the ` +
+      `final report follows when that completes.
+
+— MBO Tracker`,
+    attachments: [{ filename: `main_pass_before_retry_${today()}.xlsx`, content: Buffer.from(await wb.xlsx.writeBuffer()) }],
+  }, { queueOnFail: true, mboId });
+  return { ok: true, to: g.to };
+}
+
 // Sent when the whole run is done. TWO attachments:
 //   1. price_updates  — products actually pushed to Shopify in the last 24h
 //      (approved in Review and confirmed updated) = "latest price updates".
@@ -467,18 +522,7 @@ export async function sendPipelineComplete({ mboId, to, stats, runId } = {}) {
     (scoped ? ` AND EXISTS (SELECT 1 FROM price_history ph
         WHERE ph.mbo_id=rh.mbo_id AND ph.key=rh.key AND ph.run_id=$2)` : ``) +
     ` ORDER BY rh.approved_at DESC`, params));
-  const allRows = await rowsOrLog("price_fetch_all", q(scoped
-    ? `SELECT * FROM (
-         SELECT DISTINCT ON (ph.key) ph.brand, ph.url, p.mbo_url, ph.base_price, ph.live_price,
-                p.currency, ph.state, ph.status, ph.delta
-           FROM price_history ph
-           LEFT JOIN products p ON p.mbo_id = ph.mbo_id AND p.key = ph.key
-          WHERE ph.mbo_id=$1 AND ph.run_id=$2
-          ORDER BY ph.key, ph.id DESC
-       ) t ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`
-    : `SELECT brand, url, mbo_url, base_price, live_price, currency, state, status, delta
-         FROM products WHERE mbo_id=$1
-        ORDER BY state, brand, ABS(COALESCE(delta,0)) DESC`, params));
+  const { rows: allRows, wb: wbAll } = await fetchAllSheet(mboId, runId);
 
   const wbUpdated = new ExcelJS.Workbook();
   flatSheet(wbUpdated, "Price Updates", [
@@ -487,14 +531,6 @@ export async function sendPipelineComplete({ mboId, to, stats, runId } = {}) {
     { key: "currency", header: "currency" }, { key: "shopify_status", header: "shopify_status" },
     { key: "approved_at", header: "pushed_at" },
   ], updated);
-
-  const wbAll = new ExcelJS.Workbook();
-  flatSheet(wbAll, "All Fetched", [
-    { key: "brand", header: "brand" }, { key: "url", header: "url" }, { key: "mbo_url", header: "mbo_url" },
-    { key: "base_price", header: "base_price" }, { key: "live_price", header: "live_price" },
-    { key: "currency", header: "currency" }, { key: "state", header: "state" },
-    { key: "delta", header: "delta" }, { key: "status", header: "status" },
-  ], allRows);
 
   const parts = [];
   if (stats) parts.push(
