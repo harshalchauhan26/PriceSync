@@ -502,14 +502,15 @@ export async function startPipeline(eng, runId) {
         }
         try {
           const samples = await store.sampleProductUrls(mboId, b, 5);
-          const rate = await deriveBrandRate(rateFetcher, samples);
+          const why = [];
+          const rate = await deriveBrandRate(rateFetcher, samples, why);
           if (rate) {
             eng.brandRates[b] = rate;
             log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",
               status: "Info", msg: `${b}: derived rate ${rate.toFixed(2)} from ${samples.length} sample(s)` });
           } else {
             log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",
-              status: "Warning", msg: `${b}: no brand rate derived (site shows no USD / browser unavailable) — using market rate, expect ~1% USD gaps` });
+              status: "Warning", msg: `${b}: no brand rate derived (${samples.length} sample(s): ${why.slice(0, 3).join(" | ") || "no reason recorded"}) — using market rate, expect ~1% USD gaps` });
           }
         } catch (e) {
           log(eng, { row: "—", domain: "brand-rate", url: "", currency: "-", price: "-",

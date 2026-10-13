@@ -86,7 +86,9 @@ const MIN_PLAUSIBLE_RATE = 50, MAX_PLAUSIBLE_RATE = 150;
 // samples: [{ url, platform, custom_regex }]. Returns the median ratio
 // (native INR / displayed USD), or null if fewer than 2 samples yielded a
 // usable, plausible pair -- a single outlier shouldn't set a brand-wide rate.
-export async function deriveBrandRate(fetcher, samples) {
+// diag (optional array) collects one short reason per skipped sample, so a null result
+// can say WHY (non-INR native fetch, no $ on page, implausible/scattered ratio, error).
+export async function deriveBrandRate(fetcher, samples, diag = []) {
   if (!samples.length) return null;
   let browser;
   const ratios = [];
@@ -98,8 +100,10 @@ export async function deriveBrandRate(fetcher, samples) {
     for (const s of samples) {
       try {
         const [native, cur] = await extractRow(fetcher, s.url, s.platform, s.custom_regex, {});
-        if (native == null || !["INR", "UNKNOWN"].includes((cur || "").toUpperCase())) continue;
+        if (native == null || !["INR", "UNKNOWN"].includes((cur || "").toUpperCase())) {
+          diag.push(`native fetch came back ${native} ${cur} (needs INR)`); continue; }
         const amounts = await readDisplayedUsdAmounts(browser, s.url);
+        if (!amounts.length) { diag.push("no $ price on page after currency switch"); continue; }
         // Cross-check every distinct $ amount against the price we already
         // know is right, instead of trusting whichever happened to render
         // first in the DOM (a different, unrelated variant/add-on in
@@ -112,14 +116,14 @@ export async function deriveBrandRate(fetcher, samples) {
           .map((amt) => native / amt)
           .filter((r) => r >= MIN_PLAUSIBLE_RATE && r <= MAX_PLAUSIBLE_RATE)
           .sort((a, b) => a - b);
-        if (!candidates.length) continue;
+        if (!candidates.length) { diag.push(`$ amounts ${amounts.slice(0, 3).join("/")} vs INR ${native}: no plausible rate`); continue; }
         const cmid = Math.floor(candidates.length / 2);
         const sampleRate = candidates.length % 2 ? candidates[cmid] : (candidates[cmid - 1] + candidates[cmid]) / 2;
         // Reject if the survivors don't actually agree (spread > 10% of the
         // median) -- that's the "genuinely ambiguous" case, not corroboration.
-        if (candidates[candidates.length - 1] - candidates[0] > sampleRate * 0.1) continue;
+        if (candidates[candidates.length - 1] - candidates[0] > sampleRate * 0.1) { diag.push("candidate rates scattered"); continue; }
         ratios.push(sampleRate);
-      } catch { /* one bad sample must never sink the whole derivation */ }
+      } catch (e) { diag.push("sample error: " + String(e.message).slice(0, 80)); /* one bad sample must never sink the whole derivation */ }
     }
   } finally {
     if (browser) await browser.close().catch(() => {});
