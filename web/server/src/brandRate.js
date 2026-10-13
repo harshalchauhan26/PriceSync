@@ -56,22 +56,33 @@ async function readDisplayedUsdAmounts(browser, url) {
   const page = await browser.newPage();
   try {
     await page.setUserAgent(UA);
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
-    await sleep(1200);
+    // On Render's slow shared CPU the old `networkidle2` wait never completed:
+    // a storefront's tracking/chat scripts keep the network busy, so EVERY sample
+    // died with "Navigation timeout of 30000 ms". Images/fonts/media are useless
+    // here (we read text), so drop them, and wait for the price element instead of
+    // for the network to go quiet.
+    await page.setRequestInterception(true);
+    page.on("request", (req) => (["image", "media", "font"].includes(req.resourceType()) ? req.abort() : req.continue()));
+    const settle = async () => {
+      await page.waitForSelector(MONEY_SELECTORS, { timeout: 15000 }).catch(() => {});
+      await sleep(1500);
+    };
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await settle();
 
     let amounts = await readDollarAmounts(page);
     if (amounts.length) return amounts;
 
     await page.evaluate(() => { try { localStorage.setItem("selected_currency", "USD"); } catch {} });
-    await page.reload({ waitUntil: "networkidle2", timeout: 30000 });
-    await sleep(1200);
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
+    await settle();
     amounts = await readDollarAmounts(page);
     if (amounts.length) return amounts;
 
     await page.evaluate(() => document.querySelector(".bacurr-choiceDesign")?.click());
     await sleep(500);
     await page.evaluate(() => document.querySelector('li.currMovers[rel="USD"]')?.click());
-    await sleep(2000);
+    await sleep(2500);
     return await readDollarAmounts(page);
   } finally {
     await page.close().catch(() => {});
