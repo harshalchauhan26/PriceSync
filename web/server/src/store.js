@@ -1500,19 +1500,25 @@ export async function classifyProductRows(mboId, rows) {
   const invalid = (rows || []).length - clean.length;
   const existing = await withTenant(mboId, (db) =>
     db.q("SELECT key, url, mbo_url, base_price, brand FROM products WHERE mbo_id=$1", [mboId]));
-  const byId = new Map();
+  // Owner request 2026-10-14: a product is the PAIR (designer URL + MBO URL), not the
+  // designer URL alone -- the same designer page listed under two different Studio East
+  // products is two rows. A sheet row with a BLANK mbo_url has no pair to compare, so it
+  // falls back to the designer URL alone (byDesigner) and can't spawn duplicates.
+  const pairOf = (url, mbo) => productIdentity(url) + "||" + productIdentity(mbo);
+  const byPair = new Map(), byDesigner = new Map();
+  const push = (m, k, p) => { if (!m.has(k)) m.set(k, []); m.get(k).push(p); };
   for (const p of existing) {
-    const id = productIdentity(p.url);
-    if (!byId.has(id)) byId.set(id, []);
-    byId.get(id).push(p);
+    push(byDesigner, productIdentity(p.url), p);
+    push(byPair, pairOf(p.url, p.mbo_url), p);
   }
   const fresh = [], unchanged = [], differs = [];
   const seen = new Set();
   for (const r of clean) {
-    const id = productIdentity(r.url);
-    const hits = byId.get(id);
+    const hasMbo = !!String(r.mbo_url || "").trim();
+    const id = hasMbo ? pairOf(r.url, r.mbo_url) : productIdentity(r.url);
+    const hits = hasMbo ? byPair.get(id) : byDesigner.get(id);
     if (!hits) {
-      // A URL listed twice in one sheet is one product, not two — otherwise the
+      // The same designer+MBO pair listed twice in one sheet is one product, not two — otherwise the
       // upload reintroduces exactly the duplication this function exists to stop.
       if (seen.has(id)) continue;
       seen.add(id);
