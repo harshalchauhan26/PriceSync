@@ -579,15 +579,17 @@ export async function reviewItemsByBrands(mboId, brands) {
   const scoped = brands && brands.length;
   const params = scoped ? [mboId, brands] : [mboId];
   const brandClause = scoped ? "AND brand = ANY($2::text[]) AND" : "AND";
-  const [items, summary, c] = await Promise.all([
+  // No `counts` field here -- the client reads items/summary only, and the
+  // sidebar badge runs off its own independent /api/meta poll, so a third
+  // COUNT(*) query here was pure dead weight on every Review page load.
+  const [items, summary] = await Promise.all([
     withTenant(mboId, (db) => db.q(`SELECT * FROM products
     WHERE mbo_id=$1 ${brandClause} decision='pending' AND review_dismissed_at IS NULL
       AND state IN ('mismatch','error','matched')
     ORDER BY ${STATE_PRIORITY_SQL}, ABS(COALESCE(delta,0)) DESC`, params)),
     reviewSummaryByBrands(mboId, brands),
-    counts(mboId),
   ]);
-  return { items, counts: c, summary };
+  return { items, summary };
 }
 
 // Hides a single row from the review queue -- an UPDATE flag
@@ -1537,9 +1539,9 @@ export async function classifyProductRows(mboId, rows) {
       continue;
     }
     const cur = hits[0];
-    const mboChanged = false; // the MBO URL is half the match key, so it can't differ
+    // The MBO URL is half the match key, so a hit can only ever disagree on price.
     const priceChanged = Number(cur.base_price) !== Number(r.base_price);
-    if (!mboChanged && !priceChanged) {
+    if (!priceChanged) {
       unchanged.push({ url: cur.url, brand: cur.brand, base_price: cur.base_price, copies: hits.length });
     } else {
       differs.push({ url: cur.url, brand: cur.brand, copies: hits.length,
@@ -1547,8 +1549,7 @@ export async function classifyProductRows(mboId, rows) {
         // re-matching on URL text, which duplicate copies can spell differently
         // (one carrying a query param, another not).
         keys: hits.map((h) => h.key),
-        old_base: cur.base_price, new_base: r.base_price, price_changed: priceChanged,
-        old_mbo_url: cur.mbo_url || "", new_mbo_url: mboChanged ? r.mbo_url : "", mbo_changed: mboChanged });
+        old_base: cur.base_price, new_base: r.base_price, price_changed: priceChanged });
     }
   }
   return { new: fresh, unchanged, differs, invalid };

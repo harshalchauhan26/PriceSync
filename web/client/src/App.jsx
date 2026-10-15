@@ -833,7 +833,7 @@ function AddProducts({admin}) {
         </label>
         <div style={{maxHeight:220,overflow:"auto",marginBottom:12}}>
           <table className="tbl">
-            <thead><tr>{["Product","Brand","Base now","→ Sheet","MBO URL",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Product","Brand","Base now","→ Sheet",""].map((h,i)=><th key={i}>{h}</th>)}</tr></thead>
             <tbody>
               {plan.differs.map((x,i)=><tr key={i} style={applyDiffs?undefined:{opacity:.55}}>
                 <td style={{maxWidth:340}}><span style={{...URL_WRAP,fontSize:11}}>{fullUrl(x.url)}</span>
@@ -842,7 +842,6 @@ function AddProducts({admin}) {
                 <td className="mono" style={{textAlign:"right"}}>{fmt(x.old_base)}</td>
                 <td className="mono" style={{textAlign:"right",fontWeight:700,color:x.price_changed?"var(--amber)":"var(--on3)"}}>
                   {x.price_changed?fmt(x.new_base):"same"}</td>
-                <td style={{fontSize:11,color:x.mbo_changed?"var(--amber)":"var(--on3)"}}>{x.mbo_changed?"changes":"same"}</td>
                 <td/>
               </tr>)}
             </tbody>
