@@ -367,6 +367,12 @@ function runWorker(eng, rows, fetchOpts, runId, onDone) {
     }, 300);
     worker.on("message", (msg) => {
       if (!msg || msg.type !== "result") return;
+      // A 429/403 means this domain's cooldown needs to be honoured process-wide,
+      // which only the single-worker "gentle" path does -- promote it so every
+      // batch from here on stops splitting this brand across threads.
+      if (msg.error && /\b(429|403)\b/.test(msg.error) && msg.prod && eng.gentleBrands) {
+        eng.gentleBrands.add(normBrand(msg.prod.brand));
+      }
       chain = chain.then(async () => {
         const state = await finalizeOne(eng, msg.prod, msg.live, msg.currency, msg.error ?? null, runId);
         onDone(state);

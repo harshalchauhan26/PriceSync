@@ -456,7 +456,7 @@ tenantRouter.get("/review/items_by_brand", wrap(async (req, res) => {
 tenantRouter.post("/review/hide", wrap(async (req, res) => {
   const it = await store.dismissRow(req.mboId, req.body.row);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
-  res.json({ ok: true });
+  res.json({ ok: true, counts: await store.counts(req.mboId) });
 }));
 // "Master Clean" — hides every row the Review table is currently showing
 // (same scope as items_by_brand, empty brands = all). UPDATE flag only,

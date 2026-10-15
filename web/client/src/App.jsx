@@ -24,7 +24,12 @@ const matchesQuery = (it, query) => {
   return terms.every((t) => hay.includes(t));   // every term must appear
 };
 const elapsed = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}m ${String(s%60).padStart(2,"0")}s`;
-async function api(path, opts) { const r = await fetch(path, opts); try { return await r.json(); } catch { return {}; } }
+async function api(path, opts) {
+  let r;
+  try { r = await fetch(path, opts); }
+  catch { return { ok: false, error: "network error" }; }
+  try { return await r.json(); } catch { return {}; }
+}
 const aj = (path, body) => api(path, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{}) });
 
 /* ─── toasts ───────────────────────────────────────────────── */

@@ -1260,7 +1260,7 @@ function isPlausibleBasePrice(n) { return n != null && n >= MIN_PLAUSIBLE_BASE_P
 // "Product URL", "Designer Product URL" and "Link" all mean the same thing,
 // and a sheet that fails on a header spelling just gets retyped until it
 // passes, which teaches nothing and wastes a round trip.
-const BASE_URL_HEADERS = ["designer product url", "product url", "designer url", "url", "link", "product", "product link"];
+const BASE_URL_HEADERS = ["designer product url", "mbo product url", "studio east url", "product url", "designer url", "url", "link", "product", "product link"];
 const BASE_PRICE_HEADERS = ["new base price", "base price", "studio east price", "base", "price", "base_price", "new base", "new price"];
 const normHeader = (h) => String(h || "").trim().toLowerCase().replace(/[\s_]+/g, " ");
 
@@ -1308,24 +1308,33 @@ export async function previewBaseSheet(mboId, buf) {
   const skipped = rows.filter((r) => r._error);
   const prods = await withTenant(mboId, (db) =>
     db.q("SELECT key, url, brand, base_price FROM products WHERE mbo_id=$1", [mboId]));
+  // One designer URL can back several products (different MBO URLs) -- keep
+  // every match per key, not just the first, so a shared designer URL
+  // updates all of them instead of leaving siblings on a stale price.
   const byUrl = new Map();
   for (const p of prods) {
     const c = canonicalUrl(p.url).replace(/\/+$/, "").toLowerCase();
-    if (!byUrl.has(c)) byUrl.set(c, p);
+    if (!byUrl.has(c)) byUrl.set(c, []);
+    byUrl.get(c).push(p);
   }
   const matched = [], unmatched = [];
   const seen = new Set();
   for (const r of usable) {
     const c = canonicalUrl(r.url).replace(/\/+$/, "").toLowerCase();
-    const p = byUrl.get(c);
-    if (!p) { unmatched.push({ row: r.row, url: r.url, base_price: r.base_price }); continue; }
-    // A sheet listing the same URL twice would apply twice with the last write
-    // winning silently — surface it instead.
-    if (seen.has(p.key)) { unmatched.push({ row: r.row, url: r.url, base_price: r.base_price, reason: "duplicate URL in sheet" }); continue; }
-    seen.add(p.key);
-    matched.push({ row: r.row, key: p.key, url: p.url, brand: p.brand,
-      old_base: p.base_price, new_base: r.base_price,
-      changed: Number(p.base_price) !== Number(r.base_price) });
+    const ps = byUrl.get(c);
+    if (!ps) { unmatched.push({ row: r.row, url: r.url, base_price: r.base_price }); continue; }
+    let any = false;
+    for (const p of ps) {
+      // A sheet listing the same URL twice would apply twice with the last write
+      // winning silently — surface it instead.
+      if (seen.has(p.key)) continue;
+      seen.add(p.key);
+      any = true;
+      matched.push({ row: r.row, key: p.key, url: p.url, brand: p.brand,
+        old_base: p.base_price, new_base: r.base_price,
+        changed: Number(p.base_price) !== Number(r.base_price) });
+    }
+    if (!any) unmatched.push({ row: r.row, url: r.url, base_price: r.base_price, reason: "duplicate URL in sheet" });
   }
   return { urlCol, priceCol, total: rows.length,
     matched, unmatched, skipped: skipped.map((r) => ({ row: r.row, url: r.url, reason: r._error })),
@@ -1413,27 +1422,31 @@ export async function previewDeleteSheet(mboId, buf) {
   const { urlCol, handleCol, rows } = parseDeleteSheet(buf);
   const prods = await withTenant(mboId, (db) =>
     db.q("SELECT id,key,brand,url,mbo_url,base_price FROM products WHERE mbo_id=$1", [mboId]));
+  // Each map holds ALL rows per key: one URL can sit in several (designer, MBO) pairs.
   const byUrl = new Map(), byMboUrl = new Map(), byMboHandle = new Map();
+  const add = (m, k, p) => { if (!m.has(k)) m.set(k, []); m.get(k).push(p); };
   for (const p of prods) {
-    if (p.url) byUrl.set(canonicalUrl(p.url).replace(/\/+$/, "").toLowerCase(), p);
+    if (p.url) add(byUrl, canonicalUrl(p.url).replace(/\/+$/, "").toLowerCase(), p);
     if (p.mbo_url) {
-      byMboUrl.set(String(p.mbo_url).trim().replace(/\/+$/, "").toLowerCase(), p);
-      byMboHandle.set(tailOf(p.mbo_url), p);
+      add(byMboUrl, String(p.mbo_url).trim().replace(/\/+$/, "").toLowerCase(), p);
+      add(byMboHandle, tailOf(p.mbo_url), p);
     }
   }
   const matched = [], unmatched = [];
   const seenIds = new Set();
   for (const r of rows) {
-    let hit = null;
+    let hits = null;
     if (r.url) {
       const c = canonicalUrl(r.url).replace(/\/+$/, "").toLowerCase();
-      hit = byUrl.get(c) || byMboUrl.get(c) || byMboHandle.get(tailOf(r.url));
+      hits = byUrl.get(c) || byMboUrl.get(c) || byMboHandle.get(tailOf(r.url));
     }
-    if (!hit && r.handle) hit = byMboHandle.get(r.handle.toLowerCase());
-    if (!hit) { unmatched.push({ row: r.row, url: r.url, handle: r.handle }); continue; }
-    if (seenIds.has(hit.id)) continue;
-    seenIds.add(hit.id);
-    matched.push({ row: r.row, id: hit.id, key: hit.key, brand: hit.brand, url: hit.url, mbo_url: hit.mbo_url, base_price: hit.base_price });
+    if (!hits && r.handle) hits = byMboHandle.get(r.handle.toLowerCase());
+    if (!hits) { unmatched.push({ row: r.row, url: r.url, handle: r.handle }); continue; }
+    for (const hit of hits) {
+      if (seenIds.has(hit.id)) continue;
+      seenIds.add(hit.id);
+      matched.push({ row: r.row, id: hit.id, key: hit.key, brand: hit.brand, url: hit.url, mbo_url: hit.mbo_url, base_price: hit.base_price });
+    }
   }
   return { urlCol, handleCol, total: rows.length, matched, unmatched };
 }
@@ -1500,23 +1513,21 @@ export async function classifyProductRows(mboId, rows) {
   const invalid = (rows || []).length - clean.length;
   const existing = await withTenant(mboId, (db) =>
     db.q("SELECT key, url, mbo_url, base_price, brand FROM products WHERE mbo_id=$1", [mboId]));
-  // Owner request 2026-10-14: a product is the PAIR (designer URL + MBO URL), not the
-  // designer URL alone -- the same designer page listed under two different Studio East
-  // products is two rows. A sheet row with a BLANK mbo_url has no pair to compare, so it
-  // falls back to the designer URL alone (byDesigner) and can't spawn duplicates.
+  // A product is ALWAYS the PAIR (designer URL + MBO URL) -- never one URL alone.
+  // A blank MBO URL is just an empty half of the pair, so it only matches a row
+  // that also has no MBO URL.
   const pairOf = (url, mbo) => productIdentity(url) + "||" + productIdentity(mbo);
-  const byPair = new Map(), byDesigner = new Map();
-  const push = (m, k, p) => { if (!m.has(k)) m.set(k, []); m.get(k).push(p); };
+  const byPair = new Map();
   for (const p of existing) {
-    push(byDesigner, productIdentity(p.url), p);
-    push(byPair, pairOf(p.url, p.mbo_url), p);
+    const k = pairOf(p.url, p.mbo_url);
+    if (!byPair.has(k)) byPair.set(k, []);
+    byPair.get(k).push(p);
   }
   const fresh = [], unchanged = [], differs = [];
   const seen = new Set();
   for (const r of clean) {
-    const hasMbo = !!String(r.mbo_url || "").trim();
-    const id = hasMbo ? pairOf(r.url, r.mbo_url) : productIdentity(r.url);
-    const hits = hasMbo ? byPair.get(id) : byDesigner.get(id);
+    const id = pairOf(r.url, r.mbo_url);
+    const hits = byPair.get(id);
     if (!hits) {
       // The same designer+MBO pair listed twice in one sheet is one product, not two — otherwise the
       // upload reintroduces exactly the duplication this function exists to stop.
@@ -1526,7 +1537,7 @@ export async function classifyProductRows(mboId, rows) {
       continue;
     }
     const cur = hits[0];
-    const mboChanged = !!r.mbo_url && String(r.mbo_url).trim() !== String(cur.mbo_url || "").trim();
+    const mboChanged = false; // the MBO URL is half the match key, so it can't differ
     const priceChanged = Number(cur.base_price) !== Number(r.base_price);
     if (!mboChanged && !priceChanged) {
       unchanged.push({ url: cur.url, brand: cur.brand, base_price: cur.base_price, copies: hits.length });

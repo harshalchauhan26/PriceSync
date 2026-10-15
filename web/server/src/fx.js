@@ -44,7 +44,10 @@ async function fetchRates() {
 export async function rates(mboId, marketOnly = false) {
   if (Date.now() - cache.at > TTL || !Object.keys(cache.rates).length) {
     try { cache = { at: Date.now(), rates: await fetchRates() }; }
-    catch { if (!Object.keys(cache.rates).length) cache = { at: Date.now(), rates: { ...FALLBACK } }; }
+    // Stamp `at` even on failure so a down provider is retried once per TTL,
+    // not on every single call -- and keep last known-good rates over the
+    // generic fallback table when we have them.
+    catch { cache = { at: Date.now(), rates: Object.keys(cache.rates).length ? cache.rates : { ...FALLBACK } }; }
   }
   return marketOnly ? { ...cache.rates } : { ...cache.rates, ...(overrides.get(mboId) || {}) };
 }
