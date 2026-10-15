@@ -404,7 +404,7 @@ tenantRouter.post("/products/add", wrap(async (req, res) => {
   // Existing rows move only when the user explicitly ticked the differs group.
   const applyDiffs = req.body.apply_diffs === true || req.body.apply_diffs === "true";
   const r = await store.addProducts(mboId, rows, { applyDiffs });
-  res.json({ ok: true, ...r, counts: await store.counts(mboId) });
+  res.json({ ok: true, ...r });
 }));
 
 // ---------- import ----------
@@ -430,14 +430,14 @@ tenantRouter.post("/import", upload.single("file"), wrap(async (req, res) => {
       replace: req.body.mode !== 'add', contains: req.body.contains || '', domains,
     });
     pendingUploads.delete(req.sessionID);
-    res.json({ ok: true, ...r, counts: await store.counts(mboId), imported_count: await store.countImported(mboId) });
+    res.json({ ok: true, ...r, imported_count: await store.countImported(mboId) });
   }
   catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 }));
 tenantRouter.post("/import/commit", wrap(async (req, res) => {
   const mboId = req.mboId;
   const r = await store.commitImportToProducts(mboId);
-  res.json({ ok: true, ...r, counts: await store.counts(mboId) });
+  res.json({ ok: true, ...r });
 }));
 
 // ---------- review ----------
@@ -456,7 +456,7 @@ tenantRouter.get("/review/items_by_brand", wrap(async (req, res) => {
 tenantRouter.post("/review/hide", wrap(async (req, res) => {
   const it = await store.dismissRow(req.mboId, req.body.row);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
-  res.json({ ok: true, counts: await store.counts(req.mboId) });
+  res.json({ ok: true });
 }));
 // "Master Clean" — hides every row the Review table is currently showing
 // (same scope as items_by_brand, empty brands = all). UPDATE flag only,
@@ -465,7 +465,7 @@ tenantRouter.post("/review/hide_all", wrap(async (req, res) => {
   const mboId = req.mboId;
   const brands = Array.isArray(req.body.brands) ? req.body.brands.filter(Boolean) : [];
   const removed = await store.dismissReviewByBrands(mboId, brands);
-  res.json({ ok: true, removed, counts: await store.counts(mboId) });
+  res.json({ ok: true, removed });
 }));
 tenantRouter.get("/review/brands", wrap(async (req, res) => res.json({ brands: (await store.vendors(req.mboId, req.query.kind)).map((v) => ({ brand: v.vendor, count: v.count })) })));
 
@@ -586,10 +586,12 @@ tenantRouter.post("/review/decide", wrap(async (req, res) => {
     // Approve only archives to History now — the Shopify push is a separate,
     // deliberate step from the History tab (push/push_all), not automatic.
     res.json({ ok: true, final_price: approved.final, push_currency: approved.pushCur, archived: true });
-  } else {
+  } else if (req.body.decision === "rejected") {
     await q("UPDATE products SET decision=$1,note=$2,decided_at=$3 WHERE mbo_id=$4 AND id=$5",
       [req.body.decision, req.body.note || "", new Date().toISOString(), mboId, req.body.row]);
     res.json({ ok: true });
+  } else {
+    res.status(400).json({ ok: false, error: `invalid decision: "${req.body.decision}"` });
   }
 }));
 tenantRouter.post("/review/update_base", wrap(async (req, res) => {
@@ -621,7 +623,7 @@ tenantRouter.post("/review/update_base", wrap(async (req, res) => {
     WHERE mbo_id=$5 AND id=$6`, [baseInr, baseUsd, baseCurrency, now, mboId, it.id]);
   await q("UPDATE import_catalog SET base_price=$1, base_currency=$2 WHERE mbo_id=$3 AND key=$4", [baseInr, baseCurrency, mboId, it.key]);
   await store.clearBuckets(mboId, q, it.key);
-  res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, base_currency: baseCurrency, currency: cur, native: isNative, counts: await store.counts(mboId) });
+  res.json({ ok: true, base_price: baseInr, base_usd: baseUsd, base_currency: baseCurrency, currency: cur, native: isNative });
 }));
 tenantRouter.post("/review/update_base_all", wrap(async (req, res) => {
   const mboId = req.mboId;
@@ -648,7 +650,7 @@ tenantRouter.post("/review/update_base_all", wrap(async (req, res) => {
     await store.clearBuckets(mboId, q, r.key);
     updated++;
   }
-  res.json({ ok: true, updated, counts: await store.counts(mboId) });
+  res.json({ ok: true, updated });
 }));
 tenantRouter.post("/review/delete", wrap(async (req, res) => {
   const mboId = req.mboId;
@@ -657,7 +659,7 @@ tenantRouter.post("/review/delete", wrap(async (req, res) => {
   await q("DELETE FROM products WHERE mbo_id=$1 AND id=$2", [mboId, req.body.row]);
   await q("DELETE FROM import_catalog WHERE mbo_id=$1 AND key=$2", [mboId, it.key]);
   await store.clearBuckets(mboId, q, it.key);
-  res.json({ ok: true, counts: await store.counts(mboId) });
+  res.json({ ok: true });
 }));
 
 // ---------- Delete tab: browse/select/permanently delete, or delete by sheet ----------
@@ -690,7 +692,7 @@ tenantRouter.post("/review/rerun", wrap(async (req, res) => {
   const it = await one("SELECT * FROM products WHERE mbo_id=$1 AND id=$2", [mboId, req.body.row]);
   if (!it) return res.status(404).json({ ok: false, error: "unknown row" });
   const fresh = await pipe.rerunOne(mboId, it);
-  res.json({ ok: true, item: fresh, state: fresh?.state, counts: await store.counts(mboId) });
+  res.json({ ok: true, item: fresh, state: fresh?.state });
 }));
 // Archives rows to History one row/transaction at a time. Awaited by both
 // callers (BUG-014): it used to be fire-and-forget, so the route responded
@@ -758,7 +760,7 @@ tenantRouter.post("/review/reject_all", wrap(async (req, res) => {
   const where = `mbo_id=$1 AND state=$2 AND decision='pending' AND brand IN (${brands.map((_, i) => `$${i + 5}`).join(",")})`;
   const p = [mboId, state, req.body.note || "", new Date().toISOString(), ...brands];
   const r = await q(`UPDATE products SET decision='rejected', note=$3, decided_at=$4 WHERE ${where} RETURNING id`, p);
-  res.json({ ok: true, rejected: r.length, counts: await store.counts(mboId) });
+  res.json({ ok: true, rejected: r.length });
 }));
 // Hides the current tab+vendor scope from the review queue permanently —
 // an UPDATE flag (review_dismissed_at), never a delete. Product/price data
@@ -767,7 +769,7 @@ tenantRouter.post("/review/reject_all", wrap(async (req, res) => {
 tenantRouter.post("/review/dismiss_view", wrap(async (req, res) => {
   const mboId = req.mboId;
   const removed = await store.dismissView(mboId, req.body.kind, (req.body.brands || []).filter(Boolean));
-  res.json({ ok: true, removed, counts: await store.counts(mboId) });
+  res.json({ ok: true, removed });
 }));
 
 // ---------- history ----------

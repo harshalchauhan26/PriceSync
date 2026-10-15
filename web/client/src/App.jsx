@@ -459,6 +459,7 @@ function Pipeline({admin}) {
   const [st,setSt]=useState({entries:[],matched:0,mismatch:0,errors:0,total_rows:0,current_row:0,elapsed:0,message:"Idle.",running:false,phase:"idle",log_total:0});
   const [cfg,setCfg]=useState({concurrency:16,timeout_ms:12000,batch_size:250,rest_between:2,threads:4,safe_retry:true,simulation:false,data_source:"database"});
   const [vendors,setVendors]=useState([]); const [cat,setCat]=useState({total:0}); const [curSel,setCurSel]=useState("INR");
+  const [curBusy,setCurBusy]=useState(false); const [syncBusy,setSyncBusy]=useState(false);
   const cursor=useRef(0), logRef=useRef(null);
   const vsel=brands;
   // {kind:"starting"|"stopping", t0, est} while the engine is mid-transition.
@@ -533,20 +534,28 @@ function Pipeline({admin}) {
   };
   const setCurrency=async()=>{
     if(!admin) return toast("Admin only","err");
+    if(curBusy) return;
     if(!confirm(`Set currency to ${curSel} for ${vsel.length?"selected":"ALL"} products?\n\nPrice numbers are NOT changed — only the currency label.`)) return;
     const scope=vsel.length?vendors.filter(v=>vsel.includes(v.vendor)).reduce((a,v)=>a+v.count,0):(cfg.data_source==="imported"?cat.imported:cat.total);
-    const r=await aj("/api/products/set_currency",{currency:curSel,vendors:vsel});
-    r.ok?toast(`Currency set to ${r.currency} on ${fmtInt(r.updated)} products`,"ok"):toast(r.error||"Failed","err");
-    refreshMeta();
+    setCurBusy(true);
+    try {
+      const r=await aj("/api/products/set_currency",{currency:curSel,vendors:vsel});
+      r.ok?toast(`Currency set to ${r.currency} on ${fmtInt(r.updated)} products`,"ok"):toast(r.error||"Failed","err");
+      refreshMeta();
+    } finally { setCurBusy(false); }
   };
   const commitSheet=async()=>{
     if(!admin) return toast("Admin only","err");
+    if(syncBusy) return;
     if(!cat.imported) return toast("Upload a sheet first","err");
     if(!confirm(`Sync database to the sheet?\n\nThe ${fmtInt(cat.imported)} products in the sheet will be added/updated in the database. Nothing already in the database is ever removed by this.`)) return;
     toast("Syncing…");
-    const r=await aj("/api/import/commit",{});
-    r.ok?toast(`Synced → ${fmtInt(r.total)} in DB (${fmtInt(r.added)} added)`,"ok"):toast(r.error||"Failed","err");
-    refreshMeta();
+    setSyncBusy(true);
+    try {
+      const r=await aj("/api/import/commit",{});
+      r.ok?toast(`Synced → ${fmtInt(r.total)} in DB (${fmtInt(r.added)} added)`,"ok"):toast(r.error||"Failed","err");
+      refreshMeta();
+    } finally { setSyncBusy(false); }
   };
 
   const pct=st.total_rows?Math.min(100,st.current_row/st.total_rows*100):0;
@@ -594,8 +603,8 @@ function Pipeline({admin}) {
           }}/>
         </div>
         <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid var(--border)"}}>
-          <button className="btn btn-primary btn-sm" style={{width:"100%",justifyContent:"center"}} onClick={commitSheet} disabled={!admin||!cat.imported}>
-            <Icon n="dl" s={12}/>Sync database to sheet
+          <button className="btn btn-primary btn-sm" style={{width:"100%",justifyContent:"center"}} onClick={commitSheet} disabled={!admin||!cat.imported||syncBusy}>
+            <Icon n="dl" s={12}/>{syncBusy?"Syncing…":"Sync database to sheet"}
           </button>
           <div style={{fontSize:10,color:"var(--on3)",marginTop:6}}>Staged: <b style={{color:"var(--on)"}}>{fmtInt(cat.imported)}</b></div>
         </div>
@@ -683,7 +692,7 @@ function Pipeline({admin}) {
         <div className="pill-group">
           {["INR","USD","CAD"].map(c=><button key={c} className={`pill${curSel===c?" active":""}`} onClick={()=>setCurSel(c)}>{c}</button>)}
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={setCurrency} disabled={!admin}><Icon n="check" s={12}/>Set currency</button>
+        <button className="btn btn-ghost btn-sm" onClick={setCurrency} disabled={!admin||curBusy}><Icon n="check" s={12}/>{curBusy?"Setting…":"Set currency"}</button>
         <div style={{marginLeft:"auto",display:"flex",gap:8}}>
           <button className="btn btn-ghost btn-sm" onClick={clearLog}><Icon n="x" s={12}/>Clear log</button>
         </div>
